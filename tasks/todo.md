@@ -1,0 +1,966 @@
+# Task list: amqp.go v0.1.0
+
+> Live checklist. Tick boxes as work progresses. See `plan.md` for
+> phase rationale, dependency graph, and risks. See `SPEC.md` for the
+> public API surface.
+
+Sizing: **XS** 1 file · **S** 1–2 files · **M** 3–5 files · **L** 5–8.
+Any **L** here should be split into S/M before starting.
+
+Total: **54 tasks**, **9 phases**. Rev 6 added T18b
+(HandlerTimeoutVerdict matrix), T38b (`examples/idempotent_consume/`),
+T38c (`examples/ordered_consume/`) for the specialist-review fixes:
+PublishRetry duplicate contract, HandlerTimeout verdict consistency,
+synchronous reconnect barrier + degraded state, ConfirmTimeout
+default 30 s, Concurrency vs ordering, default conn counts 2/2,
+consumer-tag UUID default, AMQPCode 312/313, UserID validation,
+Replier missing-DLX validation, `x-death` reason filter, SASL
+EXTERNAL fail-closed, `errorlint`, `basic.cancel` surfacing. See
+`plan.md` "Revision history" Rev 6 for full rationale.
+
+**Rev 7 — cross-check tightening pass (no structural changes).** Six
+acceptance criteria sharpened so they live on the producing task
+instead of the T40 godoc sweep: **T07** (`AuthenticatedUser()`
+populated by `Dial` + PLAIN/EXTERNAL unit cases), **T13** + **T18**
+(functional-options last-wins on `PublisherBuilder` and
+`ConsumerBuilder`), **T16** (`AttachTo` snapshots keyed by `*Topology`
+pointer address — replace-on-same-pointer, append-on-different-
+pointer), **T34** (`WithFrameMax` and `WithHeartbeat` godoc carry the
+SPEC §6.1 sizing tiers; `WithHeartbeat(0)` emits a `Dial` warning),
+**T41** (`internal/amqperror` and `internal/redact` added to the
+≥95% critical-path coverage list per SPEC §9 line 2107–2109).
+Task count unchanged (54); phase layout unchanged; SPEC.md
+unchanged.
+
+---
+
+## Phase 1 — Foundation: a Connection that survives outages
+
+### [x] T01 — Repo bootstrap · S
+Set up the empty Go module with the bare-minimum dev ergonomics.
+- **Acceptance:**
+  - [ ] `go.mod` declares `module github.com/brunomvsouza/amqp` and Go 1.23.
+  - [ ] `LICENSE` is MIT with the user's copyright.
+  - [ ] `Makefile` exposes `build`, `test`, `test-integration`, `test-conformance`, `lint`, `mocks`, `doc`, `hooks`.
+  - [ ] `make hooks` writes `.git/hooks/pre-commit` running `make lint test` (opt-in only; never auto-installed).
+  - [ ] `.golangci.yml` enables `errcheck`, `govet`, `staticcheck`, `gosec`, `revive`, `gocritic`, `unparam`, `bodyclose`, `nilerr`, **`errorlint`** (catches `err == ErrFoo` typos and missing `%w` verbs that would corrupt the error-classification surface).
+  - [ ] `.gitignore` covers Go build artifacts.
+- **Verify:** `go build ./...` and `golangci-lint run ./...` both succeed on an empty package; `make hooks` installs hook, hook fires on commit.
+- **Files:** `go.mod`, `go.sum`, `LICENSE`, `Makefile`, `.golangci.yml`, `.gitignore`, `doc.go`.
+- **Deps:** none.
+
+### [ ] T02 — Sentinel errors, type aliases, constants · M
+Static foundation that everything else imports. Rev 5 added three
+new sentinels (`ErrPublishNacked`, `ErrChannelPoolExhausted`,
+`ErrBatchTooLarge`) and the `SASLMechanism` typed enum. Rev 6 adds
+three more (`ErrReconnecting`, `ErrTopologyRedeclareFailed`,
+`ErrConsumerCancelled`) plus the `TimeoutVerdict` typed enum.
+- **Acceptance:**
+  - [ ] All sentinels from SPEC §6.8 declared in `errors.go`, including
+        `ErrConnectionBlocked`, **`ErrChannelPoolExhausted`** (transient),
+        **`ErrPublishNacked`** (transient), **`ErrBatchTooLarge`**
+        (permanent), **`ErrReconnecting`** (transient — connection in
+        reconnect barrier), **`ErrTopologyRedeclareFailed`** (permanent
+        — connection in degraded state), **`ErrConsumerCancelled`**
+        (consumer received `basic.cancel`; not a classifier sentinel),
+        the 15 AMQP reply-code sentinels (311, 320, 402–406, 501–506,
+        530, 540, 541), and the classifier sentinels
+        `ErrTransient`/`ErrPermanent`.
+  - [ ] `AMQPCode(err) (uint16, bool)` returns the AMQP reply code
+        embedded in a wrapped sentinel (`ErrAccessRefused` → 403, etc.)
+        and `(0, false)` otherwise.
+  - [ ] `IsTransient(err)` / `IsPermanent(err)` classifier helpers
+        implemented per the matrix in SPEC §6.8: transient: 311, 320,
+        504, 541, wrapped `ErrTransient`, `ErrPublishNacked`,
+        `ErrChannelPoolExhausted`, `ErrConnectionBlocked`,
+        `ErrConfirmTimeout`, **`ErrChannelClosed`**,
+        **`ErrReconnecting`**; permanent: 402–406, 501, 502, 503, 505,
+        **506**, 530, 540, wrapped `ErrPermanent`,
+        **`ErrTopologyRedeclareFailed`**. **`506`
+        (ErrResourceError) is permanent** by decision (SPEC §6.8 godoc
+        explains; was transient in Rev 4).
+  - [ ] `types.go` exports `Headers map[string]any`, `DeliveryMode uint8`
+        (with `DeliveryModePersistent` as the zero value),
+        `ExchangeKind string` (Direct/Fanout/Topic/Headers/Delayed),
+        `OverflowPolicy string` (DropHead/RejectPublish/RejectPublishDLX),
+        `QueueType string` (Classic/Quorum/Stream), **`SASLMechanism string`
+        with constants `SASLPlain` and `SASLExternal`**, **`TimeoutVerdict uint8`
+        with constants `TimeoutNackNoRequeue` (zero value) and
+        `TimeoutNackRequeue`**.
+  - [ ] Table-driven tests cover `AMQPCode`, `IsTransient`, `IsPermanent`
+        for `nil`, plain `errors.New`, direct sentinels, and wrapped
+        sentinels (via `fmt.Errorf("...: %w", sentinel)`). Includes
+        an explicit test that `IsTransient(ErrResourceError) == false`
+        and `IsPermanent(ErrResourceError) == true`.
+- **Verify:** `make test lint` clean. `go vet ./...` clean.
+- **Files:** `errors.go`, `errors_test.go`, `types.go`, `types_test.go` (constants).
+- **Deps:** T01.
+
+### [ ] T03 — `log/` package · S
+Pluggable logger with three adapters. All adapters route through
+`internal/redact.URI` before emitting any string that contains an
+AMQP URI.
+- **Acceptance:**
+  - [ ] `Logger` interface matches SPEC §6.9 contract (`Debug/Info/Warning/Error` + `f` variants).
+  - [ ] `NoOp`, `Slog` (wraps `log/slog`), `Std` (wraps stdlib `log`) adapters present.
+  - [ ] Each adapter has a passing round-trip test (capture output, assert level + message).
+  - [ ] Each adapter has a passing redaction test: pass a string containing `amqp://user:p%40ss@h:5672/v` and assert the captured output contains `amqp://***@h:5672/v` and never `p@ss` / `p%40ss`. Covers `amqp://` and `amqps://` schemes and URI-encoded passwords.
+- **Verify:** `go test ./log/...` passes.
+- **Files:** `log/logger.go`, `log/noop.go`, `log/slog.go`, `log/std.go`, `log/*_test.go`.
+- **Deps:** T02, **T07c**.
+
+### [ ] T04 — `metrics/` package · M
+Three metric interfaces, Prometheus default, NoOp. Rev 5 added
+bounded labels, opt-in high-cardinality, configurable latency
+buckets, and a set of mandatory metrics.
+- **Acceptance:**
+  - [ ] `ClientMetrics`, `PublisherMetrics`, `ConsumerMetrics` interfaces defined per SPEC §6.9.
+  - [ ] `Prometheus*` implementations register their collectors lazily into a passed-in `prometheus.Registerer` (no global `prometheus.DefaultRegisterer`).
+  - [ ] **Default Prometheus labels are bounded** per SPEC §6.9: `ClientMetrics{addr, role, connection_name}`, `PublisherMetrics{exchange, outcome}`, `ConsumerMetrics{queue, outcome}`. `addr` is host:port (no userinfo, redacted via `internal/redact.URI`).
+  - [ ] **Opt-in high-cardinality labels** via `WithMetricsLabels(MetricsLabelRoutingKey, MetricsLabelMessageType)` on connection or per-builder.
+  - [ ] **Configurable histogram buckets** via `WithLatencyBuckets([]float64)`; default `[0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 5000]` ms.
+  - [ ] **Mandatory metrics** (always present): `connection_reconnects_total{role}`, `connection_blocked_seconds{role}`, `consumer_resubscribed_total{queue}`, `consumer_handler_aborted_channel_closed_total{queue}`, `publisher_in_flight{exchange}` (gauge), `publisher_publish_seconds{exchange, outcome}` (histogram), `consumer_handler_seconds{queue, outcome}` (histogram).
+  - [ ] `NoOp*` implementations have zero allocations on every method (verified with `testing.AllocsPerRun`).
+- **Verify:** `go test ./metrics/...` passes; `go test -bench=BenchmarkNoOp -benchmem ./metrics/...` reports `0 allocs/op`; integration test scrapes a `prometheus.Registry` and asserts each mandatory metric exists with the documented labels after a 5-second canned workload.
+- **Files:** `metrics/metrics.go`, `metrics/prometheus.go`, `metrics/noop.go`, `metrics/*_test.go`.
+- **Deps:** T02, **T07c**.
+
+### [ ] T05 — `otel/` package · S
+Tracer interface with NoOp default and AMQP header propagator
+skeleton. Pinned to **OpenTelemetry Messaging semantic conventions
+v1.27.0+**.
+- **Acceptance:**
+  - [ ] `Tracer` interface wraps the subset of OTel APIs used by Publisher/Consumer (start span, end span, set attributes, record error).
+  - [ ] `NoOpTracer` is the package-level zero value; methods are no-ops.
+  - [ ] `Propagator` struct with `Inject(ctx, Headers)` and `Extract(Headers) ctx` matching OTel Messaging semantic conventions **v1.27.0** (uses `go.opentelemetry.io/otel/semconv/v1.27.0`).
+  - [ ] Header keys used by `Propagator`: `traceparent`, `tracestate`. Unit test asserts no collision with CloudEvents binary-mode `ce-*` headers.
+  - [ ] Package godoc references SPEC §6.9 for the span-attribute matrix on the wire; **Publisher/Consumer populate those attributes in T27/T28** (not required for T05 merge).
+- **Verify:** Unit tests assert round-trip `Inject → Extract` preserves traceparent. Snapshot test against `go.opentelemetry.io/otel/semconv/v1.27.0` attribute keys (will fail loudly if the semconv pin is bumped without intention). **Full span attributes on publish/consume paths are acceptance-tested in T27/T28.**
+- **Files:** `otel/tracer.go`, `otel/propagation.go`, `otel/*_test.go`.
+- **Deps:** T02.
+
+### [ ] T06 — `internal/reconnect` + `RetryPolicy` · M
+Generic supervised reconnect loop usable by Connection.
+- **Acceptance:**
+  - [ ] `RetryPolicy` struct (exposed in root package) with exponential backoff + jitter; `Min`, `Max`, `Factor`, `Retries`, `WithoutJitter`.
+  - [ ] `internal/reconnect.Loop` wraps a connect function, applies the policy, exposes `Stop(ctx)` and `OnReconnect(func())`.
+  - [ ] No `time.Sleep` — uses `time.NewTimer` so contexts can cancel.
+- **Verify:** Unit tests assert: 3 attempts then succeed; cancel mid-backoff returns `ctx.Err()`; `goleak.VerifyNone` clean.
+- **Files:** `retry.go`, `internal/reconnect/loop.go`, `internal/reconnect/*_test.go`.
+- **Deps:** T02, T03.
+
+### [ ] T07 — `connection.go`: single-TCP Dial, Health, Close · M
+Wire `amqp091-go` + reconnect loop + metric/logger/tracer plumbing
+for a **single TCP connection**. Multi-conn fan-out lands in T07d;
+T07 keeps the per-socket lifecycle focused.
+- **Acceptance:**
+  - [ ] `Dial(ctx, opts...) (*Connection, error)` with the single-conn subset of options listed in SPEC §6.1 (`WithAddr`, `WithAddrs`, `WithTLSConfig`, `WithAuth`, `WithSASLMechanism`, `WithVHost`, `WithHeartbeat`, `WithChannelMax`, `WithFrameMax`, `WithDialer`, `WithClientProperties`, `WithConnectionName`, `WithConnectDelay`, `WithReconnectBackoff`, `WithOnBlocked`, **`WithOnTopologyDegraded`**, `WithLogger`, `WithMetrics`, `WithoutMetrics`, `WithTracer`).
+  - [ ] **`Connection.Logger()` is removed from the public API** (was a leak of internals — see Rev 5 review). Internal logging continues unchanged.
+  - [ ] **`(*Connection).AuthenticatedUser() string`** exported for `Publisher` client-side `UserID` validation (T12/T13).
+  - [ ] **`AuthenticatedUser()` populated by `Dial` before it returns** (Rev 7): the field is set from the SASL outcome on the underlying `amqp091-go` connection so any `Publisher` built *after* `Dial` returns observes a non-empty value. Unit test matrix: (a) PLAIN auth with `WithAuth("alice", "…")` → returns `"alice"`; (b) SASL EXTERNAL with a client cert whose subject is `CN=svc-orders,UID=42` → returns the broker-side resolved identity (typically the CN); (c) on a connection in degraded state, the field is still readable (frozen at last successful authentication).
+  - [ ] **`(*Connection).ForceReconnect() error`** exported operator helper for recovering from degraded state without restarting the process.
+  - [ ] `Connection.Health(ctx)` opens a temporary channel and closes it.
+  - [ ] `Connection.Close(ctx)` drains in-flight work up to the context deadline.
+  - [ ] `WithOnBlocked` callback fires when broker sends `connection.blocked`.
+  - [ ] While the connection is broker-blocked, publishes wait until unblock or `ctx.Done()`; on ctx cancel, return `ErrConnectionBlocked` (wrapping `ctx.Err()`).
+  - [ ] **Synchronous reconnect barrier.** On every reconnect, run channel re-open → `Topology.AttachTo` redeclare → consumer re-`basic.consume` + re-`basic.qos` → user `WithOnReconnect` synchronously, in that order. `Publisher.Publish` routed to a reconnecting connection blocks on a per-conn `sync.Cond` until step 2 completes; on `ctx` cancel returns `ErrReconnecting` (transient, wrapping `ctx.Err()`). Mandatory metric `topology_redeclare_seconds{role}` (histogram) records the barrier duration per cycle.
+  - [ ] **Degraded-state machine.** If the redeclare in step 2 fails, increment `connection_degraded_total{role, reason}`, fire `WithOnTopologyDegraded(func(error))` exactly once per transition (re-arm on recovery), and hold the state: subsequent `Publisher.Publish` returns `ErrTopologyRedeclareFailed` (permanent), consumers do NOT re-issue `basic.consume`. The supervisor retries redeclare on every next reconnect cycle; first success clears the flag and resumes traffic. `(*Connection).ForceReconnect()` can trigger a manual reconnect cycle for operator recovery.
+  - [ ] `Dial` validates `WithChannelPoolSize` against the negotiated `channel-max`; returns `ErrInvalidOptions` if pool > channel-max.
+  - [ ] `Dial` rejects `WithFrameMax < 4096` with `ErrInvalidOptions` (AMQP-spec minimum).
+  - [ ] **`Dial` validates SASL EXTERNAL fail-closed:** with `WithSASLMechanism(SASLExternal)`, require (a) `WithTLSConfig` provided, (b) `len(cfg.Certificates) > 0 || cfg.GetClientCertificate != nil`, (c) endpoint scheme is `amqps://`. Any unmet returns `ErrInvalidOptions` with the specific reason.
+  - [ ] **`Dial` logs a warning** when `WithPublisherConnections(1)` or `WithConsumerConnections(1)` (single socket = full-availability gap during reconnect).
+  - [ ] Default `WithChannelMax(0)` triggers server-driven negotiation (not the old `2047` literal).
+  - [ ] Default `WithConnectionName` is `<binary>-<hostname>-<pid>`; verified via `rabbitmqctl list_connections name`.
+  - [ ] Default tracer is NoOp (no nil-checks in code paths).
+  - [ ] `connection_reconnects_total{role=single}` increments exactly once per reconnect (not in a loop); regression test forces 3 reconnects and asserts the counter reads exactly 3.
+- **Verify:** Integration test (testcontainers RabbitMQ): Dial succeeds, Health passes, Close completes cleanly. `goleak.VerifyNone` at test exit. A second test sets `WithChannelPoolSize` higher than `WithChannelMax` and asserts `ErrInvalidOptions`.
+- **Files:** `connection.go`, `options_connection.go`, `connection_test.go`, `connection_integration_test.go`.
+- **Deps:** T03, T04, T05, T06, **T07c**.
+
+### [ ] T07b — `internal/amqperror`: AMQP reply-code translation · S
+Centralised translator that converts `*amqp091.Error` (carried by
+`amqp091-go` on channel/connection close) into wraps of the SPEC §6.8
+reply-code sentinels, and powers `AMQPCode` + `IsTransient` /
+`IsPermanent`.
+- **Acceptance:**
+  - [ ] `amqperror.Wrap(err error) error` returns the input wrapped with the appropriate sentinel (e.g. `*amqp091.Error{Code: 404}` → wraps `ErrNotFound`). Non-AMQP errors pass through unchanged.
+  - [ ] `AMQPCode` in the root package delegates to the table maintained here; covers every code listed in SPEC §6.8.
+  - [ ] `Wrap` preserves the original error so `errors.As(err, &amqp091.Error{})` still works (chain length 2).
+  - [ ] Helper table mapping is exhaustive against the AMQP 0-9-1 channel/connection-close reply codes. Codes that are **not** channel-close codes — notably `312 NO_ROUTE` and `313 NO_CONSUMERS`, which travel in `basic.return` frames and are surfaced by the publisher path as `ErrUnroutable` — are documented as intentional omissions in a header comment with a one-line rationale ("not a channel-close code; handled in `internal/confirms` via `basic.return`").
+  - [ ] **`IsTransient(ErrResourceError)` returns false** (506 is now permanent by default per SPEC §6.8 godoc); explicit table entry + unit test cover the change versus Rev 4 wording.
+- **Verify:** Table-driven unit test in `internal/amqperror/translate_test.go` runs every documented code through `Wrap` and asserts the right sentinel + classifier outcome.
+- **Files:** `internal/amqperror/translate.go`, `internal/amqperror/translate_test.go`.
+- **Deps:** T02.
+- **Blocks:** T07 (consumes the translator), and all downstream broker-touching tasks.
+
+### [ ] T07c — `internal/redact`: AMQP URI credential redaction · S
+Mandatory choke-point for the SPEC §8 "Always: redact credentials"
+rule. Every string the library hands to logs, metric labels, span
+attributes, or error messages that contains an AMQP URI passes
+through this helper.
+- **Acceptance:**
+  - [ ] `redact.URI(s string) string` replaces the `userinfo` component of any AMQP URI inside `s` with `***`, preserving scheme, host, port, vhost, and query string. Handles `amqp://`, `amqps://`, percent-encoded passwords (`%40` for `@`, etc.), and trailing-`/` variants.
+  - [ ] `redact.URIs([]string) []string` for the cluster-failover case.
+  - [ ] `redact.Error(err error) error` returns a new error whose `Error()` string is redacted; preserves the chain for `errors.Is`/`errors.As`.
+  - [ ] Table-driven unit tests cover: bare host (`amqp://h`), user-only (`amqp://u@h`), user+pass (`amqp://u:p@h`), percent-encoded pass (`amqp://u:p%40w@h:5672/v?heartbeat=10`), `amqps://`, multiple URIs in one string, malformed URIs (return unchanged).
+  - [ ] **Negative test**: scan the source tree for log/metric emission sites and assert each one routes through `redact.URI` before emitting (lint helper or audit doc — flagged in T45b for the runtime regression scan).
+  - [ ] **`FuzzRedactURI` fuzz target** exercising malformed URIs (truncated authority, double `@`, percent-decoding edge cases, IPv6 literal hosts, non-AMQP schemes mixed in) — asserts the redactor never panics and any returned string with a userinfo passes `regexp.MustCompile("://[^@]*:[^@]*@")` only when it was already malformed before.
+- **Verify:** `go test ./internal/redact/...` covers every shape; coverage ≥ 95%; `go test -fuzz=FuzzRedactURI -fuzztime=30s` clean locally.
+- **Files:** `internal/redact/redact.go`, `internal/redact/redact_test.go`, `internal/redact/redact_fuzz_test.go`.
+- **Deps:** none (pure helper, no AMQP deps).
+- **Blocks:** T03, T04, T07, T07d (all emit URI-bearing strings).
+
+### [ ] T07d — Multi-TCP fan-out by role · M
+SPEC §6.1 calls for `*Connection` to wrap a pool of TCP connections
+split by role. `amqp091-go` serializes I/O per `amqp.Connection`,
+so a single socket bounds confirm throughput. T07 covered the
+single-socket lifecycle; T07d adds the pool.
+- **Acceptance:**
+  - [ ] `WithPublisherConnections(n int)` **default 2** (Rev 6: was 1); opens `n` dedicated publisher TCP connections at `Dial`. Each has its own `internal/reconnect` supervisor. `n=1` is supported and emits a warning log at `Dial`.
+  - [ ] `WithConsumerConnections(n int)` **default 2**; same for consumers. Consumers are pinned to one of these by stable hash of consumer-tag. **Default consumer-tag is `ctag-<uuidv7>`** (generated at `ConsumerBuilder.Build`) so defaulted consumers hash to distinct values and actually fan out — pinning the empty string would collide every defaulted consumer onto the same socket.
+  - [ ] Connection-name suffix per socket: `<base>-pub-0..n-1` and `<base>-con-0..m-1`. Verified via `rabbitmqctl list_connections name`.
+  - [ ] `Publisher[M]` channel acquisition picks the **least in-flight** publisher connection's pool (load-balancing across sockets); falls back to any unblocked publisher connection if the chosen one is broker-blocked.
+  - [ ] Consumer pin stability under reconnect: when a consumer connection fails over, every pinned `Consumer[M]` follows it (re-issues `basic.consume` on the new channel of the same logical connection-id, not on a different consumer connection). Unit-tested with a simulated failover.
+  - [ ] `Close(ctx)` closes every TCP connection in the pool, draining publish + handler work first.
+  - [ ] Metric `connection_reconnects_total{role}` distinguishes `role=publisher` vs `role=consumer`.
+- **Verify:** Integration test with `WithPublisherConnections(3) + WithConsumerConnections(2)` asserts 5 sockets visible to `rabbitmqctl list_connections name`. Failover test: kill the consumer connection that hosts a known consumer, assert the consumer's re-subscribe lands on the same logical pin-index (verified via the named connection suffix). Bench in T44b exercises throughput.
+- **Files:** edits to `connection.go`, `options_connection.go`, new `internal/connpool/pool.go`, `internal/connpool/*_test.go`, `connection_multiconn_integration_test.go`.
+- **Deps:** T07, T07b, T07c.
+
+### [ ] T08 — `channelpool.go` per publisher TCP connection · M
+Internal channel pool used by publishers, **one pool per publisher
+TCP connection** (not a global pool across all publisher conns).
+- **Acceptance:**
+  - [ ] `channelPool` with `Acquire(ctx) (*amqp091.Channel, release func(), error)` semantics.
+  - [ ] Size driven by `WithChannelPoolSize(n)` (default 8); **applies per publisher TCP connection**, so `WithPublisherConnections(4)+WithChannelPoolSize(8) = 32` channels total.
+  - [ ] Channels are discarded and replaced when broker signals channel close.
+  - [ ] **`ErrChannelPoolExhausted`** returned from `Acquire(ctx)` when `ctx` is cancelled while waiting on a saturated pool. Classified `IsTransient`.
+  - [ ] Race-free: `go test -race` clean under concurrent Acquire/release.
+- **Verify:** Unit + integration tests; `goleak.VerifyNone`. Saturation test: pool size 1, two concurrent `Acquire` calls, second with a 50ms ctx — asserts `ErrChannelPoolExhausted`.
+- **Files:** `channelpool.go`, `channelpool_test.go`.
+- **Deps:** T07, T07d.
+
+### Checkpoint — Phase 1 done
+- [ ] `make lint test` clean.
+- [ ] Reconnect smoke test: kill broker, Connection recovers within
+      configured backoff window.
+- [ ] **1000** connect/disconnect cycles produce zero goroutine leaks.
+- [ ] Multi-conn fan-out demo: `WithPublisherConnections(4)` opens
+      4 sockets, throughput scales ≥ 3× over single-conn (see T44b).
+- [ ] No log line emitted during phase-1 integration contains a
+      clear-text password.
+- [ ] **Review with human before Phase 2.**
+
+---
+
+## Phase 2 — Producer: synchronous-with-confirm publish
+
+### [ ] T09 — `codec/` package + JSON · S
+Codec interface and the first implementation. Rev 5 makes JSON
+**strict by default** (`DisallowUnknownFields`) and adds the panic
+safety contract.
+- **Acceptance:**
+  - [ ] `Codec` interface: `Encode(any) ([]byte, error)`, `Decode([]byte, any) error`, `ContentType() string`.
+  - [ ] **`codec.NewJSON()` is strict by default** — `Decode` uses `json.NewDecoder(...).DisallowUnknownFields()`. An unknown field surfaces as `ErrInvalidMessage` wrapping the `json` error.
+  - [ ] **`codec.NewJSONLax()`** opt-in variant that tolerates unknown fields, for back-compat scenarios. Documented in godoc with explicit warning that schema drift becomes silent.
+  - [ ] Both variants share the same `ContentType` = `application/json`.
+  - [ ] **Panic safety contract** (consumed by Publisher / Consumer): Publisher/Consumer wrap every `Encode`/`Decode` call in `defer recover` and convert a recovered value into `ErrInvalidMessage` (wrapping `fmt.Errorf("codec panic: %v", r)`). A unit test in `publisher_test.go` / `consumer_test.go` injects a panicking fake codec and asserts the path returns `ErrInvalidMessage` without the goroutine crashing.
+  - [ ] Round-trip property tests for strict + lax + one fuzz target (`FuzzCodecJSON`).
+- **Verify:** `go test ./codec/...` + `go test -fuzz=FuzzCodecJSON -fuzztime=30s ./codec` (locally). Strict-default regression test: `NewJSON()` rejects `{"a":1,"b":2}` decoded into `struct{A int}` with `ErrInvalidMessage`; `NewJSONLax()` accepts it.
+- **Files:** `codec/codec.go`, `codec/json.go`, `codec/json_test.go`, `codec/json_fuzz_test.go`.
+- **Deps:** T02.
+
+### [ ] T10 — `message.go`: `Message[M]` struct · S
+Plain struct + default application at publish time. SPEC compliance
+fix: `ContentType` (MIME) is a separate field from `ContentEncoding`
+(transfer encoding).
+- **Acceptance:**
+  - [ ] All fields from SPEC §6.5 exported, including the **distinct** `ContentType` and `ContentEncoding`.
+  - [ ] Helper `(*Message[M]).applyDefaults(codec.Codec)` fills:
+    - `MessageID` ← UUID v7 (RFC 9562) if empty.
+    - `Timestamp` ← `time.Now()` if zero.
+    - `ContentType` ← `codec.ContentType()` if empty.
+    - **Does NOT** touch `ContentEncoding` — left empty unless user set it.
+  - [ ] `DeliveryModePersistent` is the zero value.
+  - [ ] `Headers` are validated against AMQP field-table value types before publish; unsupported Go types return `ErrInvalidMessage`.
+  - [ ] **Field godoc** (per SPEC §6.5 "Field notes"):
+    - `Priority`: documents wire range 0–255, RabbitMQ convention 0–9, and the broker's silent clamp against `x-max-priority`.
+    - `Expiration`: documents the AMQP shortstr wire format (ASCII milliseconds), sub-millisecond rounding to 0, and that `"0"` means "expire immediately".
+    - `Headers`: enumerates the supported AMQP field-table value types and references `ErrInvalidMessage` for rejections.
+    - `ContentType` vs `ContentEncoding`: one-line cross-reference clarifying the MIME-vs-transfer-encoding split.
+  - [ ] Unit tests cover defaulting, that `applyDefaults` doesn't overwrite user-set fields, and the Headers validation matrix (one happy + one rejected case per unsupported Go kind).
+- **Verify:** `go test -run TestMessage ./...`; `golangci-lint run --enable=revive` passes the missing-godoc rule on `message.go`.
+- **Files:** `message.go`, `message_test.go`.
+- **Deps:** T02, T09.
+
+### [ ] T11 — `internal/confirms` tracker · M
+Publisher confirm tracker preserved across reconnects. Rev 5 adds
+`basic.nack` from broker → `ErrPublishNacked` resolution.
+- **Acceptance:**
+  - [ ] `Tracker.Wait(deliveryTag, timeout)` returns ack/nack or `ErrConfirmTimeout`.
+  - [ ] Handles `multiple=true` ack/nack semantics correctly (a single ack with `multiple=true` and tag T resolves every pending publish with `tag <= T`).
+  - [ ] **`basic.nack` from broker → `ErrPublishNacked`.** A `nack` frame for a `delivery-tag` (possibly with `multiple=true`) resolves the matching `Wait` calls with `ErrPublishNacked` (transient classification). Covers RabbitMQ overflow policies (`reject-publish`, `reject-publish-dlx`) and mid-publish disk/memory alarms. Distinct from `basic.return` (which marks "returned" first and then resolves via `basic.ack` → `ErrUnroutable`).
+  - [ ] **`basic.return` / `basic.ack` correlation** for mandatory publishes: when a `Return` frame arrives, the tracker marks the matching `delivery-tag` as "returned" and **records the originating reply code (312 NO_ROUTE or 313 NO_CONSUMERS)**; the subsequent `basic.ack` for that tag resolves `Wait` with `ErrUnroutable` **wrapped with the recorded code** so `AMQPCode(err)` returns 312 or 313 (per SPEC §6.8 godoc). `OnReturn` callback fires synchronously **before** `Wait` returns so the user-visible publish completion order is: callback → error to caller. (See SPEC §6.2 "basic.return / basic.ack correlation".)
+  - [ ] Reset on channel close (in-flight publishes become `ErrChannelClosed`).
+  - [ ] **One tracker per channel.** Each acquired channel from the per-conn pool gets its own tracker; channel close drops the tracker; new channel from pool gets a fresh one.
+  - [ ] `goleak.VerifyNone` clean.
+- **Verify:** Table-driven unit tests covering ordered, out-of-order, multiple-ack, multiple-nack, return-then-ack (mandatory unroutable), broker-nack alone, broker-nack with `multiple=true`, and channel-close scenarios. The return-then-ack and nack-only tests use a hand-rolled fake `amqp091.Channel` that emits frames in the documented order.
+- **Files:** `internal/confirms/tracker.go`, `internal/confirms/*_test.go`.
+- **Deps:** T02.
+
+### [ ] T12 — Publisher + builder (no mandatory yet) · M
+- **Acceptance:**
+  - [ ] `PublisherFor[M](conn) *PublisherBuilder[M]` with builder methods from SPEC §6.2 (excluding Mandatory/OnReturn — those are T13). **Note:** no `Immediate()` method — the flag is unsupported by RabbitMQ.
+  - [ ] `Publisher.Publish(ctx, Message[M])` is synchronous-with-confirm. **Concurrency-safe**: many goroutines may share one `*Publisher[M]`; each call acquires a channel from the publisher-conn pool with `least-in-flight` selection (see T07d), publishes, awaits its own confirm, returns the channel. Verified by a `go test -race` stress with N=64 goroutines.
+  - [ ] `Publisher.Close(ctx)` drains in-flight publishes.
+  - [ ] `PublisherMetrics` calls fire for success and error paths; `publisher_in_flight{exchange}` gauge tracks outstanding confirms.
+  - [ ] Errors from the broker are wrapped via `internal/amqperror.Wrap`, so `errors.Is(err, ErrAccessRefused)` etc. work for publish failures.
+  - [ ] `ErrChannelPoolExhausted` surfaces when ctx is cancelled waiting on a saturated pool (asserted in a unit test against T08).
+- **Verify:** Integration test: publish a JSON message, fetch it via `rabbitmqadmin get`, assert body + properties (including the right `content-type` vs `content-encoding` placement). Concurrency test: 64 goroutines × 1000 publishes each = 64k publishes total, all confirmed, `go test -race` clean.
+- **Files:** `publisher.go`, `publisher_builder.go`, `publisher_test.go`, `publisher_integration_test.go`.
+- **Deps:** T07b, T07d, T08, T09, T10, T11.
+
+### [ ] T13 — Mandatory + Returns + Timeouts + PublishRetry + broker-nack + UserID + retry metric · M
+Rev 5 adds `PublishTimeout`, `PublishBatchMaxInFlight`,
+`PublishRetry`, and `ErrPublishNacked`. `PublisherBuilder.RetryPolicy()`
+from Rev 4 is **renamed** to `PublishRetry()`. Rev 6:
+`PublishBatchMaxInFlight` **renamed** to `PublishBatchMaxSize`;
+`ConfirmTimeout` **default = 30 s** (was 0); new builder methods
+`StampUserID()`; client-side `UserID` validation in `Publish`;
+mandatory metric `publisher_retry_total{exchange, reason}`.
+- **Acceptance:**
+  - [ ] `Mandatory()` sets the AMQP mandatory flag (set-only; no inverse method).
+  - [ ] `OnReturn(func(Return))` fires on broker `basic.return`, synchronously before `Publish` unblocks for the matching `delivery-tag` (correlation handled in T11).
+  - [ ] `Return.Properties` populated as a full `ReturnedProperties` struct — **12 `basic.properties` fields + `Headers` (13 total)**, mirroring SPEC §6.2 field-for-field. Not a flat map.
+  - [ ] Unroutable mandatory publish returns `ErrUnroutable`. The `OnReturn` callback observes the same `Return` instance that informed the error.
+  - [ ] **`ConfirmTimeout(d)` default = 30 s** (Rev 6); explicit `ConfirmTimeout(0)` disables it (documented as discouraged). Returns `ErrConfirmTimeout` deterministically (unit-test with a mock channel so timing is not load-dependent).
+  - [ ] **`PublishTimeout(d)` end-to-end cap.** Bounds pool acquisition + write + confirm + blocked-wait + reconnect barrier. Returns the underlying error wrapped with `ctx.DeadlineExceeded`. Caller `ctx` deadline wins if shorter; both zero → caller `ctx` is authoritative.
+  - [ ] **`PublishBatchMaxSize(n)` builder method** (Rev 6: renamed from `PublishBatchMaxInFlight`), default 1024. Validates at `Publish`-time only via T22 (not in T13). Stored on the publisher; no broker work here. Godoc clarifies "per-call cap, NOT a sliding in-flight window across calls".
+  - [ ] **`PublishRetry(p RetryPolicy)`** automatic retry of publishes failing with `IsTransient(err) == true` (`ErrPublishNacked`, `ErrChannelPoolExhausted`, `ErrConnectionBlocked`, `ErrConfirmTimeout`, **`ErrChannelClosed`**, **`ErrReconnecting`**, transient AMQP codes, network errors). Permanent errors never retried. Each retry attempt honours `PublishTimeout` independently; caller `ctx` is the overall budget. **Increments mandatory metric `publisher_retry_total{exchange, reason}`** on every retry (reason ∈ `nacked|confirm_timeout|channel_closed|pool_exhausted|blocked|network|reconnecting`).
+  - [ ] **godoc on `PublishRetry` carries the duplicate warning verbatim** (per SPEC §6.2): "Retries can produce duplicates. Consumers MUST be idempotent (dedupe by `MessageID`). See §6.2.1."
+  - [ ] **`ErrPublishNacked` from broker.** Builder configures a path that triggers broker `basic.nack` and asserts the caller sees `errors.Is(err, ErrPublishNacked)` + `IsTransient(err) == true`.
+  - [ ] **`StampUserID()` builder method** auto-sets `Message[M].UserID` to `conn.AuthenticatedUser()` so the broker stamp survives without user bookkeeping.
+  - [ ] **Client-side `UserID` validation** in `Publish`: if `Message[M].UserID != "" && != conn.AuthenticatedUser()`, return `ErrInvalidMessage` locally **without writing the publish frame** (prevents the 406-channel-close footgun). Cross-references SASL EXTERNAL flow.
+  - [ ] While the connection is broker-blocked, `Publish` waits until unblock or `ctx.Done()`; on ctx cancel, returns `ErrConnectionBlocked`. While in reconnect barrier, returns `ErrReconnecting` on ctx cancel.
+  - [ ] **Functional-options last-wins on `PublisherBuilder`** (Rev 7, per SPEC §6.1 line 515). Unit-test matrix: (a) `PublisherFor[M](conn).Metrics(a).Metrics(b).Build()` retains only `b` (assert by observing emitted metrics under a canned publish); (b) `.Metrics(b).WithoutMetrics().Build()` produces a publisher whose metric calls land on the no-op recorder, not on `b`; (c) builder-level option overrides the connection-level one — `Dial(WithMetrics(connLevel))` then `PublisherFor[M](conn).Metrics(builderLevel)` retains `builderLevel` on the publisher (the connection's own metrics remain `connLevel`). Same matrix applies to `.Codec(…)` chains and `.Tracer(…)` chains.
+- **Verify:**
+  - Integration test against a routing-key that has no binding asserts `errors.Is(err, ErrUnroutable)` AND that `OnReturn` fired exactly once with a populated `Return.Properties.MessageID` matching what was published.
+  - Unit test forces a confirm-window timeout via a mock channel that withholds the `basic.ack` frame; asserts `errors.Is(err, ErrConfirmTimeout)` and the publish goroutine releases (`goleak.VerifyNone`).
+  - Integration test forces a broker-side block via `rabbitmqctl set_disk_free_limit 1TB` (preferred over the flaky `vm_memory_high_watermark=0.000001`, which can crash the testcontainer) and asserts that a publishing goroutine receives `ErrConnectionBlocked` after `ctx` cancellation. The disk-free knob is restored to `default` in the test teardown.
+  - **Broker-nack integration test:** declare a queue with `Args{"x-overflow":"reject-publish","x-max-length":0}`, publish, assert `errors.Is(err, ErrPublishNacked)` and `IsTransient(err) == true`. Cleanup: delete the queue.
+  - **`PublishRetry` unit test:** mock channel returns `ErrPublishNacked` on the first attempt and ack on the second; assert one retry occurred and the caller saw success. Permanent variant: channel returns `ErrUnroutable`; assert no retry.
+  - **`PublishTimeout` unit test:** mock channel withholds confirm; `PublishTimeout(20ms)` returns within 20–25ms with the error chain containing both `ctx.DeadlineExceeded` and `ErrConfirmTimeout`.
+  - **`ConfirmTimeout` default test:** mock channel withholds confirm; `Publish(context.Background(), …)` returns `ErrConfirmTimeout` within 30–31 s with no `PublishTimeout` set.
+  - **`AMQPCode` 312/313 test:** mandatory publish to a queue without consumers (313) and to a non-existing routing key (312); assert `errors.Is(err, ErrUnroutable)` AND `AMQPCode(err) == (312, true)` or `(313, true)` as appropriate.
+  - **`UserID` validation test:** open a connection as user `alice`, attempt `Publish` with `Message[M].UserID = "bob"`; assert `errors.Is(err, ErrInvalidMessage)` returned locally; assert via a channel-frame recorder that no publish frame was written. `StampUserID()` happy path: `UserID` left empty in `Message[M]`, builder option set; assert the broker-side stamp matches `alice` via `rabbitmqadmin get`.
+  - **`publisher_retry_total` metric test:** mock channel returns `ErrPublishNacked` twice then ack; assert `publisher_retry_total{exchange=…, reason=nacked}` == 2 after the call.
+- **Files:** edits to `publisher.go`, `publisher_builder.go`, plus `publisher_returns_integration_test.go`, `publisher_confirm_timeout_test.go`, `publisher_blocked_integration_test.go`, `publisher_nack_integration_test.go`, `publisher_retry_test.go`, `publisher_timeout_test.go`, `publisher_userid_test.go`, `publisher_amqpcode_returns_test.go`, `publisher_retry_metric_test.go`.
+- **Deps:** T11, T12.
+
+### Checkpoint — Phase 2 done
+- [ ] One end-to-end publish/consume-via-cli demo works.
+- [ ] Mandatory + Returns integration test green.
+- [ ] **Review with human before Phase 3.**
+
+---
+
+## Phase 3 — Topology: declared once, separately
+
+### [ ] T14 — Topology types · S
+Rev 5 adds `Queue.DeliveryLimit` and `Queue.SingleActiveConsumer`.
+- **Acceptance:**
+  - [ ] `Topology`, `Exchange`, `Queue`, `Binding`, `DeadLetter` struct types from SPEC §6.6 — each with the **`NoWait bool`** field where applicable.
+  - [ ] `Queue.Type QueueType` field; `QueueType` constants moved out of T02 are consumed here.
+  - [ ] **`Queue.DeliveryLimit int`** — broker-enforced redelivery cap on quorum queues; maps to `x-delivery-limit`. Zero = unbounded.
+  - [ ] **`Queue.SingleActiveConsumer bool`** — maps to `x-single-active-consumer`.
+  - [ ] `DeadLetter` has `MaxLengthBytes int` and `Overflow OverflowPolicy` in addition to TTL/MaxLength.
+  - [ ] `ExchangeKind` (Direct, Fanout, Topic, Headers, Delayed) and `OverflowPolicy` (from T02) consumed and used.
+  - [ ] Validation helper `(*Topology).validate()` rejects (Rev 6 strengthened — each rule returns `ErrInvalidOptions` with a specific message):
+    - Empty names on `Exchange`, `Queue`, `Binding`.
+    - Unknown `ExchangeKind`, `QueueType`, `OverflowPolicy`.
+    - **`DeliveryLimit > 0` on a non-quorum queue.**
+    - **`SingleActiveConsumer=true` on a stream queue.**
+    - **`Type=QueueTypeStream` combined with `Exclusive=true`, `AutoDelete=true`, or a `MaxPriority` arg.**
+    - **`Type=QueueTypeStream` with a `DeadLetter` entry targeting it as `Source`** (streams do not dead-letter).
+    - **`Binding.RoutingKey != ""` on a binding to a fanout exchange** (silently ignored by broker; reject for clarity).
+    - **`Exchange.Kind=ExchangeDelayed` without `Args["x-delayed-type"]`** set to a valid kind.
+    - **Duplicate names within a slice** (two `Queue{Name: "orders"}`).
+- **Verify:** Unit tests for validation (each rule above gets a happy + unhappy case).
+- **Files:** `topology.go` (types only at this stage), `topology_test.go`.
+- **Deps:** T02.
+
+### [ ] T15 — `Topology.Declare` idempotent + mismatch · M
+SPEC compliance: `Declare` is a **two-step pipeline** — an in-memory
+expansion happens *before* any broker call, then the broker sees a
+single declare sequence in fixed order. AMQP 0-9-1 rejects
+`queue.declare` with non-matching args (`PRECONDITION_FAILED` /406),
+so DLX args cannot be added to an already-declared queue via
+re-declare; they must be present the first time. Rev 5 generalizes
+the expansion to also inject `x-delivery-limit`,
+`x-single-active-consumer`, and `x-queue-type`, and mandates that
+the expansion mutates a **copy** so the caller's `Topology` value
+stays untouched.
+- **Acceptance:**
+  - [ ] **Step 1 (in-memory, copy-on-mutate):** `Topology.Declare` first deep-copies the input `Topology`, then runs a pre-pass that, for each affected queue:
+    - For every `DeadLetter{Source, Exchange, RoutingKey, TTL, MaxLength, MaxLengthBytes, Overflow}` matching the queue: merges `x-dead-letter-exchange`, `x-dead-letter-routing-key`, `x-message-ttl`, `x-max-length`, `x-max-length-bytes`, `x-overflow` into the source `Queue.Args` (creating the map if nil); appends a default DLX `Exchange{Name, Kind: ExchangeTopic, Durable: true}` to `Exchanges` if the user did not declare one with that name; appends a DLQ `Queue{Name: "<Source>.dlq", Durable: true}` to `Queues` if the user did not declare one.
+    - For every queue with `DeliveryLimit > 0`: injects `x-delivery-limit=<n>`.
+    - For every queue with `SingleActiveConsumer == true`: injects `x-single-active-consumer=true`.
+    - For every queue with `Type != ""`: injects `x-queue-type=<value>`.
+    A unit test snapshots the in-memory `Topology` before and after the pre-pass and asserts the expected mutations. A second unit test asserts the caller's original `Topology` value is **unchanged** after `Declare` returns.
+  - [ ] **Step 2 (broker):** `Declare` opens a temporary channel and emits frames in the order **exchanges → queues → bindings**. Order is asserted by intercepting AMQP calls (e.g., wrapping the channel with a recorder) in a unit test. The source queue is declared **exactly once**, carrying its full arg set from step 1.
+  - [ ] Conflicting `Durable` / args returns `ErrTopologyMismatch`, which itself wraps `ErrPreconditionFailed` (so `errors.Is(err, ErrPreconditionFailed)` is also true).
+  - [ ] `QueueTypeQuorum` results in `x-queue-type=quorum` on declare; `DeliveryLimit=5` on the same queue results in `x-delivery-limit=5`.
+  - [ ] Same `Topology.Declare` called twice = no error.
+  - [ ] **`Topology.Declare` is not concurrency-safe with itself or with `AttachTo`.** Godoc explicitly says so. Recommended pattern (`sync.Once` at app level) documented.
+  - [ ] **`NoWait=true` caveat.** When *any* `Exchange`, `Queue`, or `Binding` in the topology sets `NoWait=true`, mismatch detection for that entry is asynchronous: `Declare` returns `nil`, and a subsequent operation on the channel fails with a wrapped `ErrPreconditionFailed`. This is documented in the godoc on the `NoWait` field and surfaced as a separate regression test (declare a queue with `NoWait=true, Durable=true` against a broker that already has `Durable=false`; assert `Declare` returns `nil` and the next `Health` call returns `ErrPreconditionFailed`).
+- **Verify:** Integration tests covering happy path, mismatch (assert both `errors.Is(err, ErrTopologyMismatch)` AND `errors.Is(err, ErrPreconditionFailed)`), DLX expansion (assert via `rabbitmqctl list_queues -p / name arguments` that the source queue carries the DLX args **on its first declare**, never via a re-declare), quorum-queue declare with `DeliveryLimit` (assert `x-delivery-limit` is visible via `rabbitmqctl`), single-active-consumer declare, and the `NoWait` async-mismatch path.
+- **Files:** edits to `topology.go`, `topology_test.go`, `topology_integration_test.go`.
+- **Deps:** T07b, T14.
+
+### [ ] T16 — `Topology.AttachTo` reconnect redeclare + barrier + degraded state · M
+Rev 6 grows the contract: deep snapshot, synchronous barrier
+integration with T07, persistent-failure degraded state.
+- **Acceptance:**
+  - [ ] `AttachTo(conn)` registers a **deep snapshot** (deep-copied at call time) as a redeclare callback via `Connection`'s reconnect supervisor; subsequent mutations to the caller's `Topology` value do NOT affect the registered redeclare. Re-`AttachTo` to register a fresh snapshot.
+  - [ ] **Snapshots are keyed by the pointer address of the input `*Topology`** (Rev 7, disambiguating SPEC §6.6 line 1565 "keyed by topology identity at the AttachTo call site"). Calling `AttachTo(t)` a second time with the **same pointer** replaces the prior snapshot for that key (used for "I edited my topology and want the new shape on the next reconnect" — note: the snapshot is still deep-copied at re-`AttachTo` time, so the caller may freely mutate after the call). Calling `AttachTo(other)` with a **different pointer** appends an additional snapshot; both registered snapshots fire on every reconnect in registration order (used for composing topology fragments declared by different subsystems). Unit-test matrix: (1) same-pointer replace — `AttachTo(t)`; mutate `t.Queues[0].Name`; `AttachTo(t)`; force reconnect; assert the redeclare uses the mutated value, not the original; (2) different-pointer append — `AttachTo(t1)`; `AttachTo(t2)`; force reconnect; assert both `t1` and `t2` are redeclared in that order via a channel recorder.
+  - [ ] **Synchronous reconnect barrier integration (T07).** Redeclare runs inside the barrier in step 2; until step 2 completes, `Publisher.Publish` routed to that connection blocks on `ErrReconnecting`. Unit test asserts ordering via a recorder: `Publish` calls during reconnect see `ErrReconnecting` on `ctx` cancel, then succeed once barrier clears.
+  - [ ] **Degraded-state machine.** If redeclare returns `ErrTopologyMismatch` / `ErrPreconditionFailed` / any other error after `n` configured retries within the barrier, the supervisor transitions the connection to `degraded` state: subsequent `Publish` returns `ErrTopologyRedeclareFailed` (permanent), consumers do NOT re-issue `basic.consume`. `connection_degraded_total{role, reason}` increments once per transition; `WithOnTopologyDegraded(func(error))` fires once per transition. On the next reconnect cycle (auto or via `ForceReconnect`), redeclare is retried; first success clears the flag and resumes traffic.
+  - [ ] **Mandatory histogram `topology_redeclare_seconds{role}`** records the duration of step 2 per reconnect cycle (both success and failure).
+  - [ ] **Snapshot test:** mutate `t.Queues = append(t.Queues, ...)` AFTER `AttachTo(t)`; force a reconnect; assert the broker side does NOT see the post-mutation queue.
+- **Verify:** Integration test: declare, disconnect broker, reconnect, assert queue exists with correct args; ordering test: register both `AttachTo` and a `WithOnReconnect` callback; assert the callback observes the queue already declared. **Degraded-state test:** declare a queue with `Durable=true`, then change the spec to `Durable=false` and force reconnect; assert `Publish` returns `ErrTopologyRedeclareFailed`, `connection_degraded_total` == 1, `WithOnTopologyDegraded` fired once. Recover by reverting the spec and calling `ForceReconnect`; assert flag clears.
+- **Files:** edits to `topology.go`, `topology_attach_integration_test.go`, `topology_degraded_integration_test.go`, `topology_snapshot_test.go`.
+- **Deps:** T15, T07.
+
+### Checkpoint — Phase 3 done
+- [ ] Topology declare idempotent under repeat.
+- [ ] Mismatch detected and surfaced.
+- [ ] AttachTo re-declares cleanly after broker restart.
+- [ ] **Review with human before Phase 4.**
+
+---
+
+## Phase 4 — Consumer: error-driven semantics + escape hatch
+
+### [ ] T17 — `delivery.go`: concrete `Delivery[M]` · S
+- **Acceptance:**
+  - [ ] `Delivery[M]` struct with all methods listed in SPEC §6.3 (`Body`, `Headers`, `Redelivered`, `DeliveryTag`, `DeathCount`, **`DeathCountByReason`**, **`DeathReasons`**, `MessageID`, `CorrelationID`, `Timestamp`, `Ack`, `Nack`, `AckIf`).
+  - [ ] `DeathCount()` parses the AMQP `x-death` header — which is a **field-array (`[]any`) of field-tables (`amqp091.Table` / `Headers`)**, one entry per dead-letter event. The parser sums the `count` (int64 in the wire) across all entries whose `queue` field matches the delivery's current queue **AND whose `reason` is one of `rejected` or `delivery-limit`** (Rev 6: filter out `expired` and `maxlen` which reflect broker policy rather than handler-driven rejection); returns 0 if the header is absent or shaped unexpectedly. A `FuzzXDeathParser` target exercises malformed inputs.
+  - [ ] `DeathCountByReason(reason string) int` and `DeathReasons() []string` (unique reasons in declaration order) expose the full parsed shape for custom policies (e.g. users who DO want to count `expired` for their workload).
+  - [ ] `AckIf(err error) error` implements the error-mapping semantics (nil → Ack; `errors.Is(err, ErrRequeue)` → `Nack(true)`; any other err → `Nack(false)`).
+  - [ ] `Ack` / `Nack` / `AckIf` return `ErrChannelClosed` when the underlying channel is closed and `ErrAlreadyClosed` when the consumer was closed; otherwise `nil` on success — documented behaviour.
+- **Verify:** Unit tests with hand-built `amqp091.Delivery` values + table-driven AckIf cases + closed-channel error path test + `x-death` parser test fixtures (absent, empty, single entry, multiple entries, mixed reasons `rejected`+`expired`+`delivery-limit`, wrong shape) + a `FuzzXDeathParser` fuzz target (per `plan.md` §"Fuzz targets"). Reason-discrimination test: a delivery with `x-death=[{reason: expired, count: 100}, {reason: rejected, count: 2}]` reports `DeathCount() == 2` (not 102).
+- **Files:** `delivery.go`, `internal/headers/xdeath.go`, `delivery_test.go`, `internal/headers/xdeath_test.go`, `internal/headers/xdeath_fuzz_test.go`.
+- **Deps:** T02, T09.
+
+### [ ] T18 — Consumer + builder + handler error mapping + re-subscribe + verdict + UUID-tag · M
+Rev 5 adds `Priority(int)`, `HandlerTimeout(d)`, the re-subscribe
+loop, and handler-ctx cancel on channel close. Rev 6 adds
+`HandlerTimeoutVerdict(TimeoutVerdict)` (default
+`TimeoutNackNoRequeue`), default consumer-tag `ctag-<uuidv7>`,
+`Build`-time warning when `Prefetch < Concurrency`, and the
+documented Concurrency-vs-ordering trade-off.
+- **Acceptance:**
+  - [ ] `ConsumerFor[M](conn) *ConsumerBuilder[M]` with the methods from SPEC §6.3 except `AutoAck` (T35) and `MaxRedeliveries` (T20).
+  - [ ] Builder includes `ChannelQoS()` (RabbitMQ per-channel semantics) — **not** `GlobalQoS()`. No `NoLocal()` method (RabbitMQ ignores). `PrefetchBytes()` exists with godoc "no-op on RabbitMQ; preserved for protocol parity".
+  - [ ] **`Priority(p int)`** sets `x-priority` in `basic.consume` args; documented for active/standby consumer topologies.
+  - [ ] **`HandlerTimeout(d time.Duration)`** derives a per-message ctx with deadline `d`; on timeout, the handler ctx is cancelled and the configured **`HandlerTimeoutVerdict`** is emitted. Mandatory metric `consumer_handler_timeout_total{queue, verdict}` increments per occurrence (verdict label distinguishes `nack_no_requeue` vs `nack_requeue`).
+  - [ ] **`HandlerTimeoutVerdict(v TimeoutVerdict)`** builder method (Rev 6, in scope for v0.1): default `TimeoutNackNoRequeue` (aligns Consumer with BatchConsumer and the "no silent poison loop" north star — Rev 5 had `Nack(true)` as default for Consumer and `Nack(false)` for BatchConsumer, which contradicted itself across SPEC §6.3 / §6.4 / TODO T18). Override to `TimeoutNackRequeue` for known-transient slowness workloads.
+  - [ ] **`Build`-time warning** when `Prefetch < Concurrency`: log "consumer prefetch=N is below concurrency=M; handlers will stall waiting for deliveries". Not a hard error; the user may have a workload-specific reason.
+  - [ ] **Default consumer-tag is `ctag-<uuidv7>`** when `Tag(string)` is left empty: generated at `Build` time, before connection pinning (so the hash distinguishes consumers correctly). User-supplied tags are passed through verbatim.
+  - [ ] `Consumer.Consume(ctx, Handler[M])` decodes payload via codec, calls handler with decoded value.
+  - [ ] Error mapping: `nil` → Ack; default error → `Nack(false)`; `errors.Is(err, ErrRequeue)` → `Nack(true)`.
+  - [ ] Decode failure → `Nack(false)` (poison protection by default) + ConsumerMetrics counter increment (`outcome=decode_error`).
+  - [ ] Concurrency: `Concurrency(n)` runs up to N handlers in parallel.
+  - [ ] **Re-subscribe loop.** After a successful reconnect of the consumer connection that hosts this `Consumer[M]`, the consumer reopens its channel, reapplies `basic.qos` (with the configured `ChannelQoS` flag and prefetch), and reissues `basic.consume`. The consumer-tag is preserved across reconnects. Metric `consumer_resubscribed_total{queue}` increments exactly once per re-subscribe. A small bounded jitter (50–250ms) staggers parallel resubscribes after a broker restart to avoid storms.
+  - [ ] **Handler ctx cancel on channel close.** When the consumer's channel closes mid-handler, the handler's `context.Context` is cancelled with cause `ErrChannelClosed`. Metric `consumer_handler_aborted_channel_closed_total{queue}` increments. The original message will be redelivered by the broker (the ack was never received).
+  - [ ] Broker-originated errors during consume (channel close 404, 405, etc.) are translated via `internal/amqperror` and surface as wraps of the right sentinel.
+  - [ ] Codec calls are wrapped in `defer recover` → `ErrInvalidMessage` (per T09 contract).
+  - [ ] **Functional-options last-wins on `ConsumerBuilder`** (Rev 7, per SPEC §6.1 line 515). Unit-test matrix: (a) `.Concurrency(2).Concurrency(8).Build()` produces a consumer running 8 handlers in parallel (assert via in-flight gauge under load); (b) `.HandlerTimeout(50*time.Millisecond).HandlerTimeout(0).Build()` disables the timeout (no `consumer_handler_timeout_total` increment under a slow handler); (c) `.Codec(jsonStrict).Codec(jsonLax).Build()` decodes a payload with an unknown field successfully (lax wins); (d) `.HandlerTimeoutVerdict(TimeoutNackRequeue).HandlerTimeoutVerdict(TimeoutNackNoRequeue).Build()` plus `.HandlerTimeout(50ms)` lands the timed-out message in the DLX, not the source.
+- **Verify:** Integration test sending good + bad payloads + handlers that return each of the three result classes. **`ChannelQoS()` is verified at the wire level** via a channel recorder that captures the `basic.qos` frame and asserts the `global` bit is `true` when `ChannelQoS()` is set and `false` otherwise. A second, longer-running integration test reuses the recorded channel via package-private accessors to attach a second raw `Consume` and asserts that the prefetch budget is shared rather than doubled — flagged as a conformance probe, not part of the public-API surface.
+
+  **Re-subscribe regression test:** start a consumer, kill its underlying TCP connection via the testcontainer driver, wait for reconnect, assert `consumer_resubscribed_total{queue}` == 1 and a fresh publish lands in the handler. `goleak.VerifyNone` clean.
+
+  **Handler-ctx cancel test:** handler that blocks on `<-ctx.Done()`; close the underlying channel forcibly; assert handler returns within 100ms and `consumer_handler_aborted_channel_closed_total` == 1.
+
+  **`HandlerTimeout` smoke test (default verdict):** `HandlerTimeout(50ms)` with a handler that `time.Sleep(200ms)`; default `HandlerTimeoutVerdict = TimeoutNackNoRequeue` (Rev 6); assert handler ctx is cancelled around 50ms; assert the message lands in the configured DLX (not requeued on the source). Full matrix is in T18b.
+
+  **`Priority` test:** declare a quorum queue, start consumer A with `Priority(10)` and consumer B with `Priority(0)`; publish 10 messages; assert all 10 land on A while it's alive; kill A, assert remaining deliveries land on B.
+- **Files:** `consumer.go`, `consumer_builder.go`, `consumer_test.go`, `consumer_integration_test.go`, `consumer_qos_conformance_test.go`, `consumer_resubscribe_integration_test.go`, `consumer_handler_ctx_integration_test.go`, `consumer_handler_timeout_integration_test.go`, `consumer_priority_integration_test.go`.
+- **Deps:** T07b, T07d, T08, T09, T17.
+
+### [ ] T18b — `HandlerTimeoutVerdict` matrix test · S
+Rev 6 explicit test for the new builder method (T18 ships the
+mechanism; T18b is the dedicated test matrix to make the trade-off
+visible).
+- **Acceptance:**
+  - [ ] Test case A — `TimeoutNackNoRequeue` (default): `HandlerTimeout(50ms)` + handler that `time.Sleep(200ms)`; assert (1) handler ctx cancelled around 50ms; (2) message goes to the configured DLX (via integration with T15 DLX expansion); (3) `consumer_handler_timeout_total{queue, verdict=nack_no_requeue}` == 1; (4) no redelivery on the source queue.
+  - [ ] Test case B — `TimeoutNackRequeue` opt-in: same handler, builder calls `HandlerTimeoutVerdict(TimeoutNackRequeue)`; assert (1) message redelivered up to `MaxRedeliveries` / `x-delivery-limit`; (2) metric label `verdict=nack_requeue`; (3) after the limit, the message is dead-lettered per the configured bound.
+- **Verify:** `go test -tags=integration -run TestHandlerTimeoutVerdict ./...` green; `goleak.VerifyNone` clean.
+- **Files:** `consumer_handler_timeout_verdict_integration_test.go`.
+- **Deps:** T18, T15.
+
+### [ ] T19 — `ConsumerMetrics` + Prometheus + wiring · S
+Rev 5 promotes `consumer_resubscribed_total`,
+`consumer_handler_aborted_channel_closed_total`, and
+`consumer_handler_timeout_total` to mandatory metrics. Rev 6 adds
+`consumer_cancelled_total`, `topology_redeclare_seconds`,
+`publisher_retry_total`, `replier_drop_no_dlx_total`,
+`connection_degraded_total` (covered in T07/T16/T13/T30 wiring; T19
+asserts they all land in the registry).
+- **Acceptance:**
+  - [ ] `metrics.ConsumerMetrics` interface defined per SPEC §6.9: handle latency histogram, ack/nack/requeue/decode_error/handler_timeout/resubscribed/aborted/cancelled counters, in-flight gauge.
+  - [ ] Prometheus impl in `metrics/prometheus.go` uses bounded default labels `{queue, outcome}`; high-cardinality labels (`routing_key`, `message_type`) opt-in.
+  - [ ] Consumer instruments handler invocation, ack/nack, decode error paths, **re-subscribe events**, **channel-close handler aborts**, **handler timeouts** (with verdict label), **basic.cancel events**.
+  - [ ] Histogram buckets default to SPEC §6.9 set; configurable via `WithLatencyBuckets`.
+  - [ ] **All Rev 6 mandatory metrics present in the Prometheus registry after a canned workload:** `publisher_retry_total{exchange, reason}`, `consumer_cancelled_total{queue, reason}`, `replier_drop_no_dlx_total{queue}`, `topology_redeclare_seconds{role}` (histogram), `connection_degraded_total{role, reason}`, plus the Rev 5 mandatory set.
+- **Verify:** Integration test scrapes a `prometheus.Registry` and asserts each mandatory metric (Rev 5 + Rev 6) exists with the documented labels after a canned workload that exercises every outcome — including a forced reconnect, a forced redeclare failure, a forced `basic.cancel`, and a `PublishRetry`-triggered nack.
+- **Files:** edits to `metrics/metrics.go`, `metrics/prometheus.go`, `consumer.go`.
+- **Deps:** T18, T04.
+
+### [ ] T20 — `MaxRedeliveries` enforcement with quorum carve-out · S
+SPEC compliance: AMQP 0-9-1 only writes `x-death` on dead-letter
+events (TTL, length limit, `Nack(requeue=false)`) — **not** on
+`Nack(requeue=true)`. Bounding an `ErrRequeue` loop with `x-death`
+alone is impossible. Rev 5 introduces the quorum-queue
+`x-delivery-limit` carve-out: when the source queue is quorum with
+`DeliveryLimit > 0`, the broker bounds redeliveries natively and
+the consumer-side counter B is auto-disabled.
+- **Acceptance:**
+  - [ ] Builder method `MaxRedeliveries(n int)` (default 0 = unbounded; user opts in).
+  - [ ] **Counter A (cross-process, via `x-death`).** When `DeathCount() > n`, the consumer forces `Nack(false)` and emits `ErrMaxRedeliveries` via metrics + log without invoking the handler. Bounds loops that bounce through a DLX-back-to-source binding and survive consumer restarts.
+  - [ ] **Counter B (in-process, keyed by `(channel-instance-id, MessageID)`).** A `sync.Map`-backed counter (or equivalent — must be race-free; verified with `go test -race`) keyed by `(channel-instance-id, Delivery.MessageID)`. Falls back to `(channel-instance-id, consumer-tag, delivery-tag)` when `MessageID` is empty. The **channel-instance-id is a UUID generated per consumer channel and reset on channel close**, so delivery-tags reused across reconnects cannot collide. Each `ErrRequeue`-driven `Nack(requeue=true)` increments the counter; once incrementing it would exceed `n`, the consumer rewrites the verdict to `Nack(requeue=false)` and emits `ErrMaxRedeliveries`. The counter entry is deleted on `Ack` or `Nack(false)`, and the entire map drops on channel close.
+  - [ ] **Quorum carve-out.** When the source queue at `Build()`-time has `Queue.Type == QueueTypeQuorum && Queue.DeliveryLimit > 0` (introspected via the topology hint or the queue's args), counter B is **auto-disabled** (broker is authoritative). Counter A still runs as a safety net. Godoc and a debug log line document the disable.
+  - [ ] Metric/log field `cause` distinguishes the three paths: `cause=delivery-limit` (broker, quorum), `cause=x-death` (counter A), `cause=in-process` (counter B).
+  - [ ] Consumer godoc documents that counter B is **process-local**: a restart resets it. Users wanting cross-process bounding must use a quorum queue with `DeliveryLimit > 0` (preferred) or configure a DLX-back-to-source binding (counter A then takes over via `x-death`).
+- **Verify:**
+  - Poison-loop integration test (in-process counter B, classic queue): handler always returns wrapped `ErrRequeue`; assert at most `n+1` deliveries within a single consumer run, and that the `(n+1)`-th nack is `requeue=false`. Asserts `cause=in-process` in the metric label.
+  - **Quorum-queue test (broker-enforced):** declare a quorum queue with `DeliveryLimit=5`, set `MaxRedeliveries(10)`; handler always returns wrapped `ErrRequeue`; assert exactly 6 deliveries before the broker dead-letters; metric label is `cause=delivery-limit`; counter B map size is 0 throughout (auto-disabled).
+  - DLX-bounce integration test (counter A): set up `Source → DLX → Source` ping-pong, handler always returns a plain error (drives `Nack(false)`), assert `DeathCount()` increments on each loop and short-circuit fires at exactly `n+1`; metric label `cause=x-death`.
+  - **Channel-instance-id key reset test:** drive counter B for `MessageID=foo` up to `n-1`, force a channel close + reconnect, send another delivery with `MessageID=foo`; assert counter B treats it as new (reset on channel close).
+  - **Map leak stress test:** publish 1M `ErrRequeue`-then-final-ack cycles; assert counter B map size returns to 0 at the end (`unsafe.Sizeof`+reflection or a private accessor for the test).
+  - Restart test: run counter B to `n`, restart the consumer, send the same `MessageID` again, assert counter B resets (documented behaviour).
+- **Files:** edits to `consumer.go`, plus `consumer_maxredeliveries_inproc_integration_test.go`, `consumer_maxredeliveries_quorum_integration_test.go`, `consumer_maxredeliveries_dlx_integration_test.go`, `consumer_maxredeliveries_restart_integration_test.go`, `consumer_maxredeliveries_leak_test.go`.
+- **Deps:** T17, T18.
+
+### [ ] T21 — `ConsumeRaw` + `Delivery.AckIf` polish · S
+- **Acceptance:**
+  - [ ] `Consumer.ConsumeRaw(ctx, RawHandler[M])` available; handler receives `*Delivery[M]`.
+  - [ ] Raw handler is responsible for Ack/Nack — consumer does not auto-ack.
+  - [ ] Integration test exercises `Redelivered()`, `Headers()`, `DeathCount()`.
+- **Verify:** Integration test.
+- **Files:** edits to `consumer.go`, `consumer_raw_integration_test.go`.
+- **Deps:** T18.
+
+### Checkpoint — Phase 4 done
+- [ ] Error-driven semantics validated for all three classes.
+- [ ] Poison-loop bounded.
+- [ ] Escape hatch usable for raw envelope inspection.
+- [ ] **Review with human before Phase 5.**
+
+---
+
+## Phase 5 — Batch APIs: throughput
+
+### [ ] T22 — `PublishBatch` always-all + MaxSize cap + order preservation + channel-close recovery doc · M
+Rev 5 enforces `PublishBatchMaxInFlight` (default 1024) returning
+`ErrBatchTooLarge`, and pipelines on a **single channel** to
+preserve input order. Rev 6 renames to `PublishBatchMaxSize`,
+documents the channel-close recovery contract, and clarifies
+`PublishRetry` does NOT apply to batches.
+- **Acceptance:**
+  - [ ] `Publisher.PublishBatch(ctx, []Message[M]) ([]PublishResult, error)` publishes every input message (never short-circuits, except the size-cap guard below).
+  - [ ] **Size-cap guard:** if `len(msgs) > PublishBatchMaxSize`, returns immediately with `(nil, ErrBatchTooLarge)`. No channel work performed. Caller chunks.
+  - [ ] **Single-channel pipelining:** all N publishes occur on **one** acquired channel from the publisher pool, so RabbitMQ's per-channel ordering guarantee makes input order = consume order. Documented as a hard guarantee in godoc.
+  - [ ] Returns `[]PublishResult` with one slot per input; per-message error in `Result.Err` (`ErrInvalidMessage`, `ErrPublishNacked`, `ErrUnroutable`, `ErrChannelClosed`).
+  - [ ] Overall error wraps `ErrPartialBatch` if any failed.
+  - [ ] Pipelines all publishes, then waits one confirm window — including correctly resolving a single `multiple=true` ack that covers many delivery tags (see T11) and a single `multiple=true` nack that covers many delivery tags with `ErrPublishNacked`.
+  - [ ] **Channel-close recovery contract documented in godoc** (per SPEC §6.2): "Per-message `ErrChannelClosed` does NOT distinguish 'broker persisted' from 'broker did not receive'. Retry produces duplicates when the broker persisted but the ack was lost. `PublishRetry` does NOT apply to `PublishBatch` — chunking and partial-retry are the caller's responsibility, because the right strategy is workload-specific. Consumers MUST be idempotent per §6.2.1."
+- **Verify:**
+  - **Always-all integration test:** 1000 messages, 3 deliberately invalid via client-side rejection (Headers with `chan int`); the remaining 997 traverse normally, get confirmed, and the batch returns 997 nil + 3 `ErrInvalidMessage` per-message results plus an overall error wrapping `ErrPartialBatch`. The channel stays open across the batch.
+  - **`ErrBatchTooLarge`:** publish 2000 messages with default `PublishBatchMaxSize=1024`; assert `(nil, ErrBatchTooLarge)` is returned immediately; no broker work observed (channel recorder snapshot empty for that call).
+  - **Order preservation:** publish 100 messages with sequential bodies `[0..99]`, consume into a single-consumer single-channel sink; assert the consumed order matches the published order exactly. Bounded by the per-channel ordering guarantee.
+  - **Channel-close mid-batch chaos test:** publish 500 messages; force a channel close after ~100 have been written but before any confirm arrives; assert (a) `PublishResult.Err` is `ErrChannelClosed` for the affected indices; (b) the overall error wraps `ErrPartialBatch`; (c) no `PublishRetry` invocation regardless of policy configured (validates the "PublishRetry does not apply to batch" contract).
+- **Files:** edits to `publisher.go`, `publisher_batch_integration_test.go`, `publisher_batch_order_integration_test.go`.
+- **Deps:** T11, T12, T13.
+
+### [ ] T23 — `BatchConsumer` + concrete `Batch[M]` + auto-verdict · M
+Rev 5 documents the handler error semantics (auto-Ack/Nack with
+`multiple=true`) and `HandlerTimeout` at batch granularity.
+- **Acceptance:**
+  - [ ] `BatchConsumerFor[M](conn) *BatchConsumerBuilder[M]`.
+  - [ ] Builder methods mirror `ConsumerBuilder` + `Size(uint)` + `FlushAfter(d)` + `HandlerTimeout(d)`. **No `Concurrency` exposed** — batches run sequentially per consumer (run multiple `BatchConsumer[M]` for parallelism).
+  - [ ] `Batch[M]` concrete struct with `Messages()`, `Deliveries()`, `Ack()`, `Nack(requeue)`. Internally tracks an `acked bool` guard so manual + auto don't double-act.
+  - [ ] **Auto-verdict semantics:**
+    - Handler returns `nil` and `Batch.Ack/Nack` never called → framework emits a **single `basic.ack` with `multiple=true`** for the highest delivery-tag in the batch (one frame, not N).
+    - Handler returns non-nil error wrapped with `ErrRequeue` → framework emits a single `basic.nack` with `multiple=true` + `requeue=true`.
+    - Handler returns any other non-nil error → framework emits a single `basic.nack` with `multiple=true` + `requeue=false` (DLX-bound).
+    - Handler called `Batch.Ack` / `Batch.Nack` / per-`Deliveries()` acks/nacks → framework skips the auto-verdict (idempotent guard).
+  - [ ] `HandlerTimeout(d)` derives a per-batch ctx; on timeout the default verdict is `Nack(requeue=false)` for the whole batch (`ErrPartialBatch`-style aggregate not applicable here — it's a batch verdict, not per-message).
+  - [ ] Flush triggers: size reached OR timer elapsed.
+  - [ ] `MaxRedeliveries` counter B (from T20) increments per message in the batch when a `Nack(requeue=true)` is emitted for the whole batch.
+- **Verify:**
+  - Integration test: send 500 messages with `Size(100)` → 5 batches; send 50 messages with `FlushAfter(1s)` → 1 batch after 1s.
+  - **Multiple=true ack test:** channel recorder asserts exactly one `basic.ack` frame with `multiple=true` per nil-returning handler (not 100).
+  - **Auto-Nack test:** handler returns `errors.New("bad")`; assert single `basic.nack` with `multiple=true,requeue=false`.
+  - **Manual override test:** handler calls `batch.Deliveries()[0].Nack(true)` and returns nil; assert only the per-delivery nack lands, no auto-Ack on the batch.
+- **Files:** `batch_consumer.go`, `batch_consumer_builder.go`, `batch_consumer_integration_test.go`, `batch_consumer_autoack_test.go`.
+- **Deps:** T18.
+
+### Checkpoint — Phase 5 done
+- [ ] Bench documented: `PublishBatch` ≥ 5× `Publish` on local broker.
+- [ ] BatchConsumer flushes on both triggers.
+- [ ] **Review with human before Phase 6.**
+
+---
+
+## Phase 6 — Codecs + OTel observability
+
+### [ ] T24 — `codec/protobuf.go` · S
+- **Acceptance:**
+  - [ ] `codec.NewProtobuf()` round-trips any `proto.Message`.
+  - [ ] `ContentType()` returns `application/x-protobuf`.
+- **Verify:** Round-trip test with a representative `.proto`-generated type + fuzz target.
+- **Files:** `codec/protobuf.go`, `codec/protobuf_test.go`, `codec/protobuf_fuzz_test.go`.
+- **Deps:** T09.
+
+### [ ] T25 — `codec/cloudevents.go` — structured mode · S
+- **Acceptance:**
+  - [ ] `cloudevents.NewStructured()` encodes the full CloudEvent JSON envelope into the message body.
+  - [ ] `ContentType()` returns `application/cloudevents+json`.
+- **Verify:** Round-trip test against the official CloudEvents test vectors.
+- **Files:** `codec/cloudevents.go`, `codec/cloudevents_structured_test.go`.
+- **Deps:** T09.
+
+### [ ] T26 — `codec/cloudevents.go` — binary mode · M
+- **Acceptance:**
+  - [ ] `cloudevents.NewBinary()` puts `data` in the body and CloudEvent attributes (`id`, `source`, `type`, `specversion`, `subject`, `time`, `datacontenttype`) into AMQP headers prefixed `ce-*`.
+  - [ ] Decode reconstitutes the full CloudEvent from body + headers.
+  - [ ] Follows the CloudEvents AMQP Protocol Binding spec.
+- **Verify:** Round-trip + cross-encoding test (structured-encoded message decodes via binary decoder fails cleanly with `ErrInvalidMessage`).
+- **Files:** edits to `codec/cloudevents.go`, `codec/cloudevents_binary_test.go`.
+- **Deps:** T25.
+
+### [ ] T27 — OTel in Publisher · S
+- **Acceptance:**
+  - [ ] `Publisher.Publish` opens a span named `<exchange> publish` with messaging attributes from OTel semantic conventions.
+  - [ ] Span attributes match SPEC §6.9 for publish: `messaging.system="rabbitmq"`, `messaging.destination.name`, `messaging.operation.type=publish`, `messaging.message.id`, `messaging.message.conversation_id`, `messaging.message.body.size`, `network.peer.address`, `network.peer.port` (where applicable).
+  - [ ] Context is injected into the AMQP headers via `otel.Propagator`.
+  - [ ] Span records `ErrUnroutable`, `ErrConfirmTimeout`, encode errors as exceptions.
+- **Verify:** Integration test with an in-memory tracer asserts span name, attributes, error events.
+- **Files:** edits to `publisher.go`, `publisher_tracing_test.go`.
+- **Deps:** T12, T05.
+
+### [ ] T28 — OTel in Consumer · S
+- **Acceptance:**
+  - [ ] Consumer extracts the parent context from AMQP headers before invoking the handler.
+  - [ ] A `<queue> process` span wraps each handler invocation.
+  - [ ] Span attributes for receive/process paths match SPEC §6.9 (`messaging.operation.type` receive | process as documented for those spans).
+  - [ ] Span continuity verified: trace-id and parent-span-id consistent from publisher → consumer.
+- **Verify:** Integration test publishes with a tracer; consumer with the same tracer; assert spans share traceID.
+- **Files:** edits to `consumer.go`, `consumer_tracing_test.go`.
+- **Deps:** T18, T27.
+
+### Checkpoint — Phase 6 done
+- [ ] Codecs: 3 codecs, 5 modes (JSON, Protobuf, CE structured, CE binary, raw bytes via `codec.JSON` of `[]byte`).
+- [ ] Span continuity end-to-end.
+- [ ] **Review with human before Phase 7.**
+
+---
+
+## Phase 7 — Advanced patterns
+
+### [ ] T29 — RPC `Caller[Req,Resp]` · M
+- **Acceptance:**
+  - [ ] `CallerFor[Req,Resp](conn).Build()` returns a configured caller.
+  - [ ] `Call(ctx, req)` uses RabbitMQ direct reply-to (`amq.rabbitmq.reply-to`) by default; reply consumer is declared **before** the request is published; consumer auto-enables `no-ack` (required by the pseudo-queue protocol).
+  - [ ] `UseExclusiveReplyQueue()` builder method switches to a real exclusive auto-delete reply queue per Caller, with regular ack semantics.
+  - [ ] `ctx` deadline maps to per-call timeout → `ErrCallTimeout`.
+  - [ ] Concurrent calls return the right response (`CorrelationID` matching).
+  - [ ] If the underlying channel closes during a Call, in-flight calls return `ErrChannelClosed`; new calls reconnect transparently.
+- **Verify:** Integration tests: (a) 100 concurrent calls, every response matches its request; (b) ctx timeout returns `ErrCallTimeout` cleanly; (c) `UseExclusiveReplyQueue` round-trip; (d) channel close mid-call surfaces `ErrChannelClosed`.
+- **Files:** `rpc.go`, `rpc_caller_builder.go`, `rpc_caller_integration_test.go`.
+- **Deps:** T12, T18.
+
+### [ ] T30 — RPC `Replier[Req,Resp]` + at-least-once ordering · S
+SPEC compliance: handler errors do **not** send an error envelope to
+the `Caller` — the caller observes `ErrCallTimeout` on `ctx` deadline.
+Failed requests are `Nack(requeue=false)`; without a DLX configured
+on the request queue, **this is a silent drop**. The `OnError` hook
+is the only client-side signal; treat it as load-bearing. Rev 5
+adds the at-least-once reply ordering contract.
+- **Acceptance:**
+  - [ ] `ReplierFor[Req,Resp](conn).Build()` returns a configured replier.
+  - [ ] `Serve(ctx, ReplyHandler)` consumes requests and publishes responses to `ReplyTo` with matching `CorrelationID`.
+  - [ ] **At-least-once reply ordering**: for a successful handler, the replier publishes the reply, **awaits its confirm** (subject to `PublishTimeout`/`ConfirmTimeout` of the internal reply publisher), and **then** acks the request. If the reply publish fails (`ErrPublishNacked`, `ErrConfirmTimeout`, `ErrChannelClosed`), the request is `Nack(false)` so it goes to the request queue's DLX (if configured); the caller observes `ErrCallTimeout` on `ctx` deadline.
+  - [ ] **Crash-between-confirm-and-ack contract** documented: broker redelivers the request, replier sends a second reply. Callers MUST dedupe by `CorrelationID`. Godoc on `Serve` carries this verbatim.
+  - [ ] `OnError(func(ctx, req, err))` builder hook: handler error is reported via the hook; the request is `Nack`'d without requeue (so it goes to a DLX if configured, or is dropped if not); the caller observes `ErrCallTimeout` once its `ctx` expires.
+  - [ ] **Godoc on `OnError` and `Build` documents the silent-drop failure mode in full**, with explicit guidance: "Configure a DLX on the request queue if you need failed requests preserved for forensics. Without a DLX, `Nack(requeue=false)` is a drop and `OnError` is the only signal."
+  - [ ] **`ReplierBuilder.Topology(t)` auto-validates DLX presence** when the request queue was declared via this library's `Topology` on the same connection: inspects `t.DeadLetters` for an entry matching the request queue; if missing, `Build()` returns `ErrInvalidOptions` with the message `"Replier request queue <name> has no DeadLetter entry in Topology; Nack(false) drops will be silent. Add a DeadLetter or use AllowMissingDLX() to acknowledge."`. (Rev 6)
+  - [ ] **`AllowMissingDLX()` escape hatch** opts out of the validation when the request queue is declared out-of-band; the godoc documents the trade-off.
+  - [ ] **Mandatory metric `replier_drop_no_dlx_total{queue}`** increments every time the framework `Nack(false)`s a request whose source queue has no declared DLX (regardless of whether `Topology(t)` was wired) — drops are never invisible. (Rev 6)
+  - [ ] No broker-side validation of DLX presence at `Build()` time (would require management-plugin access and an extra round-trip). Static validation via `Topology(t)` plus the runtime metric is the contract.
+- **Verify:** Integration tests:
+  - Happy path round-trip Caller↔Replier with success.
+  - **Reply-publish-failure path:** simulate a forced reply-publisher channel close immediately after the handler returns; assert the request is `Nack(false)`, lands in the DLQ if configured, and the caller times out with `ErrCallTimeout`.
+  - Handler error + DLX configured: `OnError` fires once with the original error, the request lands in the DLQ (assert via `rabbitmqctl list_queues <dlq> messages`), and the caller times out cleanly with `ErrCallTimeout`.
+  - Handler error + no DLX: `OnError` fires once, **`replier_drop_no_dlx_total{queue}` increments by 1**, the request is gone from the source queue, and `rabbitmqctl list_queues <source> messages` returns 0 — explicit assertion that the drop is real (this is a negative-path documentation test, *not* a regression we intend to silently change later).
+  - **`Topology(t)` validation test:** declare a request queue WITHOUT a `DeadLetter` entry, build a `Replier` with `.Topology(t)`; assert `Build()` returns `ErrInvalidOptions`. Repeat with `.AllowMissingDLX()`; assert `Build()` succeeds.
+- **Files:** `rpc_replier.go`, `rpc_replier_builder.go`, `rpc_replier_integration_test.go`, `rpc_replier_reply_failure_integration_test.go`, `rpc_replier_dlx_validation_test.go`.
+- **Deps:** T29.
+
+### [ ] T31 — Delayed messages · S
+- **Acceptance:**
+  - [ ] `Message[M].Delay` field honored at publish time (sets `x-delay` header).
+  - [ ] `Topology` declares `x-delayed-message` exchanges when `Kind = ExchangeDelayed`; `Args` carries `x-delayed-type` to specify the underlying type.
+  - [ ] Helper `amqp.DelayedTopic(name string)` constructs the right `Exchange{}` literal.
+- **Verify:** Integration test: testcontainer with `rabbitmq_delayed_message_exchange` plugin enabled; publish with 2s delay; assert delivery happens between 2s and 2.5s.
+- **Files:** `delay.go`, edits to `topology.go`, `message.go`, `delay_integration_test.go`.
+- **Integration fixture:** **`amqptest/`** (T37) — three plugin modes and `amqptest.RequireDelayedExchange(t)` per SPEC §6.9; do not add a parallel `testing/` package. If T31 lands before T37, keep delayed tests behind skip/minimal container wiring until the shared `amqptest` helper exists.
+- **Deps:** T15, T12. (Strong pairing with **T37** for the canonical broker image/plugins.)
+
+### Checkpoint — Phase 7 done
+- [ ] RPC happy path + timeout green.
+- [ ] Delayed delivery within ±20% of requested delay.
+- [ ] **Review with human before Phase 8.**
+
+---
+
+## Phase 8 — Production hardening
+
+### [ ] T32 — TLS / mTLS · S
+- **Acceptance:**
+  - [ ] `WithTLSConfig(*tls.Config)` option wires into the AMQP dialer.
+  - [ ] `amqps://` URIs work out of the box.
+  - [ ] Test fixtures: pre-generated server + client certs in **`amqptest/certs/`** (same paths as T37/T34b; landing certs with T32 is fine even before the full `amqptest` API ships).
+- **Verify:** Integration test against a TLS-enabled RabbitMQ testcontainer; mTLS variant with client cert verification.
+- **Files:** edits to `connection.go`, `options_connection.go`, `amqptest/certs/*`, `connection_tls_integration_test.go`.
+- **Deps:** T07.
+
+### [ ] T33 — Cluster failover via `WithAddrs` · S
+- **Acceptance:**
+  - [ ] `WithAddrs([]string)` tries addresses in order on initial connect.
+  - [ ] On reconnect, rotates to the next address (round-robin).
+  - [ ] First successful address sticks until the next disconnect.
+- **Verify:** Integration test: docker-compose two RabbitMQ nodes; stop the first, assert reconnect succeeds against the second.
+- **Files:** edits to `connection.go`, `options_connection.go`, `connection_failover_integration_test.go`.
+- **Deps:** T07.
+
+### [ ] T34 — Remaining Connection options · S
+Rev 5 adds `WithConnectionName`, `WithPublisherConnections`,
+`WithConsumerConnections`, `WithOnResubscribe`.
+- **Acceptance:**
+  - [ ] `WithVHost`, `WithAuth`, `WithHeartbeat`, `WithChannelMax`, `WithFrameMax`, `WithDialer`, `WithClientProperties` implemented.
+  - [ ] **`WithConnectionName(name string)`** — default `<binary>-<hostname>-<pid>`; sets `client_properties.connection_name`. Role and index suffixes (`-pub-0`, `-con-0`, …) appended per TCP connection.
+  - [ ] **`WithPublisherConnections(n int)`** + **`WithConsumerConnections(n int)`** — already implemented in T07d; T34 covers the option wiring + default values (both 1).
+  - [ ] **`WithOnResubscribe(func(queue string))`** — fires once per consumer re-subscribe (alongside the mandatory metric in T19).
+  - [ ] `WithClientProperties` default sets `product=amqp.go`, `version=<from runtime/debug>`, `platform=Go <ver>`, `connection_name=<from WithConnectionName>`.
+  - [ ] **`WithFrameMax` godoc sizing table** (Rev 7, per SPEC §6.1 lines 677–700 + §10 #46): the doc-comment includes the three sizing tiers — small (≤8 KiB messages: `WithFrameMax(8192)`), streaming (32 KiB–1 MiB messages: `WithFrameMax(131072)`), hard-max (`WithFrameMax(0)` = server-negotiated, currently 128 KiB on RabbitMQ 3.13/4.x) — and the explicit pointer-out that messages >100 MiB should be chunked at the application layer. The `< 4096` rejection (already asserted in T07) is cross-referenced from this godoc.
+  - [ ] **`WithHeartbeat` godoc sizing table + zero-warning** (Rev 7, per SPEC §6.1 lines 652–675 + §10 #47): the doc-comment includes the partition-detection guidance (timeout ≈ 2× heartbeat) and three workload tiers — high-throughput / low-latency (`5s` = 10s detection), batch / low-priority (`30s` = 60s detection, default), battery / behind-LB (`60s` = 120s detection). `WithHeartbeat(0)` triggers a `Dial`-time warning log "heartbeats disabled — strongly discouraged: broker partitions become undetectable until the next frame is written" (asserted via a captured log buffer in the unit test).
+- **Verify:** Unit tests for each option's effect on the underlying `amqp091.Config`. Smoke integration test asserts `rabbitmqctl list_connections name client_properties` matches: `name` ends with `-pub-N` / `-con-N`, `client_properties` includes the documented keys.
+- **Files:** edits to `options_connection.go`, `options_connection_test.go`.
+- **Deps:** T07, T07d.
+
+### [ ] T34b — SASL EXTERNAL (mTLS-only auth) · S
+SPEC §6.1 + §10 #17: enterprise deployments at billions/day commonly
+use mTLS-only auth via SASL EXTERNAL (password-less, identity from
+client cert).
+- **Acceptance:**
+  - [ ] `WithSASLMechanism(mech SASLMechanism)` option wires `mech` into the `amqp091.Config.SASL` field. `SASLPlain` (default) constructs an `&amqp091.PlainAuth{}`; `SASLExternal` constructs the `EXTERNAL` mechanism (no user/pass).
+  - [ ] When `SASLExternal` is selected, **`WithAuth` becomes a no-op** and `Dial` logs a single warning ("WithAuth ignored under SASL EXTERNAL"). The TLS config must present a client certificate; absence of TLS config returns `ErrInvalidOptions` at `Dial`.
+  - [ ] godoc on `WithSASLMechanism` documents the broker-side requirement: `rabbitmq_auth_mechanism_ssl` plugin enabled, user mapped via `external_auth`. Cross-references SPEC §10 #17.
+- **Verify:** Integration test against a testcontainer with `rabbitmq_auth_mechanism_ssl` enabled and a user created via the `external_auth` backend. Test matrix (Rev 6 expanded):
+  - **(a) success:** `WithSASLMechanism(SASLExternal)` + `amqps://` + TLS config with client cert: `Dial` succeeds; basic publish/consume round-trip works.
+  - **(b) WithAuth no-op:** `WithSASLMechanism(SASLExternal)` + `WithAuth("wrong", "password")` + valid client cert: `Dial` succeeds, warning log emitted, password is ignored.
+  - **(c) no TLS config:** `WithSASLMechanism(SASLExternal)` + no `WithTLSConfig`: `Dial` returns `ErrInvalidOptions` with reason "TLS required for SASL EXTERNAL".
+  - **(d) TLS without client cert:** `WithSASLMechanism(SASLExternal)` + `WithTLSConfig(&tls.Config{})` (no `Certificates`, no `GetClientCertificate`): `Dial` returns `ErrInvalidOptions` with reason "client certificate required for SASL EXTERNAL".
+  - **(e) plain amqp scheme:** `WithSASLMechanism(SASLExternal)` + valid TLS + endpoint `amqp://...`: `Dial` returns `ErrInvalidOptions` with reason "amqps:// required for SASL EXTERNAL".
+- **Files:** edits to `options_connection.go`, `connection.go`, `connection_sasl_external_integration_test.go`.
+- **Deps:** T07, T32 (TLS), T37 (`amqptest` for the SSL-auth-enabled testcontainer fixture).
+
+### [ ] T35 — `AutoAck()` opt-in + warning · S
+- **Acceptance:**
+  - [ ] `ConsumerBuilder.AutoAck()` enables the AMQP `no-ack` flag.
+  - [ ] godoc on the method contains the four-bullet warning from SPEC §6.3 verbatim.
+  - [ ] Consumer with `AutoAck` does not call `Ack/Nack`; handler errors are logged as warnings (with sample suppression).
+- **Verify:** Integration test that publishes 100 messages, AutoAck consumer crashes mid-stream, restarts → asserts that previously-streamed messages are gone (demonstrating the trade-off, not a regression).
+- **Files:** edits to `consumer.go`, `consumer_builder.go`, `consumer_autoack_integration_test.go`.
+- **Deps:** T18.
+
+### [ ] T36 — Remaining consumer options · S
+SPEC compliance reminder: **`NoLocal()` is intentionally omitted** (SPEC
+§6 "Note on AMQP 0-9-1 vs RabbitMQ" and SPEC §10 decision 10). RabbitMQ
+silently ignores the `no-local` flag on `basic.consume`; exposing it
+would be misleading API surface.
+- **Acceptance:**
+  - [ ] `Exclusive()`, `Args(Headers)`, `Tag(string)` builder methods land on both `ConsumerBuilder` and `BatchConsumerBuilder` and round-trip the values into the underlying `basic.consume` frame.
+  - [ ] **No `NoLocal()` method** on either builder — verified by a unit test that asserts the symbol is absent (`grep`-style guard in `consumer_api_test.go`).
+  - [ ] **`OnCancel(func(reason string))`** fires when broker sends `basic.cancel` (queue deleted, exclusive forced off, etc.). The reason is sourced from the AMQP frame.
+  - [ ] **`Consume(ctx, ...)` returns `ErrConsumerCancelled` (wrapping the reason)** after delivering the `OnCancel` callback, so the consumer goroutine is never silently dead. The library does NOT auto-redeclare or reissue `basic.consume` — operators usually deleted the queue on purpose.
+  - [ ] **Mandatory metric `consumer_cancelled_total{queue, reason}`** increments per received `basic.cancel`.
+  - [ ] The library advertises `consumer_cancel_notify=true` in `connection.start-ok` client capabilities (already default in `amqp091-go`; assert via a recorded frame).
+- **Verify:** Integration tests: declare a queue, attach consumer with `OnCancel` callback, delete the queue, assert callback fires with reason `"queue deleted"`, `Consume` returns `errors.Is(err, ErrConsumerCancelled)`, and `consumer_cancelled_total{queue, reason}` == 1. Symbol-absence test asserts the public surface has no `NoLocal` method on either builder.
+- **Files:** edits to `consumer.go`, `consumer_builder.go`, `batch_consumer_builder.go`, `consumer_cancel_integration_test.go`, `consumer_api_test.go`.
+- **Deps:** T18.
+
+### [ ] T37 — `amqpmock/` + `amqptest/` subpackages · M
+Rev 5 promotes the testcontainers helper to a public `amqptest/`
+subpackage so downstream applications can reuse the fixture.
+- **Acceptance:**
+  - [ ] `go generate ./...` produces gomock mocks for `codec.Codec`, `log.Logger`, all three metrics interfaces, `otel.Tracer`.
+  - [ ] Hand-written `amqpmock.NewDelivery[M](Fixture)` and `amqpmock.NewBatch[M](Fixture)` constructors that produce usable `*Delivery[M]` / `*Batch[M]` values for tests.
+  - [ ] Root package has zero gomock imports at runtime (only in `amqpmock/` and `*_test.go`).
+  - [ ] **`amqptest/` public package**: `amqptest.NewRabbitMQ(t *testing.T, opts ...Option) *RabbitMQ` spins up a `rabbitmq:3.13.x-management` or `rabbitmq:4.0.x-management` testcontainer with:
+    - `rabbitmq_delayed_message_exchange` plugin (for T31).
+    - `rabbitmq_auth_mechanism_ssl` plugin + `external_auth` user (for T34b).
+    - Pre-generated TLS server + client certs in `amqptest/certs/` (for T32 + T34b).
+    Options: `WithRabbitMQVersion(string)`, `WithEnabledPlugins(...string)`, `WithExtraConfig(map[string]string)`.
+  - [ ] **Plugin enablement strategy (Rev 6) — three explicit modes**, evaluated in order:
+    1. **Pre-baked image:** if env `AMQPTEST_IMAGE` is set, that image is used as-is. Library ships `amqptest/docker/Dockerfile.amqptest` so consumers can publish their own.
+    2. **Mounted `.ez`:** if env `AMQPTEST_DELAYED_PLUGIN_FILE` points at a local `.ez`, mount it into `/plugins/` and enable via `RABBITMQ_ENABLED_PLUGINS_FILE`. `amqptest/README.md` lists tested plugin versions per RabbitMQ minor + download URLs.
+    3. **Skip fallback:** neither set → `amqptest.RequireDelayedExchange(t)` calls `t.Skip("delayed-message plugin not available; set AMQPTEST_IMAGE or AMQPTEST_DELAYED_PLUGIN_FILE")`. Tests not gated on the delayed exchange run normally.
+  - [ ] `amqptest.RabbitMQ` exposes `URI() string` (with credentials), `AMQPSURI() string`, `Cleanup(t)`, and `Container() testcontainers.Container` for advanced cases.
+  - [ ] godoc and a README in `amqptest/` document downstream usage (`go test ./...` from another module) and the three plugin modes.
+- **Verify:** Run `go list -deps ./... | grep go.uber.org/mock` and confirm only test files match. Downstream-usability test: a separate `examples/integration-test-fixture/` module imports `amqptest` and asserts the fixture spins up cleanly without root-package leakage.
+- **Files:** `amqpmock/codec.go`, `amqpmock/logger.go`, `amqpmock/metrics.go`, `amqpmock/tracer.go`, `amqpmock/delivery.go`, `amqpmock/batch.go`, `amqpmock/*_test.go`, plus `//go:generate` lines in source files. **New:** `amqptest/rabbitmq.go`, `amqptest/options.go`, `amqptest/plugins.go` (RequireDelayedExchange/RequireSSLAuth helpers), `amqptest/certs/{ca.pem,server.pem,server.key,client.pem,client.key}`, `amqptest/docker/Dockerfile.amqptest`, `amqptest/README.md`, `amqptest/*_test.go`.
+- **Deps:** T03, T04, T05, T09, T17, T23.
+
+### Checkpoint — Phase 8 done
+- [ ] mTLS + cluster failover green.
+- [ ] All Connection/Consumer/BatchConsumer options surfaced.
+- [ ] AutoAck warning documented and demonstrated.
+- [ ] Mocks usable downstream.
+- [ ] **Review with human before Phase 9.**
+
+---
+
+## Phase 9 — Release readiness: v0.1.0
+
+### [ ] T38 — Examples · M
+- **Acceptance:** One runnable `main.go` under each of `examples/{publish,consume,batch_publish,batch_consume,rpc,delayed,deadletter,topology,otel}/`.
+- **Verify:** CI smoke step builds and runs each example against a testcontainer RabbitMQ.
+- **Files:** `examples/*/main.go`.
+- **Deps:** Phases 1–7.
+
+### [ ] T38b — `examples/idempotent_consume/` · S
+Rev 6 canonical reference for the dedupe-by-`MessageID` pattern
+from SPEC §6.2.1. Cited from every godoc that mentions duplicates
+(PublishRetry, PublishBatch channel-close, Replier at-least-once).
+- **Acceptance:**
+  - [ ] `examples/idempotent_consume/main.go` ships a runnable consumer with a bounded LRU cache (~10k entries / 15-min TTL) keyed by `MessageID`, demonstrating the §6.2.1 pattern verbatim.
+  - [ ] A companion publisher (in the same file or a sibling `cmd/main.go`) deliberately publishes the same `MessageID` twice (via a `PublishRetry`-induced retry) and the consumer demonstrates exactly-once handler invocation.
+  - [ ] README in the example folder explains: when to use, cache-sizing guidance, persistence options (Redis/DB) for cross-process dedupe.
+- **Verify:** CI smoke test runs the example against a testcontainer; asserts the handler observed each `MessageID` exactly once across a forced reconnect that triggers duplicates.
+- **Files:** `examples/idempotent_consume/main.go`, `examples/idempotent_consume/README.md`.
+- **Deps:** Phase 2 (T12, T13), Phase 4 (T18).
+
+### [ ] T38c — `examples/ordered_consume/` · S
+Rev 6 canonical reference for strict per-queue ordering with
+failover, demonstrating the `Concurrency(1) + SingleActiveConsumer`
+pattern from SPEC §6.3. Cited from the `Concurrency` godoc.
+- **Acceptance:**
+  - [ ] `examples/ordered_consume/main.go` declares a queue with `Queue.SingleActiveConsumer=true`; starts two consumer instances with `Concurrency(1)`; publishes a numbered sequence `[0..N]`; the active consumer prints them in order; killing the active consumer demonstrates the broker promoting the standby with continued in-order delivery.
+  - [ ] README explains: when ordering matters, the trade-off (one active worker at a time = lower throughput), and the failover semantics.
+- **Verify:** CI smoke test asserts publish order matches handler order across an active-consumer kill.
+- **Files:** `examples/ordered_consume/main.go`, `examples/ordered_consume/README.md`.
+- **Deps:** Phase 3 (T14, T15), Phase 4 (T18).
+
+### [ ] T39 — README quickstart · S
+- **Acceptance:** README has a one-screen quickstart (Dial → Topology → Publisher → Consumer), feature list, link to every example, link to SPEC.md, link to godoc.
+- **Verify:** Markdown lints clean.
+- **Files:** `README.md`.
+- **Deps:** T38.
+
+### [ ] T40 — CHANGELOG + final godoc pass · S
+- **Acceptance:**
+  - [ ] CHANGELOG.md follows Keep a Changelog with a single Unreleased section.
+  - [ ] Every exported identifier has a godoc comment.
+- **Verify:** `golangci-lint run --enable=revive` with revive's missing-godoc rule passes.
+- **Files:** `CHANGELOG.md`, godoc edits across the tree.
+- **Deps:** Phases 1–8.
+
+### [ ] T41 — Coverage gate · S
+- **Acceptance:**
+  - [ ] ≥ 80% line coverage per package.
+  - [ ] ≥ 95% on `internal/reconnect`, `internal/confirms`, `channelpool`, **`internal/amqperror`**, **`internal/redact`** (Rev 7, per SPEC §9 line 2107–2109 — both packages are choke-points for AMQP correctness and credential safety; their coverage is load-bearing for the §9 reliability bar, not optional).
+  - [ ] Coverage badge or coverage delta posted in CI.
+- **Verify:** `go test -cover ./...` per package.
+- **Files:** add test cases as needed; CI workflow assertion.
+- **Deps:** Phases 1–8.
+
+### [ ] T42 — CI workflow · S
+- **Acceptance:**
+  - [ ] `.github/workflows/ci.yml` runs on push/PR: lint, unit, integration, conformance (matrix over Go 1.23 + 1.24).
+  - [ ] Concurrency cancellation: PR push cancels in-flight run for the same ref.
+- **Verify:** Workflow passes on the first push.
+- **Files:** `.github/workflows/ci.yml`.
+- **Deps:** Phases 1–8.
+
+### [ ] T43 — Release workflow · XS
+- **Acceptance:**
+  - [ ] `.github/workflows/release.yml` triggered on tag push matching `v*.*.*`.
+  - [ ] Single step: `gh release create "$GITHUB_REF_NAME" --generate-notes`.
+  - [ ] No goreleaser, no binary artifacts (pure library).
+- **Verify:** Cut a `v0.0.1-test` tag, observe workflow creates a GitHub release with auto-generated notes.
+- **Files:** `.github/workflows/release.yml`.
+- **Deps:** T42.
+
+### [ ] T44 — Conformance tests · M
+- **Acceptance:**
+  - [ ] `conformance/` package with `//go:build conformance` tagged tests.
+  - [ ] Covers: confirm ordering, content header encoding, mandatory return path, **broker-nack path** (`x-overflow=reject-publish` + `x-max-length=0`), `basic.cancel` notifications, **`basic.qos.global=true`** for `ChannelQoS()`, exchange types (Direct, Fanout, Topic, Headers, x-delayed-message), Quorum + Classic queue semantics, **`x-delivery-limit` enforcement on quorum queues**, **mandatory return/ack correlation order (return → ack)**.
+- **Verify:** `go test -tags=conformance ./conformance/...` green against both RabbitMQ 3.13 and 4.x.
+- **Files:** `conformance/*.go`.
+- **Deps:** Phases 1–7.
+
+### [ ] T44b — Throughput benchmark suite · S
+SPEC §9 reliability bar: bilhões/dia requires demonstrated throughput
+on a reference runner. Bench gates block the `v0.1.0` tag.
+- **Acceptance:**
+  - [ ] `BenchmarkPublishConfirmed` (single publisher conn, single channel via pool): **≥ 30k msg/s** sustained on the reference runner (Apple M-series laptop or GH-hosted `macos-14`) against a local pinned-image testcontainer, JSON codec, confirms ON, 1 KB message body.
+  - [ ] `BenchmarkPublishConfirmedMultiConn` with `WithPublisherConnections(4) + WithChannelPoolSize(16)`: **≥ 100k msg/s** sustained on the same hardware. Demonstrates that the multi-conn fan-out scales ≥ 3× over single-conn.
+  - [ ] `BenchmarkPublishBatch` ≥ 5× the `BenchmarkPublishConfirmed` single-publish rate.
+  - [ ] `BenchmarkConsume`: ≥ 30k msg/s consume with `Concurrency(8) + Prefetch(256)`.
+  - [ ] Bench results CI-recorded as a JSON artifact; nightly drift report compares against the previous tag.
+- **Verify:** `go test -bench=. -benchmem -run=^$ ./...` reaches the gates locally and on the reference CI runner. Bench gate fails the build if a number drops > 20% versus the previous tag.
+- **Files:** `bench_publish_test.go`, `bench_publish_batch_test.go`, `bench_consume_test.go`, `bench_multiconn_test.go`, CI workflow `.github/workflows/bench.yml`.
+- **Deps:** Phases 1–5, T37.
+
+### [ ] T45 — Reconnect chaos test (scaled up) · S
+- **Acceptance:** Integration test: **5-minute outage @ 10k msg/s** with confirms (was 60s @ 1k msg/s), zero loss, `goleak.VerifyNone`. **`WithPublisherConnections(4)` enabled** so the test also exercises the multi-conn fan-out under chaos. Re-subscribe metric (`consumer_resubscribed_total`) and handler-aborted metric (`consumer_handler_aborted_channel_closed_total`) asserted non-zero by the test, demonstrating Rev 5 invariants hold under chaos. Topology re-declared on reconnect; in-flight handlers cancel via ctx with cause `ErrChannelClosed`.
+- **Verify:** Test runs in <7 minutes on CI; flaky-rate <1% over 50 runs.
+- **Files:** `chaos_reconnect_integration_test.go`.
+- **Deps:** Phase 1, T07d, T12, T18, T20.
+
+### [ ] T45b — Security regression scan · S
+SPEC §8 + §9 reliability bar: credential leakage is a defect.
+- **Acceptance:**
+  - [ ] Integration test runs a 60s end-to-end workload against a credentialed URI (`amqp://leak_user:s3cret-pass@host:5672/v`); captures every emitted log line, error string, span attribute snapshot, and Prometheus metric label value into a single buffer.
+  - [ ] Test scans the buffer with `regexp.MustCompile("s3cret-pass|leak_user:")` and asserts **zero matches**. A control assertion in the same test verifies the buffer is non-empty (otherwise a no-op test would pass trivially).
+  - [ ] Also asserts every captured AMQP URI matches the redacted shape (`amqp[s]?://\*\*\*@`).
+- **Verify:** Test fails if any redaction site bypasses `internal/redact.URI`. Acts as a runtime regression for the SPEC §8 invariant.
+- **Files:** `security_redaction_integration_test.go`.
+- **Deps:** T07c, T07d, T12, T18, T37.
+
+### [ ] T46 — Cut `v0.1.0` · XS
+- **Acceptance:** `git tag v0.1.0` + `git push --tags`; release workflow runs successfully.
+- **Verify:** GitHub release page exists, includes auto-generated notes, links to godoc.
+- **Files:** none (tag operation).
+- **Deps:** T38, T38b, T38c, T39–T45b.
+
+### Checkpoint — v0.1.0 shipped
+- [ ] Every SPEC §9 success criterion ticked.
+- [ ] `v0.1.0` tag on `main`.
+- [ ] README + examples link from the GitHub repo landing page.
+- [ ] **Done.**
+
+---
+
+## Quick stats
+- Total tasks: **54** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example).
+- Phases: **9**.
+- Estimated sizing: 5× XS · 31× S · 18× M · 0× L (none too big).
+- Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
+- Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.
+- Bench gates (T44b): ≥ 30k msg/s single-conn, ≥ 100k msg/s with `WithPublisherConnections(4)+WithChannelPoolSize(16)`, `PublishBatch` ≥ 5× `Publish`.
+- Operational decisions: deps pinned exact in `go.mod`; testcontainer images pinned minor-patch; conformance against a live broker (no stub); pre-commit hooks opt-in via `make hooks`; no goreleaser (pure library); OTel Messaging semconv pinned to v1.27.0+; `golangci-lint` includes `errorlint`; `amqptest` plugin enablement supports three explicit modes (pre-baked image / mounted `.ez` / `t.Skip`).
+- Reliability invariants (mandatory): credential redaction (T07c, T45b), consumer re-subscribe (T18, T19), handler-ctx cancel on channel close (T18, T19), broker-nack → `ErrPublishNacked` (T11, T13), JSON strict default (T09), quorum-queue `x-delivery-limit` (T14, T15, T20), **synchronous reconnect barrier + degraded state** (T07, T16, T45), **at-least-once with documented dedupe pattern** (T13, T38b, SPEC §6.2.1), **HandlerTimeout verdict consistency** (T18, T18b), **client-side UserID validation** (T13), **Replier missing-DLX validation** (T30), **SASL EXTERNAL fail-closed** (T34b), **basic.cancel surfacing** (T36), **default conn counts 2/2 with consumer-tag UUID** (T07d, T18).
