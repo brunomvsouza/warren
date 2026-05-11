@@ -1,0 +1,25 @@
+# Build & test artifacts
+*.test
+*.out
+*.prof
+coverage.out
+coverage.html
+coverage.txt
+
+# Vendor
+vendor/
+
+# IDE / editor
+.idea/
+.vscode/
+.cursor/
+*.swp
+*.swo
+*~
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
