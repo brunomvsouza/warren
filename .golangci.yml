@@ -12,6 +12,7 @@ linters:
     - unparam
     - bodyclose
     - nilerr
+    - errorlint
   settings:
     revive:
       rules:
