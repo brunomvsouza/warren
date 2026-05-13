@@ -49,7 +49,7 @@ Set up the empty Go module with the bare-minimum dev ergonomics.
 - **Files:** `go.mod`, `go.sum`, `LICENSE`, `Makefile`, `.golangci.yml`, `.gitignore`, `doc.go`.
 - **Deps:** none.
 
-### [ ] T02 — Sentinel errors, type aliases, constants · M
+### [x] T02 — Sentinel errors, type aliases, constants · M
 Static foundation that everything else imports. Rev 5 added three
 new sentinels (`ErrPublishNacked`, `ErrChannelPoolExhausted`,
 `ErrBatchTooLarge`) and the `SASLMechanism` typed enum. Rev 6 adds
@@ -96,7 +96,7 @@ three more (`ErrReconnecting`, `ErrTopologyRedeclareFailed`,
 - **Files:** `errors.go`, `errors_test.go`, `types.go`, `types_test.go` (constants).
 - **Deps:** T01.
 
-### [ ] T03 — `log/` package · S
+### [x] T03 — `log/` package · S
 Pluggable logger with three adapters. All adapters route through
 `internal/redact.URI` before emitting any string that contains an
 AMQP URI.
@@ -109,7 +109,7 @@ AMQP URI.
 - **Files:** `log/logger.go`, `log/noop.go`, `log/slog.go`, `log/std.go`, `log/*_test.go`.
 - **Deps:** T02, **T07c**.
 
-### [ ] T04 — `metrics/` package · M
+### [x] T04 — `metrics/` package · M
 Three metric interfaces, Prometheus default, NoOp. Rev 5 added
 bounded labels, opt-in high-cardinality, configurable latency
 buckets, and a set of mandatory metrics.
@@ -193,7 +193,7 @@ reply-code sentinels, and powers `AMQPCode` + `IsTransient` /
 - **Deps:** T02.
 - **Blocks:** T07 (consumes the translator), and all downstream broker-touching tasks.
 
-### [ ] T07c — `internal/redact`: AMQP URI credential redaction · S
+### [x] T07c — `internal/redact`: AMQP URI credential redaction · S
 Mandatory choke-point for the SPEC §8 "Always: redact credentials"
 rule. Every string the library hands to logs, metric labels, span
 attributes, or error messages that contains an AMQP URI passes
