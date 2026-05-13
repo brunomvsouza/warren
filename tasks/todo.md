@@ -125,7 +125,7 @@ buckets, and a set of mandatory metrics.
 - **Files:** `metrics/metrics.go`, `metrics/prometheus.go`, `metrics/noop.go`, `metrics/*_test.go`.
 - **Deps:** T02, **T07c**.
 
-### [ ] T05 — `otel/` package · S
+### [x] T05 — `otel/` package · S
 Tracer interface with NoOp default and AMQP header propagator
 skeleton. Pinned to **OpenTelemetry Messaging semantic conventions
 v1.27.0+**.
