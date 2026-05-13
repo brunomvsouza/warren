@@ -139,7 +139,7 @@ v1.27.0+**.
 - **Files:** `otel/tracer.go`, `otel/propagation.go`, `otel/*_test.go`.
 - **Deps:** T02.
 
-### [ ] T06 — `internal/reconnect` + `RetryPolicy` · M
+### [x] T06 — `internal/reconnect` + `RetryPolicy` · M
 Generic supervised reconnect loop usable by Connection.
 - **Acceptance:**
   - [ ] `RetryPolicy` struct (exposed in root package) with exponential backoff + jitter; `Min`, `Max`, `Factor`, `Retries`, `WithoutJitter`.
