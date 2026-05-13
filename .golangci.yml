@@ -22,6 +22,7 @@ linters:
     gosec:
       excludes:
         - G115 # integer overflow conversion — many AMQP frame sizes are uint16/uint8 by spec
+        - G101 # test fixtures in *_test.go deliberately contain fake AMQP credentials
 
 issues:
   max-issues-per-linter: 0
