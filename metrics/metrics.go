@@ -2,9 +2,12 @@ package metrics
 
 import "time"
 
-// DefaultHistogramBuckets are the default latency histogram buckets in milliseconds,
-// tuned for AMQP-local publish/handle latencies.
-var DefaultHistogramBuckets = []float64{0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 5000}
+// DefaultHistogramBuckets returns the default latency histogram buckets in
+// milliseconds, tuned for AMQP-local publish/handle latencies.
+// A new slice is returned on each call so callers cannot corrupt shared state.
+func DefaultHistogramBuckets() []float64 {
+	return []float64{0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 5000}
+}
 
 // MetricsLabel identifies an optional high-cardinality label that can be
 // enabled via WithMetricsLabels on a connection or per-builder.

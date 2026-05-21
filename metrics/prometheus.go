@@ -20,11 +20,12 @@ type PrometheusClientMetrics struct {
 }
 
 // NewPrometheusClientMetrics creates a PrometheusClientMetrics and registers all
-// mandatory collectors into reg. If buckets is nil, DefaultHistogramBuckets is used.
+// mandatory collectors into reg. If buckets is nil, DefaultHistogramBuckets() is used
+// (a fresh slice per call so callers cannot corrupt shared state).
 // Returns an error if any collector is already registered.
 func NewPrometheusClientMetrics(reg prometheus.Registerer, buckets []float64) (*PrometheusClientMetrics, error) {
 	if buckets == nil {
-		buckets = DefaultHistogramBuckets
+		buckets = DefaultHistogramBuckets()
 	}
 	m := &PrometheusClientMetrics{
 		reconnectsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -79,11 +80,12 @@ type PrometheusPublisherMetrics struct {
 }
 
 // NewPrometheusPublisherMetrics creates a PrometheusPublisherMetrics and registers all
-// mandatory collectors into reg. If buckets is nil, DefaultHistogramBuckets is used.
+// mandatory collectors into reg. If buckets is nil, DefaultHistogramBuckets() is used
+// (a fresh slice per call so callers cannot corrupt shared state).
 // Returns an error if any collector is already registered.
 func NewPrometheusPublisherMetrics(reg prometheus.Registerer, buckets []float64) (*PrometheusPublisherMetrics, error) {
 	if buckets == nil {
-		buckets = DefaultHistogramBuckets
+		buckets = DefaultHistogramBuckets()
 	}
 	m := &PrometheusPublisherMetrics{
 		inFlight: prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -141,11 +143,12 @@ type PrometheusConsumerMetrics struct {
 }
 
 // NewPrometheusConsumerMetrics creates a PrometheusConsumerMetrics and registers all
-// mandatory collectors into reg. If buckets is nil, DefaultHistogramBuckets is used.
+// mandatory collectors into reg. If buckets is nil, DefaultHistogramBuckets() is used
+// (a fresh slice per call so callers cannot corrupt shared state).
 // Returns an error if any collector is already registered.
 func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64) (*PrometheusConsumerMetrics, error) {
 	if buckets == nil {
-		buckets = DefaultHistogramBuckets
+		buckets = DefaultHistogramBuckets()
 	}
 	m := &PrometheusConsumerMetrics{
 		resubscribedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
