@@ -26,6 +26,7 @@ const (
 //   - connection_reconnects_total{role}
 //   - connection_blocked_seconds{role}
 //   - topology_redeclare_seconds{role}
+//   - connection_degraded_total{role, reason}
 type ClientMetrics interface {
 	// RecordReconnect increments the reconnect counter for the given role.
 	RecordReconnect(role string)
@@ -33,6 +34,9 @@ type ClientMetrics interface {
 	RecordBlocked(role string, d time.Duration)
 	// RecordTopologyRedeclare records the duration of a topology redeclaration after reconnect.
 	RecordTopologyRedeclare(role string, d time.Duration)
+	// RecordDegraded increments the degraded-state counter for the given role and reason.
+	// Fired once per degraded-state transition (re-armed on recovery).
+	RecordDegraded(role, reason string)
 }
 
 // PublisherMetrics records publisher-level observations.
