@@ -13,6 +13,9 @@ type amqpChannel interface {
 	Close() error
 }
 
+// Compile-time proof that *amqp091.Channel satisfies amqpChannel.
+var _ amqpChannel = (*amqp091.Channel)(nil)
+
 // pooledEntry wraps an amqpChannel with its close-notification channel so the
 // pool can detect broker-side channel closure without holding a lock.
 type pooledEntry struct {
@@ -90,6 +93,22 @@ func (p *channelPool) getOrOpen() (pooledEntry, error) {
 			}
 			closeCh := ch.NotifyClose(make(chan *amqp091.Error, 1))
 			return pooledEntry{ch: ch, closeCh: closeCh}, nil
+		}
+	}
+}
+
+// Drain discards all idle channels in the free list without waiting for
+// in-flight acquires to complete. It is called by the reconnect supervisor
+// (T07d) after a TCP reconnect so that stale channels from the dead socket
+// are never reused: the supervisor opens fresh channels on the new connection
+// and the pool repopulates lazily on subsequent Acquire calls.
+func (p *channelPool) Drain() {
+	for {
+		select {
+		case entry := <-p.free:
+			_ = entry.ch.Close()
+		default:
+			return
 		}
 	}
 }

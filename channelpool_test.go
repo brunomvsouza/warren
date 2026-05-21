@@ -56,9 +56,10 @@ func TestChannelPool_Saturated_ReturnsExhausted(t *testing.T) {
 	wg.Wait()
 }
 
-// — basic acquire/release —————————————————————————————————————————————————
+// — acquire/release —————————————————————————————————————————————————————
 
 func TestChannelPool_AcquireRelease_IdleChannelReused(t *testing.T) {
+	defer goleak.VerifyNone(t)
 
 	openCount := 0
 	var mu sync.Mutex
@@ -92,9 +93,10 @@ func TestChannelPool_AcquireRelease_IdleChannelReused(t *testing.T) {
 	assert.Equal(t, 1, total, "expected channel reuse; got %d opens", total)
 }
 
-// TestChannelPool_ClosedChannelDiscarded asserts that a channel whose close
-// notification fires is not returned to the idle list on release.
-func TestChannelPool_ClosedChannelDiscarded(t *testing.T) {
+// TestChannelPool_ClosedDuringUse_DiscardedOnRelease asserts that a channel
+// closed by the broker *while in use* is not returned to the idle list.
+func TestChannelPool_ClosedDuringUse_DiscardedOnRelease(t *testing.T) {
+	defer goleak.VerifyNone(t)
 
 	openCount := 0
 	var mu sync.Mutex
@@ -108,7 +110,7 @@ func TestChannelPool_ClosedChannelDiscarded(t *testing.T) {
 
 	p := newChannelPool(2, openFn)
 
-	// Acquire a channel, trigger broker-side close, then release.
+	// Acquire, simulate broker close while in use, then release.
 	ch, rel, err := p.Acquire(context.Background())
 	require.NoError(t, err)
 	fc, ok := ch.(*fakeChannel)
@@ -126,6 +128,77 @@ func TestChannelPool_ClosedChannelDiscarded(t *testing.T) {
 	mu.Unlock()
 
 	assert.Equal(t, 2, total, "expected closed channel to be discarded and a new one opened")
+}
+
+// TestChannelPool_ClosedWhileIdle_DiscardedOnAcquire asserts that a channel
+// closed by the broker *while idle in the free list* is discarded when the
+// next Acquire attempts to reuse it (exercises the getOrOpen stale-drain loop).
+func TestChannelPool_ClosedWhileIdle_DiscardedOnAcquire(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	openCount := 0
+	var mu sync.Mutex
+	var lastFake *fakeChannel
+
+	openFn := func() (amqpChannel, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		openCount++
+		fc := &fakeChannel{}
+		lastFake = fc
+		return fc, nil
+	}
+
+	p := newChannelPool(2, openFn)
+
+	// Acquire and release back to the idle list.
+	_, rel1, err := p.Acquire(context.Background())
+	require.NoError(t, err)
+	rel1() // channel now sits in the free list
+
+	// Simulate broker closing the channel while it is idle.
+	mu.Lock()
+	fc := lastFake
+	mu.Unlock()
+	require.NotNil(t, fc)
+	fc.simulateClose()
+
+	// Next Acquire must detect the stale entry in getOrOpen and open a new one.
+	_, rel2, err := p.Acquire(context.Background())
+	require.NoError(t, err)
+	rel2()
+
+	mu.Lock()
+	total := openCount
+	mu.Unlock()
+
+	assert.Equal(t, 2, total, "expected stale idle channel to be discarded and a new one opened")
+}
+
+// TestChannelPool_OpenFnError_TokenReturned asserts that when openFn fails
+// the semaphore token is returned so the pool remains usable.
+func TestChannelPool_OpenFnError_TokenReturned(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	calls := 0
+	openFn := func() (amqpChannel, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("transient broker error")
+		}
+		return &fakeChannel{}, nil
+	}
+
+	p := newChannelPool(1, openFn)
+
+	// First acquire fails — token must be returned.
+	_, _, err := p.Acquire(context.Background())
+	require.Error(t, err)
+
+	// Second acquire must succeed, proving the token was returned.
+	_, rel, err := p.Acquire(context.Background())
+	require.NoError(t, err)
+	rel()
 }
 
 // — race ——————————————————————————————————————————————————————————————————
@@ -183,6 +256,8 @@ func (f *fakeChannel) NotifyClose(c chan *amqp091.Error) chan *amqp091.Error {
 func (f *fakeChannel) Close() error { return nil }
 
 // simulateClose fires the close notification, mirroring a broker-side close.
+// The notification is written to the buffered channel synchronously; no sleep
+// is needed — the value is observable immediately after this call returns.
 func (f *fakeChannel) simulateClose() {
 	f.mu.Lock()
 	ch := f.notifyCh
@@ -194,6 +269,4 @@ func (f *fakeChannel) simulateClose() {
 	f.once.Do(func() {
 		ch <- &amqp091.Error{Code: 404, Reason: "simulated close"}
 	})
-	// Brief pause so the notification is observable on next Acquire/release.
-	time.Sleep(5 * time.Millisecond)
 }
