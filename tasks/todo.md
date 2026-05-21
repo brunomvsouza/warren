@@ -177,7 +177,7 @@ T07 keeps the per-socket lifecycle focused.
 - **Files:** `connection.go`, `options_connection.go`, `connection_test.go`, `connection_integration_test.go`.
 - **Deps:** T03, T04, T05, T06, **T07c**.
 
-### [ ] T07b — `internal/amqperror`: AMQP reply-code translation · S
+### [x] T07b — `internal/amqperror`: AMQP reply-code translation · S
 Centralised translator that converts `*amqp091.Error` (carried by
 `amqp091-go` on channel/connection close) into wraps of the SPEC §6.8
 reply-code sentinels, and powers `AMQPCode` + `IsTransient` /
