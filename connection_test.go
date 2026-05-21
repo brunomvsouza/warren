@@ -18,6 +18,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	amqp "github.com/brunomvsouza/amqp"
 )
@@ -430,6 +431,7 @@ func TestDial_sASLExternal_getClientCertificateFn_passesValidation(t *testing.T)
 // — Multi-conn pool: dial count ——————————————————————————————————————————
 
 func TestDial_multiConn_dialCalledPubPlusConTimes(t *testing.T) {
+	defer goleak.VerifyNone(t)
 	// Each connection in the pool attempts a dial. With Retries=1 and an instant-
 	// fail dialer, Dial exhausts all attempts after exactly pubConns+conConns calls.
 	const pubN, conN = 3, 2
@@ -457,6 +459,7 @@ func TestDial_multiConn_dialCalledPubPlusConTimes(t *testing.T) {
 }
 
 func TestDial_multiConn_singlePub_opensCorrectPools(t *testing.T) {
+	defer goleak.VerifyNone(t)
 	// Verify pool sizes via NumPubConns / NumConConns when we have a succeeding
 	// dialer. We can't use a real amqp091 connection (needs a broker), so we
 	// verify indirectly: Dial with a failing dialer after validation should fail

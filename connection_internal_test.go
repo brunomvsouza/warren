@@ -67,6 +67,21 @@ func newBareConn(t *testing.T) *Connection {
 	return c
 }
 
+// newManagedWithFakeSupervisor creates a managedConn whose done channel closes
+// when cancel() is called, simulating a supervisor that exits cleanly.
+func newManagedWithFakeSupervisor(t *testing.T) *managedConn {
+	t.Helper()
+	mc := newBareManaged(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	mc.cancel = cancel
+	go func() {
+		<-ctx.Done()
+		close(mc.done)
+	}()
+	t.Cleanup(func() { cancel() })
+	return mc
+}
+
 // newTestManaged creates a managedConn in the reconnecting state with defaults
 // applied, ready for runBarrier tests.
 func newTestManaged(t *testing.T) *managedConn {
@@ -307,4 +322,76 @@ func TestRunBarrier_degradedRecovery_firesOnReconnect(t *testing.T) {
 	mc.mu.RLock()
 	assert.False(t, mc.degraded)
 	mc.mu.RUnlock()
+}
+
+// — Connection.Close ——————————————————————————————————————————————————————
+
+func TestClose_alreadyClosed_returnsErrAlreadyClosed(t *testing.T) {
+	c := &Connection{}
+	c.closed = true
+	assert.ErrorIs(t, c.Close(context.Background()), ErrAlreadyClosed)
+}
+
+func TestClose_emptyPools_completesImmediately(t *testing.T) {
+	c := &Connection{}
+	assert.NoError(t, c.Close(context.Background()))
+	assert.True(t, c.closed)
+}
+
+func TestClose_withSupervisors_cancelsAndDrains(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	mc1 := newManagedWithFakeSupervisor(t)
+	mc2 := newManagedWithFakeSupervisor(t)
+	c := &Connection{}
+	c.pubConns = []*managedConn{mc1}
+	c.conConns = []*managedConn{mc2}
+	assert.NoError(t, c.Close(context.Background()))
+	assert.True(t, c.closed)
+}
+
+func TestClose_idempotent_secondCallReturnsErrAlreadyClosed(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	mc := newManagedWithFakeSupervisor(t)
+	c := &Connection{}
+	c.pubConns = []*managedConn{mc}
+	require.NoError(t, c.Close(context.Background()))
+	assert.ErrorIs(t, c.Close(context.Background()), ErrAlreadyClosed)
+}
+
+func TestClose_contextTimeout_returnsWrappedErr(t *testing.T) {
+	// A managedConn whose done channel never closes simulates a stuck supervisor.
+	mc := newBareManaged(t)
+	// install a no-op cancel so Close doesn't panic on nil
+	_, cancel := context.WithCancel(context.Background())
+	mc.cancel = cancel
+	defer cancel()
+	// done is already created by newBareManaged but never closed
+
+	c := &Connection{}
+	c.pubConns = []*managedConn{mc}
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer closeCancel()
+	err := c.Close(closeCtx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timed out")
+}
+
+// — closeManagedConns —————————————————————————————————————————————————————
+
+func TestCloseManagedConns_nilSlice_doesNotPanic(t *testing.T) {
+	closeManagedConns(nil)
+}
+
+func TestCloseManagedConns_emptySlice_doesNotPanic(t *testing.T) {
+	closeManagedConns([]*managedConn{})
+}
+
+func TestCloseManagedConns_withFakeSupervisors_drainsAll(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	conns := make([]*managedConn, 3)
+	for i := range conns {
+		conns[i] = newManagedWithFakeSupervisor(t)
+	}
+	closeManagedConns(conns)
 }
