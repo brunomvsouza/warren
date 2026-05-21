@@ -2,6 +2,13 @@
 // The default JSON codec is strict (DisallowUnknownFields); use NewJSONLax for back-compat scenarios.
 package codec
 
+import "errors"
+
+// ErrInvalidMessage is returned by Encode/Decode when the payload cannot be
+// processed. Publishers and consumers in the amqp package wrap this error into
+// amqp.ErrInvalidMessage so callers can use either sentinel with errors.Is.
+var ErrInvalidMessage = errors.New("codec: invalid message")
+
 // Codec encodes and decodes message payloads.
 type Codec interface {
 	// Encode serialises v into bytes. Returns ErrInvalidMessage on failure.

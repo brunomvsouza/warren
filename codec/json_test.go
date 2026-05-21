@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	amqp "github.com/brunomvsouza/amqp"
 	"github.com/brunomvsouza/amqp/codec"
 )
 
@@ -43,7 +42,7 @@ func TestNewJSON_Decode_unknownField_returnsErrInvalidMessage(t *testing.T) {
 	var o order
 	err := c.Decode([]byte(`{"id":1,"name":"test","extra":true}`), &o)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, amqp.ErrInvalidMessage), "expected ErrInvalidMessage, got: %v", err)
+	assert.True(t, errors.Is(err, codec.ErrInvalidMessage), "expected codec.ErrInvalidMessage, got: %v", err)
 }
 
 // NewJSONLax — tolerates unknown fields
@@ -66,7 +65,7 @@ func TestNewJSONLax_Decode_invalidJSON_returnsErrInvalidMessage(t *testing.T) {
 	var o order
 	err := c.Decode([]byte(`not json`), &o)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, amqp.ErrInvalidMessage))
+	assert.True(t, errors.Is(err, codec.ErrInvalidMessage))
 }
 
 // Encode error case
@@ -75,7 +74,7 @@ func TestNewJSON_Encode_unencodableValue_returnsErrInvalidMessage(t *testing.T) 
 	c := codec.NewJSON()
 	_, err := c.Encode(make(chan int)) // channels are not JSON-encodable
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, amqp.ErrInvalidMessage))
+	assert.True(t, errors.Is(err, codec.ErrInvalidMessage))
 }
 
 // Round-trip property tests

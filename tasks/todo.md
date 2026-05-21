@@ -255,7 +255,7 @@ TCP connection** (not a global pool across all publisher conns).
 
 ## Phase 2 — Producer: synchronous-with-confirm publish
 
-### [ ] T09 — `codec/` package + JSON · S
+### [x] T09 — `codec/` package + JSON · S
 Codec interface and the first implementation. Rev 5 makes JSON
 **strict by default** (`DisallowUnknownFields`) and adds the panic
 safety contract.
