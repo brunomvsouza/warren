@@ -1,0 +1,125 @@
+package amqp
+
+import (
+	"fmt"
+	"reflect"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/brunomvsouza/amqp/codec"
+)
+
+// Message is a typed AMQP message. M is the payload type; Body holds a pointer
+// to the decoded or to-be-encoded value.
+//
+// Zero-value defaults applied by applyDefaults:
+//   - MessageID is a UUID v7 (RFC 9562) when left empty.
+//   - Timestamp is time.Now() when zero.
+//   - ContentType is set from the codec when empty.
+//   - DeliveryMode zero value is DeliveryModePersistent (durable).
+type Message[M any] struct {
+	Body *M
+
+	// basic.properties — one-to-one mapping with AMQP 0-9-1.
+	MessageID     string
+	CorrelationID string
+	ReplyTo       string
+	Type          string
+	AppID         string
+	// UserID is validated client-side at publish time: if non-empty and differs
+	// from the connection's authenticated user, Publish returns ErrInvalidMessage
+	// without a broker round-trip.
+	UserID string
+	// ContentType is the MIME type of the body (e.g. "application/json").
+	// Default: set from codec.ContentType() when empty.
+	// See ContentEncoding for the transfer-encoding counterpart.
+	ContentType string
+	// ContentEncoding is the transfer encoding applied on top of the codec output
+	// (e.g. "gzip", "deflate"). Default: "" (identity). Set only when you wrap the
+	// codec's output with a compressor or similar transform.
+	ContentEncoding string
+	// Headers is the AMQP field-table. Supported value types:
+	// bool, int8/16/32/64, uint8/16/32/64, float32/64, string, []byte,
+	// time.Time, nil, Headers (nested), []any.
+	// int and uint literals auto-coerce to int64/uint64.
+	// Any other Go type returns ErrInvalidMessage at publish time.
+	Headers Headers
+	// Priority is the AMQP basic.properties.priority octet (wire range 0–255).
+	// RabbitMQ priority queues use 0–9 by convention; values above the queue's
+	// x-max-priority are silently clamped by the broker. Priority on a
+	// non-priority queue has no effect.
+	Priority  uint8
+	Timestamp time.Time
+	// Expiration is the per-message TTL. The publisher serialises it as ASCII
+	// milliseconds in the AMQP shortstr wire format. Sub-millisecond durations
+	// round to 0; the broker interprets "0" as "expire immediately".
+	Expiration time.Duration
+
+	// DeliveryMode controls AMQP delivery persistence. The zero value is
+	// DeliveryModePersistent so Message[M]{} defaults to durable delivery.
+	DeliveryMode DeliveryMode
+
+	// RabbitMQ extensions.
+	// Delay requires the rabbitmq_delayed_message_exchange plugin.
+	Delay time.Duration
+}
+
+// applyDefaults fills MessageID, Timestamp, and ContentType if they are not set.
+// ContentEncoding is intentionally left untouched.
+func (m *Message[M]) applyDefaults(c codec.Codec) {
+	if m.MessageID == "" {
+		id, err := uuid.NewV7()
+		if err == nil {
+			m.MessageID = id.String()
+		}
+	}
+	if m.Timestamp.IsZero() {
+		m.Timestamp = time.Now()
+	}
+	if m.ContentType == "" {
+		m.ContentType = c.ContentType()
+	}
+}
+
+// validateHeaders checks that every value in m.Headers is an AMQP field-table
+// compatible type. Returns ErrInvalidMessage on the first unsupported value.
+func (m *Message[M]) validateHeaders() error {
+	return validateHeaders(m.Headers)
+}
+
+func validateHeaders(h Headers) error {
+	for k, v := range h {
+		if err := validateHeaderValue(k, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateHeaderValue(key string, v any) error {
+	switch typed := v.(type) {
+	case bool,
+		int8, int16, int32, int64,
+		uint8, uint16, uint32, uint64,
+		float32, float64,
+		string, []byte,
+		time.Time,
+		nil:
+		_ = typed
+		return nil
+	case int, uint:
+		return nil
+	case Headers:
+		return validateHeaders(typed)
+	case []any:
+		for i, elem := range typed {
+			if err := validateHeaderValue(fmt.Sprintf("%s[%d]", key, i), elem); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: header %q has unsupported type %s", ErrInvalidMessage, key, reflect.TypeOf(v))
+	}
+}
