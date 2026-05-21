@@ -56,6 +56,9 @@ type Connection struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	closed bool
+
+	// tracks in-flight onTopoDegraded callback goroutines; drained in Close
+	wg sync.WaitGroup
 }
 
 // Dial establishes a supervised AMQP connection and returns it.
@@ -109,8 +112,10 @@ func Dial(ctx context.Context, options ...Option) (*Connection, error) {
 		return nil, err
 	}
 
-	// start supervisor goroutine
-	supCtx, cancel := context.WithCancel(context.Background())
+	// start supervisor goroutine; inherit trace/log values from Dial ctx but
+	// not its cancellation (supervisor must outlive the caller's ctx).
+	// cancel is stored on c and called by Close — gosec G118 is a false positive here.
+	supCtx, cancel := context.WithCancel(context.WithoutCancel(ctx)) //nolint:gosec // G118: cancel stored on struct, called by Close
 	c.cancel = cancel
 	go c.supervisor(supCtx)
 
@@ -127,13 +132,20 @@ func (c *Connection) AuthenticatedUser() string { return c.authUser }
 
 // Health opens a temporary AMQP channel and immediately closes it. Returns an
 // error if the connection is closed, not yet established, or the channel
-// open fails.
+// open fails. Returns ErrReconnecting immediately (non-blocking) if a
+// reconnect barrier is currently active.
 func (c *Connection) Health(ctx context.Context) error {
 	c.mu.RLock()
 	raw, closed := c.raw, c.closed
 	c.mu.RUnlock()
 	if closed {
 		return ErrAlreadyClosed
+	}
+	c.barrierMu.Lock()
+	reconnecting := c.reconnecting
+	c.barrierMu.Unlock()
+	if reconnecting {
+		return ErrReconnecting
 	}
 	if raw == nil {
 		return ErrNotConnected
@@ -162,6 +174,18 @@ func (c *Connection) Close(ctx context.Context) error {
 	case <-c.done:
 	case <-ctx.Done():
 		return fmt.Errorf("amqp: close timed out: %w", ctx.Err())
+	}
+
+	// drain in-flight onTopoDegraded callback goroutines
+	callbacksDone := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(callbacksDone)
+	}()
+	select {
+	case <-callbacksDone:
+	case <-ctx.Done():
+		return fmt.Errorf("amqp: close timed out waiting for callbacks: %w", ctx.Err())
 	}
 	return nil
 }
@@ -354,14 +378,19 @@ func (c *Connection) runBarrier(ctx context.Context) {
 	if hookErr != nil {
 		reason := "topology_failed"
 		c.opts.metrics.RecordDegraded(connRole, reason)
-		c.opts.logger.Errorf("amqp: topology redeclare failed; entering degraded state: %v", hookErr)
+		c.opts.logger.Errorf("amqp: topology redeclare failed; entering degraded state: %v",
+			redact.Error(hookErr))
 		c.mu.Lock()
-		if !c.degraded {
-			c.degraded = true
-			c.degradedErr = fmt.Errorf("%w: %w", ErrTopologyRedeclareFailed, hookErr)
-			if c.opts.onTopoDegraded != nil {
-				go c.opts.onTopoDegraded(c.degradedErr)
-			}
+		wasAlreadyDegraded := c.degraded
+		c.degraded = true
+		c.degradedErr = fmt.Errorf("%w: %w", ErrTopologyRedeclareFailed, hookErr)
+		if !wasAlreadyDegraded && c.opts.onTopoDegraded != nil {
+			degradedErr := c.degradedErr
+			c.wg.Add(1)
+			go func() {
+				defer c.wg.Done()
+				c.opts.onTopoDegraded(degradedErr)
+			}()
 		}
 		c.mu.Unlock()
 	} else {
@@ -417,10 +446,14 @@ func (c *Connection) waitBarrier(ctx context.Context) error {
 			return fmt.Errorf("%w: %w", ErrConnectionBlocked, ctx.Err())
 		}
 	}
-	// check degraded state
+	// Release barrierMu before acquiring mu to avoid AB/BA deadlock:
+	// runBarrier holds mu.Lock then acquires barrierMu; we must never hold
+	// barrierMu while waiting for mu.
+	c.barrierMu.Unlock()
 	c.mu.RLock()
 	err := c.degradedErr
 	c.mu.RUnlock()
+	c.barrierMu.Lock() // reacquire for deferred Unlock
 	if err != nil {
 		return err
 	}
@@ -447,11 +480,33 @@ func applyConnDefaults(opts *connOptions) {
 	}
 }
 
+// frameMaxHardCeiling is the upper bound for WithFrameMax. Values above this
+// risk OOM on broker and client; use chunked publishing for large payloads.
+const frameMaxHardCeiling = 104_857_600 // 100 MiB
+
 func validateConnOptions(opts *connOptions) error {
 	// FrameMax: zero means server-driven (ok). [1,4095] violates the spec minimum.
 	if opts.frameMax > 0 && opts.frameMax < 4096 {
 		return fmt.Errorf("%w: WithFrameMax must be 0 or ≥ 4096 (AMQP spec minimum); got %d",
 			ErrInvalidOptions, opts.frameMax)
+	}
+	if opts.frameMax > frameMaxHardCeiling {
+		return fmt.Errorf("%w: WithFrameMax must be ≤ %d (100 MiB); got %d",
+			ErrInvalidOptions, frameMaxHardCeiling, opts.frameMax)
+	}
+
+	// Connection pool sizes must be positive when explicitly set.
+	if opts.pubConns <= 0 {
+		return fmt.Errorf("%w: WithPublisherConnections must be ≥ 1; got %d",
+			ErrInvalidOptions, opts.pubConns)
+	}
+	if opts.conConns <= 0 {
+		return fmt.Errorf("%w: WithConsumerConnections must be ≥ 1; got %d",
+			ErrInvalidOptions, opts.conConns)
+	}
+	if opts.channelPoolSize <= 0 {
+		return fmt.Errorf("%w: WithChannelPoolSize must be ≥ 1; got %d",
+			ErrInvalidOptions, opts.channelPoolSize)
 	}
 
 	// SASL EXTERNAL: fail-closed
@@ -470,7 +525,7 @@ func validateConnOptions(opts *connOptions) error {
 		}
 		if !strings.HasPrefix(addr, "amqps://") {
 			return fmt.Errorf("%w: SASLExternal requires amqps:// scheme; got %q",
-				ErrInvalidOptions, addr)
+				ErrInvalidOptions, redact.URI(addr))
 		}
 		// WithAuth under EXTERNAL is valid but ignored — warn at log level only
 		if opts.username != "" {
