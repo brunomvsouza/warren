@@ -227,15 +227,15 @@ single-socket lifecycle; T07d adds the pool.
 - **Files:** edits to `connection.go`, `options_connection.go`, new `internal/connpool/pool.go`, `internal/connpool/*_test.go`, `connection_multiconn_integration_test.go`.
 - **Deps:** T07, T07b, T07c.
 
-### [ ] T08 — `channelpool.go` per publisher TCP connection · M
+### [x] T08 — `channelpool.go` per publisher TCP connection · M
 Internal channel pool used by publishers, **one pool per publisher
 TCP connection** (not a global pool across all publisher conns).
 - **Acceptance:**
-  - [ ] `channelPool` with `Acquire(ctx) (*amqp091.Channel, release func(), error)` semantics.
-  - [ ] Size driven by `WithChannelPoolSize(n)` (default 8); **applies per publisher TCP connection**, so `WithPublisherConnections(4)+WithChannelPoolSize(8) = 32` channels total.
-  - [ ] Channels are discarded and replaced when broker signals channel close.
-  - [ ] **`ErrChannelPoolExhausted`** returned from `Acquire(ctx)` when `ctx` is cancelled while waiting on a saturated pool. Classified `IsTransient`.
-  - [ ] Race-free: `go test -race` clean under concurrent Acquire/release.
+  - [x] `channelPool` with `Acquire(ctx) (amqpChannel, release func(), error)` semantics (interface; `*amqp091.Channel` satisfies it).
+  - [x] Size driven by `WithChannelPoolSize(n)` (default 8); **applies per publisher TCP connection**, so `WithPublisherConnections(4)+WithChannelPoolSize(8) = 32` channels total.
+  - [x] Channels are discarded and replaced when broker signals channel close.
+  - [x] **`ErrChannelPoolExhausted`** returned from `Acquire(ctx)` when `ctx` is cancelled while waiting on a saturated pool. Classified `IsTransient`.
+  - [x] Race-free: `go test -race` clean under concurrent Acquire/release.
 - **Verify:** Unit + integration tests; `goleak.VerifyNone`. Saturation test: pool size 1, two concurrent `Acquire` calls, second with a 50ms ctx — asserts `ErrChannelPoolExhausted`.
 - **Files:** `channelpool.go`, `channelpool_test.go`.
 - **Deps:** T07, T07d.
