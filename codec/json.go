@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-
-	amqp "github.com/brunomvsouza/amqp"
 )
 
 type jsonCodec struct {
@@ -29,7 +27,7 @@ func (c *jsonCodec) ContentType() string { return "application/json" }
 func (c *jsonCodec) Encode(v any) (out []byte, err error) {
 	out, err = json.Marshal(v)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", amqp.ErrInvalidMessage, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
 	return out, nil
 }
@@ -40,7 +38,7 @@ func (c *jsonCodec) Decode(data []byte, v any) error {
 		dec.DisallowUnknownFields()
 	}
 	if err := dec.Decode(v); err != nil {
-		return fmt.Errorf("%w: %w", amqp.ErrInvalidMessage, err)
+		return fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
 	return nil
 }
