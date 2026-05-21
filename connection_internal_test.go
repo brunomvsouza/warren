@@ -19,6 +19,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 // selfSignedCertInternal is a local copy of the cert helper for the internal package.
@@ -139,13 +140,16 @@ func TestWaitBarrier_degraded_returnsDegradedErr(t *testing.T) {
 	sentinel := errors.New("topology gone")
 	c := &Connection{}
 	c.barrierCond = sync.NewCond(&c.barrierMu)
+	c.mu.Lock()
 	c.degraded = true
 	c.degradedErr = sentinel
+	c.mu.Unlock()
 	err := c.waitBarrier(context.Background())
 	assert.ErrorIs(t, err, sentinel)
 }
 
 func TestWaitBarrier_cancelledCtx_whileReconnecting_returnsErrReconnecting(t *testing.T) {
+	defer goleak.VerifyNone(t)
 	c := &Connection{}
 	c.barrierCond = sync.NewCond(&c.barrierMu)
 	c.barrierMu.Lock()
@@ -167,6 +171,7 @@ func TestWaitBarrier_cancelledCtx_whileReconnecting_returnsErrReconnecting(t *te
 }
 
 func TestWaitBarrier_cancelledCtx_whileBlocked_returnsErrConnectionBlocked(t *testing.T) {
+	defer goleak.VerifyNone(t)
 	c := &Connection{}
 	c.barrierCond = sync.NewCond(&c.barrierMu)
 	c.barrierMu.Lock()
@@ -238,6 +243,7 @@ func TestRunBarrier_hookError_entersDegradedState(t *testing.T) {
 }
 
 func TestRunBarrier_hookError_callsOnTopoDegradedOnce(t *testing.T) {
+	defer goleak.VerifyNone(t)
 	hookErr := errors.New("queue gone")
 	called := 0
 	var mu sync.Mutex
