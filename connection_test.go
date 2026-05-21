@@ -106,7 +106,7 @@ func TestDial_sASLExternal_withPlainScheme_returnsErrInvalidOptions(t *testing.T
 }
 
 func TestDial_sASLExternal_validConfig_passesValidation(t *testing.T) {
-	cert := selfSignedCert(t, "svc")
+	cert := selfSignedCert(t, "test-client")
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	_, err := amqp.Dial(ctx,
@@ -264,6 +264,87 @@ func TestDial_unreachableAddr_returnsNonValidationError(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
 		"network failure must not masquerade as ErrInvalidOptions; got: %v", err)
+}
+
+// — frameMax ceiling ——————————————————————————————————————————————————————
+
+func TestDial_frameMaxAboveCeiling_returnsErrInvalidOptions(t *testing.T) {
+	ctx := context.Background()
+	_, err := amqp.Dial(ctx, amqp.WithFrameMax(200_000_000)) // 200 MiB — above 100 MiB ceiling
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions),
+		"frameMax above ceiling must return ErrInvalidOptions; got: %v", err)
+}
+
+func TestDial_frameMaxAtCeiling_passesValidation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := amqp.Dial(ctx,
+		amqp.WithFrameMax(104_857_600), // exactly 100 MiB
+		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+			return nil, errors.New("no broker")
+		}),
+	)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+		"frameMax at ceiling must pass validation; got: %v", err)
+}
+
+// — connection pool size lower bounds ————————————————————————————————————
+
+func TestDial_publisherConnectionsZero_returnsErrInvalidOptions(t *testing.T) {
+	ctx := context.Background()
+	_, err := amqp.Dial(ctx, amqp.WithPublisherConnections(0))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions),
+		"WithPublisherConnections(0) must return ErrInvalidOptions; got: %v", err)
+}
+
+func TestDial_consumerConnectionsZero_returnsErrInvalidOptions(t *testing.T) {
+	ctx := context.Background()
+	_, err := amqp.Dial(ctx, amqp.WithConsumerConnections(0))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions),
+		"WithConsumerConnections(0) must return ErrInvalidOptions; got: %v", err)
+}
+
+func TestDial_channelPoolSizeZero_returnsErrInvalidOptions(t *testing.T) {
+	ctx := context.Background()
+	_, err := amqp.Dial(ctx, amqp.WithChannelPoolSize(0))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions),
+		"WithChannelPoolSize(0) must return ErrInvalidOptions; got: %v", err)
+}
+
+// — credential no-leak in validation error messages ——————————————————————
+
+func TestDial_sASLExternal_schemeError_doesNotLeakCredentials(t *testing.T) {
+	cert := selfSignedCert(t, "svc")
+	ctx := context.Background()
+	_, err := amqp.Dial(ctx,
+		amqp.WithSASLMechanism(amqp.SASLExternal),
+		// amqp:// URI with embedded credentials — must not appear in error
+		amqp.WithAddr("amqp://secret:password@host:5672/"),
+		amqp.WithTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}}),
+	)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions), "got: %v", err)
+	assert.NotContains(t, err.Error(), "secret",
+		"error must not leak username from URI")
+	assert.NotContains(t, err.Error(), "password",
+		"error must not leak password from URI")
+}
+
+// — connectDelay honours context cancellation ————————————————————————————
+
+func TestDial_connectDelay_cancelledContext_returnsCtxErr(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled
+	_, err := amqp.Dial(ctx,
+		amqp.WithConnectDelay(10*time.Second), // long delay — ctx already done
+	)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions), "got: %v", err)
 }
 
 // — Suppress unused import warning for fmt ————————————————————————————————

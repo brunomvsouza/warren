@@ -149,7 +149,7 @@ Generic supervised reconnect loop usable by Connection.
 - **Files:** `retry.go`, `internal/reconnect/loop.go`, `internal/reconnect/*_test.go`.
 - **Deps:** T02, T03.
 
-### [ ] T07 — `connection.go`: single-TCP Dial, Health, Close · M
+### [x] T07 — `connection.go`: single-TCP Dial, Health, Close · M
 Wire `amqp091-go` + reconnect loop + metric/logger/tracer plumbing
 for a **single TCP connection**. Multi-conn fan-out lands in T07d;
 T07 keeps the per-socket lifecycle focused.
