@@ -102,8 +102,8 @@ func WithAddr(addr string) Option {
 }
 
 // WithAddrs sets a cluster-failover list of AMQP URIs. When set, this
-// overrides WithAddr. Round-robin selection across URIs on reconnect is
-// implemented in T07d; until then, the first URI in the slice is always used.
+// overrides WithAddr. Currently the first URI in the slice is always used;
+// round-robin selection across URIs on reconnect is planned for a future release.
 func WithAddrs(addrs []string) Option {
 	return func(o *connOptions) { o.addrs = addrs }
 }

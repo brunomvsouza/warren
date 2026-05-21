@@ -243,7 +243,13 @@ func (c *Connection) Close(ctx context.Context) error {
 		}
 	}
 
-	// drain in-flight onTopoDegraded callback goroutines
+	// drain in-flight onTopoDegraded callback goroutines.
+	// The goroutine below runs to completion regardless of ctx; if ctx expires
+	// before all callbacks finish we return a timeout error but the goroutine
+	// continues until the callbacks return naturally. onTopoDegraded has no
+	// context parameter so it cannot be signalled to stop early — callers that
+	// need bounded shutdown should ensure their onTopoDegraded implementation
+	// respects an externally managed deadline.
 	doneCh := make(chan struct{})
 	go func() {
 		for _, mc := range append(c.pubConns, c.conConns...) {
@@ -700,10 +706,14 @@ func dialAMQP(_ context.Context, opts *connOptions, name string) (*amqp091.Conne
 	}
 
 	// SASL
+	// Clone tlsConfig so that concurrent dial calls from different supervisors
+	// do not race on the ServerName field that amqp091 writes during handshake.
 	switch opts.saslMechanism {
 	case SASLExternal:
 		cfg.SASL = []amqp091.Authentication{&externalAuth{}}
-		cfg.TLSClientConfig = opts.tlsConfig
+		if opts.tlsConfig != nil {
+			cfg.TLSClientConfig = opts.tlsConfig.Clone()
+		}
 	default:
 		if opts.username != "" || opts.password != "" {
 			cfg.SASL = []amqp091.Authentication{
@@ -711,7 +721,7 @@ func dialAMQP(_ context.Context, opts *connOptions, name string) (*amqp091.Conne
 			}
 		}
 		if opts.tlsConfig != nil {
-			cfg.TLSClientConfig = opts.tlsConfig
+			cfg.TLSClientConfig = opts.tlsConfig.Clone()
 		}
 	}
 
