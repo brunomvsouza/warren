@@ -49,6 +49,20 @@ func TestDial_health_close_integration(t *testing.T) {
 	require.NoError(t, conn.Close(closeCtx))
 }
 
+func TestDial_health_afterClose_returnsErrAlreadyClosed_integration(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn, err := amqp.Dial(context.Background(), amqp.WithAddr(amqpTestURL(t)))
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, conn.Close(ctx))
+
+	assert.ErrorIs(t, conn.Health(context.Background()), amqp.ErrAlreadyClosed,
+		"Health after Close must return ErrAlreadyClosed")
+}
+
 func TestDial_close_idempotent_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 

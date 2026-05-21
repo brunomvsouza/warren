@@ -2,7 +2,6 @@ package amqp
 
 import (
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"os"
@@ -14,12 +13,15 @@ import (
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
 	"github.com/brunomvsouza/amqp/internal/reconnect"
+	"github.com/brunomvsouza/amqp/internal/redact"
 	"github.com/brunomvsouza/amqp/log"
 	"github.com/brunomvsouza/amqp/metrics"
 	"github.com/brunomvsouza/amqp/otel"
 )
 
-const connRole = "single"
+// connRole is the metric role label for the single TCP connection used in T07.
+// T07d replaces this with per-supervised-connection roles ("publisher" | "consumer").
+const connRole = "publisher"
 
 // Connection manages a single supervised AMQP TCP connection.
 //
@@ -36,10 +38,11 @@ type Connection struct {
 	opts     connOptions
 	authUser string // set before Dial returns; immutable after
 
-	// reconnect barrier — callers block here while reconnecting
+	// reconnect barrier — callers block here while reconnecting or broker-blocked
 	barrierMu    sync.Mutex
 	barrierCond  *sync.Cond
 	reconnecting bool // true while barrier is active
+	blocked      bool // true while broker has sent connection.blocked (cleared on reconnect)
 
 	// degraded state — set when topology redeclare fails persistently
 	degraded    bool
@@ -127,8 +130,11 @@ func (c *Connection) AuthenticatedUser() string { return c.authUser }
 // open fails.
 func (c *Connection) Health(ctx context.Context) error {
 	c.mu.RLock()
-	raw := c.raw
+	raw, closed := c.raw, c.closed
 	c.mu.RUnlock()
+	if closed {
+		return ErrAlreadyClosed
+	}
 	if raw == nil {
 		return ErrNotConnected
 	}
@@ -193,13 +199,23 @@ func (c *Connection) registerReconnectHook(fn func(ctx context.Context) error) {
 
 // — internal helpers —————————————————————————————————————————————————————
 
-// connectOnce attempts a single round of connect-with-backoff using
-// internal/reconnect.Loop. On success, c.raw is set and the reconnect barrier
-// is run. On failure, the error from the last attempt is returned.
+// connectOnce dials the broker once (with backoff). It does NOT run the
+// reconnect barrier — topology hooks are not yet registered at Dial time,
+// and WithOnReconnect must not fire on the initial connection.
 func (c *Connection) connectOnce(ctx context.Context) error {
-	var lastErr error
-	var connected bool
+	connected, lastErr := c.reconnectRaw(ctx)
+	if !connected {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return lastErr
+	}
+	return nil
+}
 
+// reconnectRaw dials a new raw AMQP connection using the configured backoff
+// policy and sets c.raw on success.
+func (c *Connection) reconnectRaw(ctx context.Context) (connected bool, lastErr error) {
 	loop := reconnect.New(
 		ctx,
 		func(ctx context.Context) error {
@@ -218,21 +234,12 @@ func (c *Connection) connectOnce(ctx context.Context) error {
 		c.opts.reconnectBackoff.Retries,
 	)
 	<-loop.Done()
-
-	if !connected {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return lastErr
-	}
-
-	// run the barrier for the first time (hooks are empty at this point)
-	c.runBarrier(ctx)
-	return nil
+	return connected, lastErr
 }
 
-// supervisor is the lifecycle goroutine. It listens for the underlying
-// amqp091 connection to close, then re-enters the connect-with-backoff path.
+// supervisor is the lifecycle goroutine. It listens for blocked/close
+// notifications from the live socket and re-enters the connect-with-backoff
+// path when the socket drops.
 func (c *Connection) supervisor(ctx context.Context) {
 	defer close(c.done)
 
@@ -262,12 +269,20 @@ func (c *Connection) supervisor(ctx context.Context) {
 				}
 				if b.Active {
 					blockedStart = time.Now()
+					c.barrierMu.Lock()
+					c.blocked = true
+					c.barrierMu.Unlock()
 					if c.opts.onBlocked != nil {
 						c.opts.onBlocked(b.Reason)
 					}
 				} else if !blockedStart.IsZero() {
-					c.opts.metrics.RecordBlocked(connRole, time.Since(blockedStart))
+					elapsed := time.Since(blockedStart)
 					blockedStart = time.Time{}
+					c.barrierMu.Lock()
+					c.blocked = false
+					c.barrierCond.Broadcast()
+					c.barrierMu.Unlock()
+					c.opts.metrics.RecordBlocked(connRole, elapsed)
 				}
 
 			case _, ok := <-closeCh:
@@ -283,39 +298,21 @@ func (c *Connection) supervisor(ctx context.Context) {
 			return
 		}
 
-		// enter reconnect barrier — blocks Publish until complete
+		// Clear blocked state and enter the reconnect barrier atomically.
+		// The new TCP connection starts unblocked; any blocked notification
+		// from the previous socket is no longer relevant.
 		c.barrierMu.Lock()
+		c.blocked = false
 		c.reconnecting = true
 		c.barrierMu.Unlock()
 
 		c.opts.metrics.RecordReconnect(connRole)
 		c.opts.logger.Infof("amqp: connection lost; reconnecting…")
 
-		// attempt reconnect with backoff
-		var lastErr error
-		var connected bool
-		loop := reconnect.New(
-			ctx,
-			func(ctx context.Context) error {
-				raw, err := dialAMQP(ctx, &c.opts)
-				if err != nil {
-					lastErr = err
-					return err
-				}
-				c.mu.Lock()
-				c.raw = raw
-				c.mu.Unlock()
-				connected = true
-				return nil
-			},
-			c.opts.reconnectBackoff.NextBackoff,
-			c.opts.reconnectBackoff.Retries,
-		)
-		<-loop.Done()
+		connected, lastErr := c.reconnectRaw(ctx)
 
 		if !connected {
-			c.opts.logger.Errorf("amqp: reconnect failed: %v", lastErr)
-			// broadcast so waiters unblock with an error path
+			c.opts.logger.Errorf("amqp: reconnect failed: %v", redact.Error(lastErr))
 			c.barrierMu.Lock()
 			c.reconnecting = false
 			c.barrierCond.Broadcast()
@@ -389,14 +386,20 @@ func (c *Connection) runBarrier(ctx context.Context) {
 	c.barrierMu.Unlock()
 }
 
-// waitBarrier blocks the caller while a reconnect barrier is active.
-// Returns ErrReconnecting (wrapping ctx.Err()) if ctx is cancelled while
-// waiting. Returns ErrTopologyRedeclareFailed if the connection is degraded.
+// waitBarrier blocks the caller while a reconnect barrier is active or the
+// broker has blocked the connection (connection.blocked).
+//
+// On ctx cancellation:
+//   - If reconnecting: returns ErrReconnecting wrapping ctx.Err().
+//   - If broker-blocked: returns ErrConnectionBlocked wrapping ctx.Err().
+//
+// Returns ErrTopologyRedeclareFailed when the connection is in the degraded
+// state (topology redeclare failed on last reconnect).
 func (c *Connection) waitBarrier(ctx context.Context) error {
 	c.barrierMu.Lock()
 	defer c.barrierMu.Unlock()
-	for c.reconnecting {
-		// Use a goroutine to unblock the cond when ctx is cancelled.
+	for c.reconnecting || c.blocked {
+		// Spawn a helper goroutine so ctx cancellation unblocks the cond.
 		done := make(chan struct{})
 		go func() {
 			select {
@@ -408,7 +411,10 @@ func (c *Connection) waitBarrier(ctx context.Context) error {
 		c.barrierCond.Wait()
 		close(done)
 		if ctx.Err() != nil {
-			return fmt.Errorf("%w: %w", ErrReconnecting, ctx.Err())
+			if c.reconnecting {
+				return fmt.Errorf("%w: %w", ErrReconnecting, ctx.Err())
+			}
+			return fmt.Errorf("%w: %w", ErrConnectionBlocked, ctx.Err())
 		}
 	}
 	// check degraded state
@@ -515,6 +521,12 @@ func computeAuthUser(opts *connOptions) string {
 }
 
 // dialAMQP creates a single amqp091-go connection from the resolved options.
+//
+// The context is accepted but not forwarded to amqp091.DialConfig, which has
+// no context-aware dial API. Context cancellation is honoured only between
+// retry attempts inside reconnectRaw, not during the TCP handshake itself.
+// Provide a context-aware WithDialer to make individual dial attempts
+// interruptible.
 func dialAMQP(_ context.Context, opts *connOptions) (*amqp091.Connection, error) {
 	cfg := amqp091.Config{
 		Vhost:      opts.vhost,
@@ -576,15 +588,4 @@ func DefaultConnectionName() string {
 	exe := filepath.Base(os.Args[0])
 	hostname, _ := os.Hostname()
 	return fmt.Sprintf("%s-%s-%d", exe, hostname, os.Getpid())
-}
-
-// — tls helpers ———————————————————————————————————————————————————————————
-
-// tlsConfigForSASL extracts the relevant TLS config, accounting for the
-// SASL mechanism in use.
-func tlsConfigForSASL(opts *connOptions) *tls.Config {
-	if opts.tlsConfig != nil {
-		return opts.tlsConfig
-	}
-	return nil
 }
