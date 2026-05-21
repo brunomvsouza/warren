@@ -42,6 +42,7 @@ func TestNoOpClientMetrics_zeroAllocs(t *testing.T) {
 		m.RecordReconnect("publisher")
 		m.RecordBlocked("publisher", time.Second)
 		m.RecordTopologyRedeclare("publisher", 50*time.Millisecond)
+		m.RecordDegraded("publisher", "topology_failed")
 	}))
 }
 
@@ -89,11 +90,13 @@ func TestPrometheusClientMetrics_mandatoryMetrics(t *testing.T) {
 	m.RecordReconnect("publisher")
 	m.RecordBlocked("consumer", 2*time.Second)
 	m.RecordTopologyRedeclare("publisher", 80*time.Millisecond)
+	m.RecordDegraded("publisher", "topology_failed")
 
 	names := gatherNames(t, reg)
 	assert.Contains(t, names, "connection_reconnects_total")
 	assert.Contains(t, names, "connection_blocked_seconds")
 	assert.Contains(t, names, "topology_redeclare_seconds")
+	assert.Contains(t, names, "connection_degraded_total")
 }
 
 func TestPrometheusClientMetrics_roleLabel(t *testing.T) {
@@ -207,6 +210,7 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		cm.RecordReconnect("publisher")
 		cm.RecordBlocked("publisher", time.Duration(i+1)*100*time.Millisecond)
 		cm.RecordTopologyRedeclare("publisher", 40*time.Millisecond)
+		cm.RecordDegraded("publisher", "topology_failed")
 
 		pm.InFlightAdd("events", 1)
 		pm.RecordPublish("events", "ack", time.Duration(i+1)*time.Millisecond)
@@ -226,6 +230,7 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		"connection_reconnects_total",
 		"connection_blocked_seconds",
 		"topology_redeclare_seconds",
+		"connection_degraded_total",
 		"publisher_in_flight",
 		"publisher_publish_seconds",
 		"publisher_retry_total",

@@ -17,6 +17,7 @@ type PrometheusClientMetrics struct {
 	reconnectsTotal   *prometheus.CounterVec
 	blockedSeconds    *prometheus.HistogramVec
 	topologyRedeclare *prometheus.HistogramVec
+	degradedTotal     *prometheus.CounterVec
 }
 
 // NewPrometheusClientMetrics creates a PrometheusClientMetrics and registers all
@@ -42,8 +43,12 @@ func NewPrometheusClientMetrics(reg prometheus.Registerer, buckets []float64) (*
 			Help:    "Duration in seconds of topology redeclaration after an AMQP reconnect.",
 			Buckets: buckets,
 		}, []string{"role"}),
+		degradedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "connection_degraded_total",
+			Help: "Total number of AMQP connection degraded-state transitions (topology redeclare failed).",
+		}, []string{"role", "reason"}),
 	}
-	for _, c := range []prometheus.Collector{m.reconnectsTotal, m.blockedSeconds, m.topologyRedeclare} {
+	for _, c := range []prometheus.Collector{m.reconnectsTotal, m.blockedSeconds, m.topologyRedeclare, m.degradedTotal} {
 		if err := reg.Register(c); err != nil {
 			return nil, err
 		}
@@ -64,6 +69,11 @@ func (m *PrometheusClientMetrics) RecordBlocked(role string, d time.Duration) {
 // RecordTopologyRedeclare records d into the topology_redeclare_seconds histogram.
 func (m *PrometheusClientMetrics) RecordTopologyRedeclare(role string, d time.Duration) {
 	m.topologyRedeclare.WithLabelValues(role).Observe(d.Seconds())
+}
+
+// RecordDegraded increments connection_degraded_total for the given role and reason.
+func (m *PrometheusClientMetrics) RecordDegraded(role, reason string) {
+	m.degradedTotal.WithLabelValues(role, reason).Inc()
 }
 
 // PrometheusPublisherMetrics is a PublisherMetrics backed by Prometheus gauges,

@@ -15,6 +15,9 @@ func (NoOpClientMetrics) RecordBlocked(_ string, _ time.Duration) {}
 // RecordTopologyRedeclare discards the redeclare-duration observation.
 func (NoOpClientMetrics) RecordTopologyRedeclare(_ string, _ time.Duration) {}
 
+// RecordDegraded discards the degraded-state counter increment.
+func (NoOpClientMetrics) RecordDegraded(_, _ string) {}
+
 // NoOpPublisherMetrics is a PublisherMetrics that silently discards all observations.
 // Every method is a no-op and performs zero allocations.
 type NoOpPublisherMetrics struct{}
