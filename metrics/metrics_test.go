@@ -21,10 +21,17 @@ var (
 // — DefaultHistogramBuckets ————————————————————————————————————————————————
 
 func TestDefaultHistogramBuckets_values(t *testing.T) {
-	b := metrics.DefaultHistogramBuckets
+	b := metrics.DefaultHistogramBuckets()
 	assert.Len(t, b, 12)
 	assert.Equal(t, 0.5, b[0])
 	assert.Equal(t, 5000.0, b[len(b)-1])
+}
+
+func TestDefaultHistogramBuckets_freshSlicePerCall(t *testing.T) {
+	a := metrics.DefaultHistogramBuckets()
+	b := metrics.DefaultHistogramBuckets()
+	a[0] = 999
+	assert.Equal(t, 0.5, b[0], "mutating one call's slice must not affect another call")
 }
 
 // — NoOp: zero allocations —————————————————————————————————————————————————
