@@ -12,6 +12,7 @@ import (
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
+	"github.com/brunomvsouza/amqp/internal/connpool"
 	"github.com/brunomvsouza/amqp/internal/reconnect"
 	"github.com/brunomvsouza/amqp/internal/redact"
 	"github.com/brunomvsouza/amqp/log"
@@ -19,30 +20,24 @@ import (
 	"github.com/brunomvsouza/amqp/otel"
 )
 
-// connRole is the metric role label for the single TCP connection used in T07.
-// T07d replaces this with per-supervised-connection roles ("publisher" | "consumer").
-const connRole = "publisher"
+// — per-socket supervision ————————————————————————————————————————————————
 
-// Connection manages a single supervised AMQP TCP connection.
-//
-// It wraps amqp091-go with automatic reconnect (exponential backoff), a
-// synchronous reconnect barrier that guarantees topology + consumer state is
-// fully restored before traffic resumes, and a degraded-state machine for
-// persistent topology failures.
-//
-// Multi-connection fan-out by role (publisher / consumer) is added in T07d.
-type Connection struct {
+// managedConn is a single supervised AMQP TCP connection with reconnect
+// barrier and topology-hook runner.  Connection wraps two slices of these:
+// pubConns (publisher role) and conConns (consumer role).
+type managedConn struct {
+	name string // e.g. "myapp-host-42-pub-0"
+	role string // "publisher" or "consumer"
+	idx  int    // position within its pool
+
 	mu  sync.RWMutex
 	raw *amqp091.Connection // current live socket; nil while reconnecting
 
-	opts     connOptions
-	authUser string // set before Dial returns; immutable after
-
-	// reconnect barrier — callers block here while reconnecting or broker-blocked
+	// reconnect barrier — callers block while reconnecting or broker-blocked
 	barrierMu    sync.Mutex
 	barrierCond  *sync.Cond
-	reconnecting bool // true while barrier is active
-	blocked      bool // true while broker has sent connection.blocked (cleared on reconnect)
+	reconnecting bool
+	blocked      bool
 
 	// degraded state — set when topology redeclare fails persistently
 	degraded    bool
@@ -55,23 +50,45 @@ type Connection struct {
 	// lifecycle
 	cancel context.CancelFunc
 	done   chan struct{}
-	closed bool
 
-	// tracks in-flight onTopoDegraded callback goroutines; drained in Close
+	// tracks in-flight onTopoDegraded callback goroutines; drained in close
 	wg sync.WaitGroup
+
+	opts *connOptions // shared with parent Connection; read-only after Dial
 }
 
-// Dial establishes a supervised AMQP connection and returns it.
+// — Connection ————————————————————————————————————————————————————————————
+
+// Connection manages a pool of supervised AMQP TCP connections split by role:
+// publisher connections and consumer connections.
 //
-// Dial applies all provided options, validates them, and attempts to connect
-// with the configured backoff policy. It returns when the first connection
-// succeeds. Subsequent failures are handled automatically by the internal
-// supervisor; callers observe reconnects via metric increments and the
-// WithOnReconnect callback.
+// Each TCP socket has its own reconnect supervisor (exponential backoff),
+// synchronous reconnect barrier (topology + consumer state fully restored
+// before traffic resumes), and degraded-state machine (persistent topology
+// failures).
 //
-// Validation errors (ErrInvalidOptions) are returned synchronously. Network
-// errors cause Dial to retry up to the configured Retries limit; when exhausted
-// (or when ctx is cancelled), the last network error is returned.
+// Default pool sizes: 2 publisher connections, 2 consumer connections.
+// Configure with WithPublisherConnections / WithConsumerConnections.
+type Connection struct {
+	opts     connOptions
+	authUser string // set before Dial returns; immutable after
+
+	closedMu sync.Mutex
+	closed   bool
+
+	pubConns []*managedConn // publisher-role TCP connections
+	conConns []*managedConn // consumer-role TCP connections
+}
+
+// Dial establishes a supervised pool of AMQP connections and returns the
+// Connection.  It opens WithPublisherConnections + WithConsumerConnections TCP
+// sockets (default 2+2), validates options, and attempts each connection with
+// the configured backoff policy.  Dial returns when all initial connections
+// succeed.
+//
+// Validation errors (ErrInvalidOptions) are returned synchronously.  Network
+// errors cause Dial to retry up to the configured Retries limit per socket;
+// when exhausted (or ctx cancelled), the last network error is returned.
 func Dial(ctx context.Context, options ...Option) (*Connection, error) {
 	opts := connOptions{
 		saslMechanism:   SASLPlain,
@@ -93,9 +110,7 @@ func Dial(ctx context.Context, options ...Option) (*Connection, error) {
 	c := &Connection{
 		opts:     opts,
 		authUser: authUser,
-		done:     make(chan struct{}),
 	}
-	c.barrierCond = sync.NewCond(&c.barrierMu)
 
 	if opts.connectDelay > 0 {
 		t := time.NewTimer(opts.connectDelay)
@@ -107,46 +122,202 @@ func Dial(ctx context.Context, options ...Option) (*Connection, error) {
 		}
 	}
 
-	// initial connect (with backoff)
-	if err := c.connectOnce(ctx); err != nil {
+	// open publisher connections
+	var err error
+	c.pubConns, err = openPool(ctx, "publisher", opts.pubConns, &c.opts)
+	if err != nil {
+		closeManagedConns(c.pubConns)
 		return nil, err
 	}
 
-	// start supervisor goroutine; inherit trace/log values from Dial ctx but
-	// not its cancellation (supervisor must outlive the caller's ctx).
-	// cancel is stored on c and called by Close — gosec G118 is a false positive here.
-	supCtx, cancel := context.WithCancel(context.WithoutCancel(ctx)) //nolint:gosec // G118: cancel stored on struct, called by Close
-	c.cancel = cancel
-	go c.supervisor(supCtx)
+	// open consumer connections
+	c.conConns, err = openPool(ctx, "consumer", opts.conConns, &c.opts)
+	if err != nil {
+		closeManagedConns(c.pubConns)
+		closeManagedConns(c.conConns)
+		return nil, err
+	}
 
 	return c, nil
 }
 
-// AuthenticatedUser returns the identity that was authenticated during Dial.
+// openPool dials count connections of the given role and starts their supervisors.
+func openPool(ctx context.Context, role string, count int, opts *connOptions) ([]*managedConn, error) {
+	pool := make([]*managedConn, count)
+	for i := range count {
+		name := connpool.ConnName(opts.connectionName, role, i)
+		mc := &managedConn{
+			name: name,
+			role: role,
+			idx:  i,
+			done: make(chan struct{}),
+			opts: opts,
+		}
+		mc.barrierCond = sync.NewCond(&mc.barrierMu)
+
+		if err := mc.connectOnce(ctx); err != nil {
+			// shut down already-opened conns in this pool
+			for j := range i {
+				pool[j].cancel()
+				<-pool[j].done
+			}
+			return nil, err
+		}
+
+		// start supervisor; inherit trace/log values from Dial ctx but not its
+		// cancellation (supervisor must outlive the caller's context).
+		// cancel is stored on mc and called by Connection.Close.
+		supCtx, cancel := context.WithCancel(context.WithoutCancel(ctx)) //nolint:gosec // G118: cancel stored on struct, called by Close
+		mc.cancel = cancel
+		go mc.supervisor(supCtx)
+
+		pool[i] = mc
+	}
+	return pool, nil
+}
+
+// closeManagedConns cancels all conns in the slice and waits for them to exit.
+func closeManagedConns(conns []*managedConn) {
+	for _, mc := range conns {
+		if mc.cancel != nil {
+			mc.cancel()
+		}
+	}
+	for _, mc := range conns {
+		if mc.done != nil {
+			<-mc.done
+		}
+		mc.wg.Wait()
+	}
+}
+
+// AuthenticatedUser returns the identity authenticated during Dial.
 //
-// For SASLPlain this is the username supplied via WithAuth. For SASLExternal it
-// is the Common Name of the first client certificate. The value is set before
-// Dial returns and does not change, even if the connection enters a degraded
-// state.
+// For SASLPlain this is the username from WithAuth.  For SASLExternal it is
+// the Common Name of the first client certificate.  The value is set before
+// Dial returns and does not change.
 func (c *Connection) AuthenticatedUser() string { return c.authUser }
 
-// Health opens a temporary AMQP channel and immediately closes it. Returns an
-// error if the connection is closed, not yet established, or the channel
-// open fails. Returns ErrReconnecting immediately (non-blocking) if a
-// reconnect barrier is currently active.
+// Health opens a temporary AMQP channel on the first publisher connection and
+// immediately closes it.  Returns ErrAlreadyClosed if the Connection is shut
+// down, ErrReconnecting if a reconnect barrier is active, ErrNotConnected if
+// the socket is not yet established.
 func (c *Connection) Health(ctx context.Context) error {
-	c.mu.RLock()
-	raw, closed := c.raw, c.closed
-	c.mu.RUnlock()
+	c.closedMu.Lock()
+	closed := c.closed
+	c.closedMu.Unlock()
 	if closed {
 		return ErrAlreadyClosed
 	}
-	c.barrierMu.Lock()
-	reconnecting := c.reconnecting
-	c.barrierMu.Unlock()
+	if len(c.pubConns) == 0 {
+		return ErrNotConnected
+	}
+	return c.pubConns[0].health(ctx)
+}
+
+// Close drains in-flight work and shuts down all TCP connections in the pool.
+// Returns ErrAlreadyClosed if called more than once.
+func (c *Connection) Close(ctx context.Context) error {
+	c.closedMu.Lock()
+	if c.closed {
+		c.closedMu.Unlock()
+		return ErrAlreadyClosed
+	}
+	c.closed = true
+	c.closedMu.Unlock()
+
+	// cancel all supervisor goroutines
+	for _, mc := range c.pubConns {
+		mc.cancel()
+	}
+	for _, mc := range c.conConns {
+		mc.cancel()
+	}
+
+	// wait for all supervisors to exit
+	for _, mc := range append(c.pubConns, c.conConns...) {
+		select {
+		case <-mc.done:
+		case <-ctx.Done():
+			return fmt.Errorf("amqp: close timed out: %w", ctx.Err())
+		}
+	}
+
+	// drain in-flight onTopoDegraded callback goroutines
+	doneCh := make(chan struct{})
+	go func() {
+		for _, mc := range append(c.pubConns, c.conConns...) {
+			mc.wg.Wait()
+		}
+		close(doneCh)
+	}()
+	select {
+	case <-doneCh:
+	case <-ctx.Done():
+		return fmt.Errorf("amqp: close timed out waiting for callbacks: %w", ctx.Err())
+	}
+	return nil
+}
+
+// ForceReconnect triggers a manual reconnect cycle on every socket without
+// restarting the process.  Intended as an operator escape hatch for recovering
+// from a degraded state.  Returns ErrAlreadyClosed if the connection is shut
+// down.
+func (c *Connection) ForceReconnect() error {
+	c.closedMu.Lock()
+	closed := c.closed
+	c.closedMu.Unlock()
+	if closed {
+		return ErrAlreadyClosed
+	}
+	for _, mc := range append(c.pubConns, c.conConns...) {
+		mc.forceClose()
+	}
+	return nil
+}
+
+// PubConnAt returns the publisher-role managed connection at the given index.
+// Used by Publisher (T12) to acquire channels.
+func (c *Connection) PubConnAt(idx int) *managedConn { return c.pubConns[idx] }
+
+// ConConnAt returns the consumer-role managed connection at the given index.
+// Used by Consumer (T18) to pin subscriptions.
+func (c *Connection) ConConnAt(idx int) *managedConn { return c.conConns[idx] }
+
+// NumPubConns returns the number of publisher TCP connections in the pool.
+func (c *Connection) NumPubConns() int { return len(c.pubConns) }
+
+// NumConConns returns the number of consumer TCP connections in the pool.
+func (c *Connection) NumConConns() int { return len(c.conConns) }
+
+// registerReconnectHook adds fn to every managed connection's hook list.
+// Called by Topology.AttachTo (T16) and Consumer re-subscribe (T18).
+// This is an internal API; it is not part of the public surface.
+func (c *Connection) registerReconnectHook(fn func(ctx context.Context) error) {
+	for _, mc := range append(c.pubConns, c.conConns...) {
+		mc.registerHook(fn)
+	}
+}
+
+// — managedConn methods ——————————————————————————————————————————————————
+
+func (mc *managedConn) registerHook(fn func(ctx context.Context) error) {
+	mc.hooksMu.Lock()
+	mc.hooks = append(mc.hooks, fn)
+	mc.hooksMu.Unlock()
+}
+
+// health opens a temporary AMQP channel and closes it to verify liveness.
+func (mc *managedConn) health(_ context.Context) error {
+	mc.barrierMu.Lock()
+	reconnecting := mc.reconnecting
+	mc.barrierMu.Unlock()
 	if reconnecting {
 		return ErrReconnecting
 	}
+	mc.mu.RLock()
+	raw := mc.raw
+	mc.mu.RUnlock()
 	if raw == nil {
 		return ErrNotConnected
 	}
@@ -157,77 +328,21 @@ func (c *Connection) Health(ctx context.Context) error {
 	return ch.Close()
 }
 
-// Close drains in-flight work and shuts down the connection. Returns
-// ErrAlreadyClosed if called more than once.
-func (c *Connection) Close(ctx context.Context) error {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return ErrAlreadyClosed
-	}
-	c.closed = true
-	c.mu.Unlock()
-
-	c.cancel()
-
-	select {
-	case <-c.done:
-	case <-ctx.Done():
-		return fmt.Errorf("amqp: close timed out: %w", ctx.Err())
-	}
-
-	// drain in-flight onTopoDegraded callback goroutines
-	callbacksDone := make(chan struct{})
-	go func() {
-		c.wg.Wait()
-		close(callbacksDone)
-	}()
-	select {
-	case <-callbacksDone:
-	case <-ctx.Done():
-		return fmt.Errorf("amqp: close timed out waiting for callbacks: %w", ctx.Err())
-	}
-	return nil
-}
-
-// ForceReconnect triggers a manual reconnect cycle without restarting the
-// process. Intended as an operator escape hatch for recovering from a
-// degraded state. Returns ErrAlreadyClosed if the connection is shut down.
-func (c *Connection) ForceReconnect() error {
-	c.mu.RLock()
-	closed := c.closed
-	raw := c.raw
-	c.mu.RUnlock()
-	if closed {
-		return ErrAlreadyClosed
-	}
+// forceClose closes the current raw connection to trigger a reconnect cycle.
+func (mc *managedConn) forceClose() {
+	mc.mu.RLock()
+	raw := mc.raw
+	mc.mu.RUnlock()
 	if raw != nil {
-		// closing the current socket triggers the supervisor's reconnect path
 		_ = raw.Close()
 	}
-	return nil
 }
 
-// registerReconnectHook adds fn to the list of hooks invoked synchronously
-// inside the reconnect barrier after each successful TCP reconnect. fn is
-// called with a context that is cancelled when the barrier deadline expires.
-// If fn returns an error, the connection transitions to the degraded state.
-//
-// This is an internal API consumed by Topology.AttachTo (T16) and Consumer
-// re-subscribe (T18). It is not part of the public surface.
-func (c *Connection) registerReconnectHook(fn func(ctx context.Context) error) {
-	c.hooksMu.Lock()
-	c.hooks = append(c.hooks, fn)
-	c.hooksMu.Unlock()
-}
-
-// — internal helpers —————————————————————————————————————————————————————
-
-// connectOnce dials the broker once (with backoff). It does NOT run the
+// connectOnce dials the broker once (with backoff).  It does NOT run the
 // reconnect barrier — topology hooks are not yet registered at Dial time,
 // and WithOnReconnect must not fire on the initial connection.
-func (c *Connection) connectOnce(ctx context.Context) error {
-	connected, lastErr := c.reconnectRaw(ctx)
+func (mc *managedConn) connectOnce(ctx context.Context) error {
+	connected, lastErr := mc.reconnectRaw(ctx)
 	if !connected {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -238,45 +353,44 @@ func (c *Connection) connectOnce(ctx context.Context) error {
 }
 
 // reconnectRaw dials a new raw AMQP connection using the configured backoff
-// policy and sets c.raw on success.
-func (c *Connection) reconnectRaw(ctx context.Context) (connected bool, lastErr error) {
+// policy and sets mc.raw on success.
+func (mc *managedConn) reconnectRaw(ctx context.Context) (connected bool, lastErr error) {
 	loop := reconnect.New(
 		ctx,
 		func(ctx context.Context) error {
-			raw, err := dialAMQP(ctx, &c.opts)
+			raw, err := dialAMQP(ctx, mc.opts, mc.name)
 			if err != nil {
 				lastErr = err
 				return err
 			}
-			c.mu.Lock()
-			c.raw = raw
-			c.mu.Unlock()
+			mc.mu.Lock()
+			mc.raw = raw
+			mc.mu.Unlock()
 			connected = true
 			return nil
 		},
-		c.opts.reconnectBackoff.NextBackoff,
-		c.opts.reconnectBackoff.Retries,
+		mc.opts.reconnectBackoff.NextBackoff,
+		mc.opts.reconnectBackoff.Retries,
 	)
 	<-loop.Done()
 	return connected, lastErr
 }
 
-// supervisor is the lifecycle goroutine. It listens for blocked/close
-// notifications from the live socket and re-enters the connect-with-backoff
-// path when the socket drops.
-func (c *Connection) supervisor(ctx context.Context) {
-	defer close(c.done)
+// supervisor is the per-socket lifecycle goroutine.  It listens for
+// blocked/close notifications from the live socket and re-enters the
+// connect-with-backoff path when the socket drops.
+func (mc *managedConn) supervisor(ctx context.Context) {
+	defer close(mc.done)
 
 	for {
-		c.mu.RLock()
-		raw := c.raw
-		c.mu.RUnlock()
+		mc.mu.RLock()
+		raw := mc.raw
+		mc.mu.RUnlock()
 
 		if raw == nil {
 			return
 		}
 
-		// listen for blocked / close notifications from the live socket
 		blockedCh := raw.NotifyBlocked(make(chan amqp091.Blocking, 2))
 		closeCh := raw.NotifyClose(make(chan *amqp091.Error, 1))
 
@@ -293,20 +407,20 @@ func (c *Connection) supervisor(ctx context.Context) {
 				}
 				if b.Active {
 					blockedStart = time.Now()
-					c.barrierMu.Lock()
-					c.blocked = true
-					c.barrierMu.Unlock()
-					if c.opts.onBlocked != nil {
-						c.opts.onBlocked(b.Reason)
+					mc.barrierMu.Lock()
+					mc.blocked = true
+					mc.barrierMu.Unlock()
+					if mc.opts.onBlocked != nil {
+						mc.opts.onBlocked(b.Reason)
 					}
 				} else if !blockedStart.IsZero() {
 					elapsed := time.Since(blockedStart)
 					blockedStart = time.Time{}
-					c.barrierMu.Lock()
-					c.blocked = false
-					c.barrierCond.Broadcast()
-					c.barrierMu.Unlock()
-					c.opts.metrics.RecordBlocked(connRole, elapsed)
+					mc.barrierMu.Lock()
+					mc.blocked = false
+					mc.barrierCond.Broadcast()
+					mc.barrierMu.Unlock()
+					mc.opts.metrics.RecordBlocked(mc.role, elapsed)
 				}
 
 			case _, ok := <-closeCh:
@@ -323,28 +437,27 @@ func (c *Connection) supervisor(ctx context.Context) {
 		}
 
 		// Clear blocked state and enter the reconnect barrier atomically.
-		// The new TCP connection starts unblocked; any blocked notification
-		// from the previous socket is no longer relevant.
-		c.barrierMu.Lock()
-		c.blocked = false
-		c.reconnecting = true
-		c.barrierMu.Unlock()
+		mc.barrierMu.Lock()
+		mc.blocked = false
+		mc.reconnecting = true
+		mc.barrierMu.Unlock()
 
-		c.opts.metrics.RecordReconnect(connRole)
-		c.opts.logger.Infof("amqp: connection lost; reconnecting…")
+		mc.opts.metrics.RecordReconnect(mc.role)
+		mc.opts.logger.Infof("amqp: %s connection[%d] lost; reconnecting…", mc.role, mc.idx)
 
-		connected, lastErr := c.reconnectRaw(ctx)
+		connected, lastErr := mc.reconnectRaw(ctx)
 
 		if !connected {
-			c.opts.logger.Errorf("amqp: reconnect failed: %v", redact.Error(lastErr))
-			c.barrierMu.Lock()
-			c.reconnecting = false
-			c.barrierCond.Broadcast()
-			c.barrierMu.Unlock()
+			mc.opts.logger.Errorf("amqp: %s connection[%d] reconnect failed: %v",
+				mc.role, mc.idx, redact.Error(lastErr))
+			mc.barrierMu.Lock()
+			mc.reconnecting = false
+			mc.barrierCond.Broadcast()
+			mc.barrierMu.Unlock()
 			return
 		}
 
-		c.runBarrier(ctx)
+		mc.runBarrier(ctx)
 	}
 }
 
@@ -354,15 +467,14 @@ func (c *Connection) supervisor(ctx context.Context) {
 //  3. User WithOnReconnect callback
 //
 // If any hook returns an error the connection enters the degraded state.
-// On completion (success or degraded), the barrier cond is broadcast so that
-// waiting Publish calls can unblock.
-func (c *Connection) runBarrier(ctx context.Context) {
+// On completion (success or degraded), the barrier cond is broadcast.
+func (mc *managedConn) runBarrier(ctx context.Context) {
 	start := time.Now()
 
-	c.hooksMu.Lock()
-	hooks := make([]func(context.Context) error, len(c.hooks))
-	copy(hooks, c.hooks)
-	c.hooksMu.Unlock()
+	mc.hooksMu.Lock()
+	hooks := make([]func(context.Context) error, len(mc.hooks))
+	copy(hooks, mc.hooks)
+	mc.hooksMu.Unlock()
 
 	var hookErr error
 	for _, fn := range hooks {
@@ -373,50 +485,51 @@ func (c *Connection) runBarrier(ctx context.Context) {
 	}
 
 	elapsed := time.Since(start)
-	c.opts.metrics.RecordTopologyRedeclare(connRole, elapsed)
+	mc.opts.metrics.RecordTopologyRedeclare(mc.role, elapsed)
 
 	if hookErr != nil {
 		reason := "topology_failed"
-		c.opts.metrics.RecordDegraded(connRole, reason)
-		c.opts.logger.Errorf("amqp: topology redeclare failed; entering degraded state: %v",
-			redact.Error(hookErr))
-		c.mu.Lock()
-		wasAlreadyDegraded := c.degraded
-		c.degraded = true
-		c.degradedErr = fmt.Errorf("%w: %w", ErrTopologyRedeclareFailed, redact.Error(hookErr))
-		if !wasAlreadyDegraded && c.opts.onTopoDegraded != nil {
-			degradedErr := c.degradedErr
-			c.wg.Add(1)
+		mc.opts.metrics.RecordDegraded(mc.role, reason)
+		mc.opts.logger.Errorf("amqp: %s connection[%d] topology redeclare failed; entering degraded state: %v",
+			mc.role, mc.idx, redact.Error(hookErr))
+		mc.mu.Lock()
+		wasAlreadyDegraded := mc.degraded
+		mc.degraded = true
+		mc.degradedErr = fmt.Errorf("%w: %w", ErrTopologyRedeclareFailed, redact.Error(hookErr))
+		if !wasAlreadyDegraded && mc.opts.onTopoDegraded != nil {
+			degradedErr := mc.degradedErr
+			mc.wg.Add(1)
 			go func() {
-				defer c.wg.Done()
-				c.opts.onTopoDegraded(degradedErr)
+				defer mc.wg.Done()
+				mc.opts.onTopoDegraded(degradedErr)
 			}()
 		}
-		c.mu.Unlock()
+		mc.mu.Unlock()
 	} else {
-		c.mu.Lock()
-		wasDegraded := c.degraded
-		c.degraded = false
-		c.degradedErr = nil
-		c.mu.Unlock()
+		mc.mu.Lock()
+		wasDegraded := mc.degraded
+		mc.degraded = false
+		mc.degradedErr = nil
+		mc.mu.Unlock()
 		if wasDegraded {
-			c.opts.logger.Infof("amqp: recovered from degraded state")
+			mc.opts.logger.Infof("amqp: %s connection[%d] recovered from degraded state",
+				mc.role, mc.idx)
 		}
 
-		if c.opts.onReconnect != nil {
-			c.opts.onReconnect()
+		if mc.opts.onReconnect != nil {
+			mc.opts.onReconnect()
 		}
 	}
 
-	// broadcast: Publish waiters can now re-check state
-	c.barrierMu.Lock()
-	c.reconnecting = false
-	c.barrierCond.Broadcast()
-	c.barrierMu.Unlock()
+	// broadcast: waiters can now re-check state
+	mc.barrierMu.Lock()
+	mc.reconnecting = false
+	mc.barrierCond.Broadcast()
+	mc.barrierMu.Unlock()
 }
 
 // waitBarrier blocks the caller while a reconnect barrier is active or the
-// broker has blocked the connection (connection.blocked).
+// broker has blocked the connection.
 //
 // On ctx cancellation:
 //   - If reconnecting: returns ErrReconnecting wrapping ctx.Err().
@@ -424,23 +537,22 @@ func (c *Connection) runBarrier(ctx context.Context) {
 //
 // Returns ErrTopologyRedeclareFailed when the connection is in the degraded
 // state (topology redeclare failed on last reconnect).
-func (c *Connection) waitBarrier(ctx context.Context) error {
-	c.barrierMu.Lock()
-	defer c.barrierMu.Unlock()
-	for c.reconnecting || c.blocked {
-		// Spawn a helper goroutine so ctx cancellation unblocks the cond.
+func (mc *managedConn) waitBarrier(ctx context.Context) error {
+	mc.barrierMu.Lock()
+	defer mc.barrierMu.Unlock()
+	for mc.reconnecting || mc.blocked {
 		done := make(chan struct{})
 		go func() {
 			select {
 			case <-ctx.Done():
-				c.barrierCond.Broadcast()
+				mc.barrierCond.Broadcast()
 			case <-done:
 			}
 		}()
-		c.barrierCond.Wait()
+		mc.barrierCond.Wait()
 		close(done)
 		if ctx.Err() != nil {
-			if c.reconnecting {
+			if mc.reconnecting {
 				return fmt.Errorf("%w: %w", ErrReconnecting, ctx.Err())
 			}
 			return fmt.Errorf("%w: %w", ErrConnectionBlocked, ctx.Err())
@@ -449,11 +561,11 @@ func (c *Connection) waitBarrier(ctx context.Context) error {
 	// Release barrierMu before acquiring mu to avoid AB/BA deadlock:
 	// runBarrier holds mu.Lock then acquires barrierMu; we must never hold
 	// barrierMu while waiting for mu.
-	c.barrierMu.Unlock()
-	c.mu.RLock()
-	err := c.degradedErr
-	c.mu.RUnlock()
-	c.barrierMu.Lock() // reacquire for deferred Unlock
+	mc.barrierMu.Unlock()
+	mc.mu.RLock()
+	err := mc.degradedErr
+	mc.mu.RUnlock()
+	mc.barrierMu.Lock() // reacquire for deferred Unlock
 	if err != nil {
 		return err
 	}
@@ -555,11 +667,8 @@ func validateConnOptions(opts *connOptions) error {
 // computeAuthUser derives the authenticated identity from connection options
 // without making a network call.
 //
-// For SASLPlain: returns opts.username (the broker accepts/rejects this; we
-// store it optimistically since the connection is only returned on success).
-// For SASLExternal: returns the Common Name of the first client certificate
-// (this is the identity RabbitMQ typically resolves; the broker confirms it
-// by accepting the TLS handshake).
+// For SASLPlain: returns opts.username. For SASLExternal: returns the Common
+// Name of the first client certificate.
 func computeAuthUser(opts *connOptions) string {
 	if opts.saslMechanism == SASLExternal {
 		if opts.tlsConfig != nil && len(opts.tlsConfig.Certificates) > 0 {
@@ -576,13 +685,9 @@ func computeAuthUser(opts *connOptions) string {
 }
 
 // dialAMQP creates a single amqp091-go connection from the resolved options.
-//
-// The context is accepted but not forwarded to amqp091.DialConfig, which has
-// no context-aware dial API. Context cancellation is honoured only between
-// retry attempts inside reconnectRaw, not during the TCP handshake itself.
-// Provide a context-aware WithDialer to make individual dial attempts
-// interruptible.
-func dialAMQP(_ context.Context, opts *connOptions) (*amqp091.Connection, error) {
+// The name parameter sets the AMQP connection_name client-property, allowing
+// each socket in the pool to carry a distinct name visible in the broker UI.
+func dialAMQP(_ context.Context, opts *connOptions, name string) (*amqp091.Connection, error) {
 	cfg := amqp091.Config{
 		Vhost:      opts.vhost,
 		ChannelMax: opts.channelMax,
@@ -610,9 +715,9 @@ func dialAMQP(_ context.Context, opts *connOptions) (*amqp091.Connection, error)
 		}
 	}
 
-	// client-properties
+	// client-properties: use the per-socket name, not opts.connectionName
 	props := amqp091.Table{
-		"connection_name": opts.connectionName,
+		"connection_name": name,
 		"product":         "amqp.go",
 	}
 	for k, v := range opts.clientProperties {
@@ -637,8 +742,8 @@ func (*externalAuth) Response() string  { return "\x00" }
 // — public helpers ————————————————————————————————————————————————————————
 
 // DefaultConnectionName returns the default connection name in the format
-// "<binary>-<hostname>-<pid>". It is called by Dial when WithConnectionName is
-// not provided. Exported so tests can verify the format without dialling.
+// "<binary>-<hostname>-<pid>".  It is called by Dial when WithConnectionName
+// is not provided.  Exported so tests can verify the format without dialling.
 func DefaultConnectionName() string {
 	exe := filepath.Base(os.Args[0])
 	hostname, _ := os.Hostname()
