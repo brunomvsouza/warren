@@ -23,7 +23,6 @@ linters:
       excludes:
         - G115 # integer overflow conversion — many AMQP frame sizes are uint16/uint8 by spec
         - G101 # test fixtures in *_test.go deliberately contain fake AMQP credentials
-        - G118 # context.WithCancel cancel stored on struct and called by Close — false positive
 
 issues:
   max-issues-per-linter: 0

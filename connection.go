@@ -232,7 +232,7 @@ func (c *Connection) connectOnce(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return lastErr
+		return redact.Error(lastErr)
 	}
 	return nil
 }
@@ -383,7 +383,7 @@ func (c *Connection) runBarrier(ctx context.Context) {
 		c.mu.Lock()
 		wasAlreadyDegraded := c.degraded
 		c.degraded = true
-		c.degradedErr = fmt.Errorf("%w: %w", ErrTopologyRedeclareFailed, hookErr)
+		c.degradedErr = fmt.Errorf("%w: %w", ErrTopologyRedeclareFailed, redact.Error(hookErr))
 		if !wasAlreadyDegraded && c.opts.onTopoDegraded != nil {
 			degradedErr := c.degradedErr
 			c.wg.Add(1)

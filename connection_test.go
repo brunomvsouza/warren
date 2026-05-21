@@ -345,6 +345,86 @@ func TestDial_connectDelay_cancelledContext_returnsCtxErr(t *testing.T) {
 	)
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions), "got: %v", err)
+	assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got: %v", err)
+}
+
+// — Pool size lower bounds: error message content ————————————————————————
+
+func TestDial_publisherConnectionsZero_errorMentionsWithPublisherConnections(t *testing.T) {
+	ctx := context.Background()
+	_, err := amqp.Dial(ctx, amqp.WithPublisherConnections(0))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "WithPublisherConnections")
+}
+
+func TestDial_consumerConnectionsZero_errorMentionsWithConsumerConnections(t *testing.T) {
+	ctx := context.Background()
+	_, err := amqp.Dial(ctx, amqp.WithConsumerConnections(0))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "WithConsumerConnections")
+}
+
+func TestDial_channelPoolSizeZero_errorMentionsWithChannelPoolSize(t *testing.T) {
+	ctx := context.Background()
+	_, err := amqp.Dial(ctx, amqp.WithChannelPoolSize(0))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "WithChannelPoolSize")
+}
+
+// — WithHeartbeat: negative value does not fail validation ——————————————
+
+func TestDial_negativeHeartbeat_doesNotReturnErrInvalidOptions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := amqp.Dial(ctx,
+		amqp.WithHeartbeat(-1*time.Second),
+		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+			return nil, errors.New("no broker")
+		}),
+	)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+		"WithHeartbeat(-1) must not fail validation; got: %v", err)
+}
+
+// — WithConsumerConnections(1): warning but not invalid ——————————————————
+
+func TestDial_singleConsumerConn_doesNotReturnErrInvalidOptions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := amqp.Dial(ctx,
+		amqp.WithConsumerConnections(1),
+		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+			return nil, errors.New("no broker")
+		}),
+	)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+		"WithConsumerConnections(1) logs a warning but is not invalid; got: %v", err)
+}
+
+// — SASLExternal: GetClientCertificate as alternative to Certificates ————
+
+func TestDial_sASLExternal_getClientCertificateFn_passesValidation(t *testing.T) {
+	cert := selfSignedCert(t, "via-fn")
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := amqp.Dial(ctx,
+		amqp.WithSASLMechanism(amqp.SASLExternal),
+		amqp.WithAddr("amqps://h:5671/"),
+		amqp.WithTLSConfig(&tls.Config{
+			GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				return &cert, nil
+			},
+			InsecureSkipVerify: true, //nolint:gosec // test only
+		}),
+		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+			return nil, errors.New("no broker")
+		}),
+	)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+		"GetClientCertificate must satisfy cert requirement; got: %v", err)
 }
 
 // — Suppress unused import warning for fmt ————————————————————————————————
