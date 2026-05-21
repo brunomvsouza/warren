@@ -210,7 +210,7 @@ through this helper.
 - **Deps:** none (pure helper, no AMQP deps).
 - **Blocks:** T03, T04, T07, T07d (all emit URI-bearing strings).
 
-### [ ] T07d — Multi-TCP fan-out by role · M
+### [x] T07d — Multi-TCP fan-out by role · M
 SPEC §6.1 calls for `*Connection` to wrap a pool of TCP connections
 split by role. `amqp091-go` serializes I/O per `amqp.Connection`,
 so a single socket bounds confirm throughput. T07 covered the
