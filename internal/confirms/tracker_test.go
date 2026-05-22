@@ -308,12 +308,13 @@ func TestTracker_MarkReturned_UnregisteredTag_IsNoOp(t *testing.T) {
 
 // — Cancel ————————————————————————————————————————————————————————————————
 
-// Cancel removes the slot; a subsequent Wait returns ErrClosed.
+// Cancel removes the slot; a subsequent Wait returns ErrClosed immediately (tag is gone).
 func TestTracker_Cancel_SubsequentWait_ReturnsErrClosed(t *testing.T) {
 	tr := confirms.New()
 	require.NoError(t, tr.Register(1))
 	tr.Cancel(1)
-	err := tr.Wait(context.Background(), 1, shortTimeout)
+	// timeout=0: Wait must return ErrClosed via the "!ok" path, not via timeout.
+	err := tr.Wait(context.Background(), 1, 0)
 	assert.ErrorIs(t, err, confirms.ErrClosed)
 }
 
