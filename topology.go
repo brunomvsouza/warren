@@ -121,6 +121,8 @@ func (t *Topology) AttachTo(conn *Connection) {
 
 	// Register one hook per managed connection, capturing mc so the hook can
 	// open a channel on the specific reconnected socket.
+	// conn.pubConns and conn.conConns are immutable after Dial, so this
+	// access is safe without a lock.
 	for _, mc := range append(conn.pubConns, conn.conConns...) {
 		mc := mc
 		mc.registerHook(func(ctx context.Context) error {
@@ -130,23 +132,26 @@ func (t *Topology) AttachTo(conn *Connection) {
 }
 
 // runTopologyRedeclare iterates the registered topology snapshots in registration
-// order and declares each on ch. Called from the synchronous reconnect barrier.
-func (c *Connection) runTopologyRedeclare(ctx context.Context, mc *managedConn) error {
+// order and declares each on a fresh channel. Called from the synchronous
+// reconnect barrier.
+func (c *Connection) runTopologyRedeclare(_ context.Context, mc *managedConn) error {
+	// Snapshot both keys and values under a single lock to avoid repeated
+	// lock acquisitions inside the loop.
 	c.topoMu.RLock()
 	keys := make([]*Topology, len(c.topoKeys))
 	copy(keys, c.topoKeys)
+	snaps := make(map[*Topology]*Topology, len(c.topoSnaps))
+	for k, v := range c.topoSnaps {
+		snaps[k] = v
+	}
 	c.topoMu.RUnlock()
 
 	for _, key := range keys {
-		c.topoMu.RLock()
-		snap := c.topoSnaps[key]
-		c.topoMu.RUnlock()
-
 		ch, err := mc.openChannel()
 		if err != nil {
 			return err
 		}
-		declErr := declareOnChannel(snap, ch)
+		declErr := declareOnChannel(snaps[key], ch)
 		_ = ch.Close()
 		if declErr != nil {
 			return declErr
@@ -205,7 +210,12 @@ func (t *Topology) expand() *Topology {
 		DeadLetters: make([]DeadLetter, len(t.DeadLetters)),
 	}
 	copy(out.DeadLetters, t.DeadLetters)
-	copy(out.Bindings, t.Bindings)
+	for i, b := range t.Bindings {
+		out.Bindings[i] = b
+		if b.Args != nil {
+			out.Bindings[i].Args = copyArgs(b.Args)
+		}
+	}
 	for i, e := range t.Exchanges {
 		out.Exchanges[i] = e
 		if e.Args != nil {
@@ -312,7 +322,7 @@ func (t *Topology) expand() *Topology {
 // declareOnChannel emits exchange → queue → binding declares onto ch.
 // Returns ErrTopologyMismatch (wrapping ErrPreconditionFailed) when the broker
 // signals a 406 PRECONDITION_FAILED conflict on any declare.
-func declareOnChannel(t *Topology, ch topologyChannel) error {
+func declareOnChannel(topo *Topology, ch topologyChannel) error {
 	wrapMismatch := func(err error) error {
 		wrapped := wrapAMQPError(err)
 		if errors.Is(wrapped, ErrPreconditionFailed) {
@@ -321,17 +331,17 @@ func declareOnChannel(t *Topology, ch topologyChannel) error {
 		return wrapped
 	}
 
-	for _, e := range t.Exchanges {
+	for _, e := range topo.Exchanges {
 		if err := ch.ExchangeDeclare(e.Name, string(e.Kind), e.Durable, e.AutoDelete, e.Internal, e.NoWait, amqp091.Table(e.Args)); err != nil {
 			return wrapMismatch(err)
 		}
 	}
-	for _, q := range t.Queues {
+	for _, q := range topo.Queues {
 		if _, err := ch.QueueDeclare(q.Name, q.Durable, q.AutoDelete, q.Exclusive, q.NoWait, amqp091.Table(q.Args)); err != nil {
 			return wrapMismatch(err)
 		}
 	}
-	for _, b := range t.Bindings {
+	for _, b := range topo.Bindings {
 		if err := ch.QueueBind(b.Queue, b.RoutingKey, b.Exchange, b.NoWait, amqp091.Table(b.Args)); err != nil {
 			return wrapMismatch(err)
 		}
