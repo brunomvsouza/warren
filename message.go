@@ -67,12 +67,14 @@ type Message[M any] struct {
 
 // applyDefaults fills MessageID, Timestamp, and ContentType if they are not set.
 // ContentEncoding is intentionally left untouched.
-func (m *Message[M]) applyDefaults(c codec.Codec) {
+// Returns ErrInvalidMessage if a UUID v7 cannot be generated (OS entropy failure).
+func (m *Message[M]) applyDefaults(c codec.Codec) error {
 	if m.MessageID == "" {
 		id, err := uuid.NewV7()
-		if err == nil {
-			m.MessageID = id.String()
+		if err != nil {
+			return fmt.Errorf("%w: failed to generate message ID: %w", ErrInvalidMessage, err)
 		}
+		m.MessageID = id.String()
 	}
 	if m.Timestamp.IsZero() {
 		m.Timestamp = time.Now()
@@ -80,6 +82,7 @@ func (m *Message[M]) applyDefaults(c codec.Codec) {
 	if m.ContentType == "" {
 		m.ContentType = c.ContentType()
 	}
+	return nil
 }
 
 // validateHeaders checks that every value in m.Headers is an AMQP field-table
@@ -88,16 +91,25 @@ func (m *Message[M]) validateHeaders() error {
 	return validateHeaders(m.Headers)
 }
 
+const maxHeaderDepth = 10
+
 func validateHeaders(h Headers) error {
+	return validateHeadersDepth(h, 0)
+}
+
+func validateHeadersDepth(h Headers, depth int) error {
+	if depth > maxHeaderDepth {
+		return fmt.Errorf("%w: header nesting exceeds maximum depth %d", ErrInvalidMessage, maxHeaderDepth)
+	}
 	for k, v := range h {
-		if err := validateHeaderValue(k, v); err != nil {
+		if err := validateHeaderValue(k, v, depth); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateHeaderValue(key string, v any) error {
+func validateHeaderValue(key string, v any, depth int) error {
 	switch typed := v.(type) {
 	case bool,
 		int8, int16, int32, int64,
@@ -105,16 +117,14 @@ func validateHeaderValue(key string, v any) error {
 		float32, float64,
 		string, []byte,
 		time.Time,
-		nil:
-		_ = typed
-		return nil
-	case int, uint:
+		nil,
+		int, uint:
 		return nil
 	case Headers:
-		return validateHeaders(typed)
+		return validateHeadersDepth(typed, depth+1)
 	case []any:
 		for i, elem := range typed {
-			if err := validateHeaderValue(fmt.Sprintf("%s[%d]", key, i), elem); err != nil {
+			if err := validateHeaderValue(fmt.Sprintf("%s[%d]", key, i), elem, depth); err != nil {
 				return err
 			}
 		}
