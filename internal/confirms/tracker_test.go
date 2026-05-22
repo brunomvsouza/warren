@@ -323,3 +323,27 @@ func TestTracker_Cancel_UnregisteredTag_IsNoOp(t *testing.T) {
 	tr := confirms.New()
 	tr.Cancel(99) // must not panic or have any effect
 }
+
+// Cancel while Wait is already blocking must unblock Wait with ErrClosed immediately.
+func TestTracker_Cancel_WhileWaitBlocking_ReturnsErrClosed(t *testing.T) {
+	tr := confirms.New()
+	require.NoError(t, tr.Register(1))
+
+	result := make(chan error, 1)
+	blocking := make(chan struct{})
+	go func() {
+		close(blocking) // signal that goroutine has started
+		result <- tr.Wait(context.Background(), 1, time.Second)
+	}()
+	<-blocking
+	time.Sleep(2 * time.Millisecond) // let Wait enter its select
+
+	tr.Cancel(1)
+
+	select {
+	case err := <-result:
+		assert.ErrorIs(t, err, confirms.ErrClosed)
+	case <-time.After(shortTimeout):
+		t.Fatal("Wait did not unblock after Cancel")
+	}
+}
