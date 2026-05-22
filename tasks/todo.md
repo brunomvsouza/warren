@@ -357,7 +357,7 @@ mandatory metric `publisher_retry_total{exchange, reason}`.
 - **Files:** edits to `publisher.go`, `publisher_builder.go`, plus `publisher_returns_integration_test.go`, `publisher_confirm_timeout_test.go`, `publisher_blocked_integration_test.go`, `publisher_nack_integration_test.go`, `publisher_retry_test.go`, `publisher_timeout_test.go`, `publisher_userid_test.go`, `publisher_amqpcode_returns_test.go`, `publisher_retry_metric_test.go`.
 - **Deps:** T11, T12.
 
-### [ ] T13b — Checkpoint example: `examples/publish/main.go` · S
+### [x] T13b — Checkpoint example: `examples/publish/main.go` · S
 First runnable example shipped on `main`, per SPEC §7 "Executable
 examples at checkpoints" + §10 Rev decision 49. Must land in the
 same PR (or immediately after) as T13 so the Phase 2 checkpoint

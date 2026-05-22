@@ -4,7 +4,7 @@ GO        ?= go
 GOLANGCI  ?= golangci-lint
 PKG       := ./...
 
-.PHONY: help build test test-integration test-conformance test-all lint mocks doc hooks clean
+.PHONY: help build test test-integration test-conformance test-all lint mocks doc hooks clean examples-build examples-smoke
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -38,6 +38,12 @@ hooks: ## Install pre-commit hook running lint+test (opt-in).
 	@printf '#!/bin/sh\nexec make lint test\n' > .git/hooks/pre-commit
 	@chmod +x .git/hooks/pre-commit
 	@echo "Installed .git/hooks/pre-commit (runs 'make lint test')."
+
+examples-build: ## Build all examples (unit lane; no broker required).
+	$(GO) build ./examples/...
+
+examples-smoke: ## Smoke-run example integration tests (requires broker via AMQP_TEST_URL).
+	$(GO) test -race -tags=integration ./examples/...
 
 clean: ## Remove build and test artifacts.
 	$(GO) clean -testcache
