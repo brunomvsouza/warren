@@ -253,7 +253,7 @@ func (c *Connection) Close(ctx context.Context) error {
 		select {
 		case <-mc.done:
 		case <-ctx.Done():
-			return fmt.Errorf("amqp: close timed out: %w", ctx.Err())
+			return fmt.Errorf("warren: close timed out: %w", ctx.Err())
 		}
 	}
 
@@ -274,7 +274,7 @@ func (c *Connection) Close(ctx context.Context) error {
 	select {
 	case <-doneCh:
 	case <-ctx.Done():
-		return fmt.Errorf("amqp: close timed out waiting for callbacks: %w", ctx.Err())
+		return fmt.Errorf("warren: close timed out waiting for callbacks: %w", ctx.Err())
 	}
 	return nil
 }
@@ -495,12 +495,12 @@ func (mc *managedConn) supervisor(ctx context.Context) {
 		mc.barrierMu.Unlock()
 
 		mc.opts.metrics.RecordReconnect(mc.role)
-		mc.opts.logger.Infof("amqp: %s connection[%d] lost; reconnecting…", mc.role, mc.idx)
+		mc.opts.logger.Infof("warren: %s connection[%d] lost; reconnecting…", mc.role, mc.idx)
 
 		connected, lastErr := mc.reconnectRaw(ctx)
 
 		if !connected {
-			mc.opts.logger.Errorf("amqp: %s connection[%d] reconnect failed: %v",
+			mc.opts.logger.Errorf("warren: %s connection[%d] reconnect failed: %v",
 				mc.role, mc.idx, redact.Error(lastErr))
 			mc.barrierMu.Lock()
 			mc.reconnecting = false
@@ -542,7 +542,7 @@ func (mc *managedConn) runBarrier(ctx context.Context) {
 	if hookErr != nil {
 		reason := "topology_failed"
 		mc.opts.metrics.RecordDegraded(mc.role, reason)
-		mc.opts.logger.Errorf("amqp: %s connection[%d] topology redeclare failed; entering degraded state: %v",
+		mc.opts.logger.Errorf("warren: %s connection[%d] topology redeclare failed; entering degraded state: %v",
 			mc.role, mc.idx, redact.Error(hookErr))
 		mc.mu.Lock()
 		wasAlreadyDegraded := mc.degraded
@@ -564,7 +564,7 @@ func (mc *managedConn) runBarrier(ctx context.Context) {
 		mc.degradedErr = nil
 		mc.mu.Unlock()
 		if wasDegraded {
-			mc.opts.logger.Infof("amqp: %s connection[%d] recovered from degraded state",
+			mc.opts.logger.Infof("warren: %s connection[%d] recovered from degraded state",
 				mc.role, mc.idx)
 		}
 
@@ -706,23 +706,23 @@ func validateConnOptions(opts *connOptions) error {
 		}
 		// WithAuth under EXTERNAL is valid but ignored — warn at log level only
 		if opts.username != "" {
-			opts.logger.Warningf("amqp: WithAuth is ignored when SASLExternal is active")
+			opts.logger.Warningf("warren: WithAuth is ignored when SASLExternal is active")
 		}
 	}
 
 	// Heartbeat: negative disables heartbeats entirely — log warning but allow
 	if opts.heartbeat < 0 {
-		opts.logger.Warningf("amqp: heartbeats disabled (WithHeartbeat(%v)) — strongly discouraged; "+
+		opts.logger.Warningf("warren: heartbeats disabled (WithHeartbeat(%v)) — strongly discouraged; "+
 			"half-open TCP connections may go undetected", opts.heartbeat)
 	}
 
 	// Single-socket availability warning
 	if opts.pubConns == 1 {
-		opts.logger.Warningf("amqp: WithPublisherConnections(1): a single publisher socket is a " +
+		opts.logger.Warningf("warren: WithPublisherConnections(1): a single publisher socket is a " +
 			"full-availability gap during reconnect")
 	}
 	if opts.conConns == 1 {
-		opts.logger.Warningf("amqp: WithConsumerConnections(1): a single consumer socket is a " +
+		opts.logger.Warningf("warren: WithConsumerConnections(1): a single consumer socket is a " +
 			"full-availability gap during reconnect")
 	}
 
@@ -787,7 +787,7 @@ func dialAMQP(_ context.Context, opts *connOptions, name string) (*amqp091.Conne
 	// client-properties: use the per-socket name, not opts.connectionName
 	props := amqp091.Table{
 		"connection_name": name,
-		"product":         "amqp.go",
+		"product":         "Warren",
 	}
 	maps.Copy(props, opts.clientProperties)
 	cfg.Properties = props

@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	amqp "github.com/brunomvsouza/warren"
+	"github.com/brunomvsouza/warren"
 )
 
 func TestTopology_AttachTo_redeclaresAfterReconnect_integration(t *testing.T) {
@@ -22,9 +22,9 @@ func TestTopology_AttachTo_redeclaresAfterReconnect_integration(t *testing.T) {
 	ctx := context.Background()
 
 	reconnected := make(chan struct{}, 1)
-	conn, err := amqp.Dial(ctx,
-		amqp.WithAddr(url),
-		amqp.WithOnReconnect(func() {
+	conn, err := warren.Dial(ctx,
+		warren.WithAddr(url),
+		warren.WithOnReconnect(func() {
 			select {
 			case reconnected <- struct{}{}:
 			default:
@@ -38,8 +38,8 @@ func TestTopology_AttachTo_redeclaresAfterReconnect_integration(t *testing.T) {
 		_ = conn.Close(closeCtx)
 	}()
 
-	topo := &amqp.Topology{
-		Queues: []amqp.Queue{
+	topo := &warren.Topology{
+		Queues: []warren.Queue{
 			{Name: "test.attach.q1", Durable: false, AutoDelete: true},
 		},
 	}
@@ -74,9 +74,9 @@ func TestTopology_AttachTo_onReconnectFiresAfterTopologyRedeclared_integration(t
 	ctx := context.Background()
 
 	reconnected := make(chan struct{}, 1)
-	conn, err := amqp.Dial(ctx,
-		amqp.WithAddr(url),
-		amqp.WithOnReconnect(func() {
+	conn, err := warren.Dial(ctx,
+		warren.WithAddr(url),
+		warren.WithOnReconnect(func() {
 			select {
 			case reconnected <- struct{}{}:
 			default:
@@ -90,8 +90,8 @@ func TestTopology_AttachTo_onReconnectFiresAfterTopologyRedeclared_integration(t
 		_ = conn.Close(closeCtx)
 	}()
 
-	topo := &amqp.Topology{
-		Queues: []amqp.Queue{
+	topo := &warren.Topology{
+		Queues: []warren.Queue{
 			{Name: "test.attach.order.q", Durable: false, AutoDelete: true},
 		},
 	}
@@ -129,9 +129,9 @@ func TestTopology_AttachTo_degradedOnMismatch_integration(t *testing.T) {
 	})
 
 	degradedCh := make(chan error, 1)
-	conn, err := amqp.Dial(ctx,
-		amqp.WithAddr(url),
-		amqp.WithOnTopologyDegraded(func(err error) {
+	conn, err := warren.Dial(ctx,
+		warren.WithAddr(url),
+		warren.WithOnTopologyDegraded(func(err error) {
 			select {
 			case degradedCh <- err:
 			default:
@@ -146,16 +146,16 @@ func TestTopology_AttachTo_degradedOnMismatch_integration(t *testing.T) {
 	}()
 
 	// Declare a durable queue.
-	topo1 := &amqp.Topology{
-		Queues: []amqp.Queue{
+	topo1 := &warren.Topology{
+		Queues: []warren.Queue{
 			{Name: "test.attach.durable", Durable: true},
 		},
 	}
 	require.NoError(t, topo1.Declare(ctx, conn))
 
 	// Register a topology that conflicts: non-durable declaration of the same queue.
-	conflicting := &amqp.Topology{
-		Queues: []amqp.Queue{
+	conflicting := &warren.Topology{
+		Queues: []warren.Queue{
 			{Name: "test.attach.durable", Durable: false},
 		},
 	}
@@ -167,7 +167,7 @@ func TestTopology_AttachTo_degradedOnMismatch_integration(t *testing.T) {
 	// Wait for degraded callback.
 	select {
 	case degradedErr := <-degradedCh:
-		assert.ErrorIs(t, degradedErr, amqp.ErrTopologyRedeclareFailed)
+		assert.ErrorIs(t, degradedErr, warren.ErrTopologyRedeclareFailed)
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for WithOnTopologyDegraded callback")
 	}

@@ -5,29 +5,29 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	amqp "github.com/brunomvsouza/warren"
+	"github.com/brunomvsouza/warren"
 )
 
 func TestDeliveryModeValues(t *testing.T) {
-	assert.Equal(t, amqp.DeliveryMode(0), amqp.DeliveryModePersistent, "DeliveryModePersistent must be zero value")
-	assert.NotEqual(t, amqp.DeliveryModePersistent, amqp.DeliveryModeTransient)
+	assert.Equal(t, warren.DeliveryMode(0), warren.DeliveryModePersistent, "DeliveryModePersistent must be zero value")
+	assert.NotEqual(t, warren.DeliveryModePersistent, warren.DeliveryModeTransient)
 }
 
 func TestExchangeKindValues(t *testing.T) {
 	tests := []struct {
 		name string
-		got  amqp.ExchangeKind
+		got  warren.ExchangeKind
 		want string
 	}{
-		{"Direct", amqp.ExchangeDirect, "direct"},
-		{"Fanout", amqp.ExchangeFanout, "fanout"},
-		{"Topic", amqp.ExchangeTopic, "topic"},
-		{"Headers", amqp.ExchangeHeaders, "headers"},
-		{"Delayed", amqp.ExchangeDelayed, "x-delayed-message"},
+		{"Direct", warren.ExchangeDirect, "direct"},
+		{"Fanout", warren.ExchangeFanout, "fanout"},
+		{"Topic", warren.ExchangeTopic, "topic"},
+		{"Headers", warren.ExchangeHeaders, "headers"},
+		{"Delayed", warren.ExchangeDelayed, "x-delayed-message"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, amqp.ExchangeKind(tc.want), tc.got)
+			assert.Equal(t, warren.ExchangeKind(tc.want), tc.got)
 		})
 	}
 }
@@ -35,16 +35,16 @@ func TestExchangeKindValues(t *testing.T) {
 func TestQueueTypeValues(t *testing.T) {
 	tests := []struct {
 		name string
-		got  amqp.QueueType
+		got  warren.QueueType
 		want string
 	}{
-		{"Classic", amqp.QueueTypeClassic, "classic"},
-		{"Quorum", amqp.QueueTypeQuorum, "quorum"},
-		{"Stream", amqp.QueueTypeStream, "stream"},
+		{"Classic", warren.QueueTypeClassic, "classic"},
+		{"Quorum", warren.QueueTypeQuorum, "quorum"},
+		{"Stream", warren.QueueTypeStream, "stream"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, amqp.QueueType(tc.want), tc.got)
+			assert.Equal(t, warren.QueueType(tc.want), tc.got)
 		})
 	}
 }
@@ -52,16 +52,16 @@ func TestQueueTypeValues(t *testing.T) {
 func TestOverflowPolicyValues(t *testing.T) {
 	tests := []struct {
 		name string
-		got  amqp.OverflowPolicy
+		got  warren.OverflowPolicy
 		want string
 	}{
-		{"DropHead", amqp.OverflowDropHead, "drop-head"},
-		{"RejectPublish", amqp.OverflowRejectPublish, "reject-publish"},
-		{"RejectPublishDLX", amqp.OverflowRejectPublishDLX, "reject-publish-dlx"},
+		{"DropHead", warren.OverflowDropHead, "drop-head"},
+		{"RejectPublish", warren.OverflowRejectPublish, "reject-publish"},
+		{"RejectPublishDLX", warren.OverflowRejectPublishDLX, "reject-publish-dlx"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, amqp.OverflowPolicy(tc.want), tc.got)
+			assert.Equal(t, warren.OverflowPolicy(tc.want), tc.got)
 		})
 	}
 }
@@ -69,20 +69,20 @@ func TestOverflowPolicyValues(t *testing.T) {
 func TestSASLMechanismValues(t *testing.T) {
 	tests := []struct {
 		name string
-		got  amqp.SASLMechanism
+		got  warren.SASLMechanism
 		want string
 	}{
-		{"Plain", amqp.SASLPlain, "PLAIN"},
-		{"External", amqp.SASLExternal, "EXTERNAL"},
+		{"Plain", warren.SASLPlain, "PLAIN"},
+		{"External", warren.SASLExternal, "EXTERNAL"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, amqp.SASLMechanism(tc.want), tc.got)
+			assert.Equal(t, warren.SASLMechanism(tc.want), tc.got)
 		})
 	}
 }
 
 func TestTimeoutVerdictValues(t *testing.T) {
-	assert.Equal(t, amqp.TimeoutVerdict(0), amqp.TimeoutNackNoRequeue, "TimeoutNackNoRequeue must be zero value (iota)")
-	assert.NotEqual(t, amqp.TimeoutNackNoRequeue, amqp.TimeoutNackRequeue)
+	assert.Equal(t, warren.TimeoutVerdict(0), warren.TimeoutNackNoRequeue, "TimeoutNackNoRequeue must be zero value (iota)")
+	assert.NotEqual(t, warren.TimeoutNackNoRequeue, warren.TimeoutNackRequeue)
 }

@@ -6,17 +6,17 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	amqp "github.com/brunomvsouza/warren"
+	"github.com/brunomvsouza/warren"
 )
 
 func TestRetryPolicy_defaultsApplied(t *testing.T) {
-	p := amqp.RetryPolicy{WithoutJitter: true}
+	p := warren.RetryPolicy{WithoutJitter: true}
 	d1 := p.NextBackoff(1)
 	assert.Equal(t, time.Second, d1, "attempt 1 with defaults must equal Min (1s)")
 }
 
 func TestRetryPolicy_exponentialGrowth(t *testing.T) {
-	p := amqp.RetryPolicy{
+	p := warren.RetryPolicy{
 		Min:           100 * time.Millisecond,
 		Max:           10 * time.Second,
 		Factor:        2.0,
@@ -29,7 +29,7 @@ func TestRetryPolicy_exponentialGrowth(t *testing.T) {
 }
 
 func TestRetryPolicy_cappedAtMax(t *testing.T) {
-	p := amqp.RetryPolicy{
+	p := warren.RetryPolicy{
 		Min:           time.Second,
 		Max:           5 * time.Second,
 		Factor:        10.0,
@@ -40,7 +40,7 @@ func TestRetryPolicy_cappedAtMax(t *testing.T) {
 }
 
 func TestRetryPolicy_jitterWithinBounds(t *testing.T) {
-	p := amqp.RetryPolicy{
+	p := warren.RetryPolicy{
 		Min:    100 * time.Millisecond,
 		Max:    10 * time.Second,
 		Factor: 2.0,
@@ -53,7 +53,7 @@ func TestRetryPolicy_jitterWithinBounds(t *testing.T) {
 }
 
 func TestRetryPolicy_withoutJitterIsDeterministic(t *testing.T) {
-	p := amqp.RetryPolicy{
+	p := warren.RetryPolicy{
 		Min:           200 * time.Millisecond,
 		Max:           time.Minute,
 		Factor:        2.0,

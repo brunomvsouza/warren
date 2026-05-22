@@ -30,7 +30,7 @@ import (
 	"os"
 	"time"
 
-	amqp "github.com/brunomvsouza/warren"
+	"github.com/brunomvsouza/warren"
 )
 
 // Order is the payload type for this example.
@@ -54,7 +54,7 @@ func run() error {
 
 	ctx := context.Background()
 
-	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
+	conn, err := warren.Dial(ctx, warren.WithAddr(url))
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -64,23 +64,23 @@ func run() error {
 		_ = conn.Close(closeCtx)
 	}()
 
-	topo := &amqp.Topology{
-		Exchanges: []amqp.Exchange{
+	topo := &warren.Topology{
+		Exchanges: []warren.Exchange{
 			{
 				Name:       "warren.examples",
-				Kind:       amqp.ExchangeTopic,
+				Kind:       warren.ExchangeTopic,
 				Durable:    false,
 				AutoDelete: true,
 			},
 		},
-		Queues: []amqp.Queue{
+		Queues: []warren.Queue{
 			{
 				Name:       "warren.examples.orders",
 				Durable:    false,
 				AutoDelete: true,
 			},
 		},
-		Bindings: []amqp.Binding{
+		Bindings: []warren.Binding{
 			{
 				Exchange:   "warren.examples",
 				Queue:      "warren.examples.orders",
@@ -93,16 +93,16 @@ func run() error {
 	}
 
 	var returned bool
-	pub, err := amqp.PublisherFor[Order](conn).
+	pub, err := warren.PublisherFor[Order](conn).
 		Exchange("warren.examples").
 		RoutingKey("order.created").
 		Mandatory().
-		OnReturn(func(r amqp.Return) {
+		OnReturn(func(r warren.Return) {
 			returned = true
 			log.Printf("message returned: code=%d text=%s", r.ReplyCode, r.ReplyText)
 		}).
 		ConfirmTimeout(30 * time.Second).
-		PublishRetry(amqp.RetryPolicy{
+		PublishRetry(warren.RetryPolicy{
 			Min:     100 * time.Millisecond,
 			Max:     5 * time.Second,
 			Factor:  2.0,
@@ -119,7 +119,7 @@ func run() error {
 	}()
 
 	order := Order{ID: "ord-001", Amount: 42}
-	msg := amqp.Message[Order]{Body: &order}
+	msg := warren.Message[Order]{Body: &order}
 	if err := pub.Publish(ctx, msg); err != nil {
 		return fmt.Errorf("publish: %w", err)
 	}

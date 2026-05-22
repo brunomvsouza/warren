@@ -11,77 +11,77 @@ var (
 	// Connection lifecycle.
 
 	// ErrNotConnected is returned when Publish or Consume is called before Dial.
-	ErrNotConnected = errors.New("amqp: not connected")
+	ErrNotConnected = errors.New("warren: not connected")
 	// ErrAlreadyClosed is returned when Close is called on an already-closed connection.
-	ErrAlreadyClosed = errors.New("amqp: already closed")
+	ErrAlreadyClosed = errors.New("warren: already closed")
 	// ErrShutdown is returned when an operation is attempted while the connection is shutting down.
-	ErrShutdown = errors.New("amqp: client is shutting down")
+	ErrShutdown = errors.New("warren: client is shutting down")
 	// ErrChannelClosed is returned when the broker closes the channel (e.g. after a protocol error).
-	ErrChannelClosed = errors.New("amqp: channel closed")
+	ErrChannelClosed = errors.New("warren: channel closed")
 	// ErrConnectionBlocked is returned when the broker blocks the connection due to a memory or disk alarm.
-	ErrConnectionBlocked = errors.New("amqp: connection blocked by broker")
+	ErrConnectionBlocked = errors.New("warren: connection blocked by broker")
 	// ErrChannelPoolExhausted is returned when ctx is cancelled before a semaphore
 	// token becomes available. It wraps ctx.Err() so callers can distinguish a
 	// voluntary cancellation (context.Canceled) from a deadline (context.DeadlineExceeded)
 	// via errors.Is. Note: IsTransient returns true for this error regardless of the
 	// underlying ctx.Err() — see LATER-07 for the planned fix when PublishRetry is added.
-	ErrChannelPoolExhausted = errors.New("amqp: channel pool exhausted")
+	ErrChannelPoolExhausted = errors.New("warren: channel pool exhausted")
 
 	// Publisher errors.
 
 	// ErrConfirmTimeout is returned when the broker does not confirm a publish within the deadline.
-	ErrConfirmTimeout = errors.New("amqp: publisher confirm timeout")
+	ErrConfirmTimeout = errors.New("warren: publisher confirm timeout")
 	// ErrUnroutable is returned when a mandatory publish has no matching binding (basic.return received).
-	ErrUnroutable = errors.New("amqp: mandatory publish was returned")
+	ErrUnroutable = errors.New("warren: mandatory publish was returned")
 	// ErrPublishNacked is returned when the broker sends basic.nack (e.g. overflow=reject-publish, disk alarm).
-	ErrPublishNacked = errors.New("amqp: broker nacked publish")
+	ErrPublishNacked = errors.New("warren: broker nacked publish")
 	// ErrPartialBatch is returned when one or more messages in a PublishBatch fail.
-	ErrPartialBatch = errors.New("amqp: batch publish partially failed")
+	ErrPartialBatch = errors.New("warren: batch publish partially failed")
 	// ErrBatchTooLarge is returned when PublishBatch is called with more messages than PublishBatchMaxSize allows.
-	ErrBatchTooLarge = errors.New("amqp: PublishBatch exceeds max in-flight budget")
+	ErrBatchTooLarge = errors.New("warren: PublishBatch exceeds max in-flight budget")
 
 	// Consumer errors.
 
 	// ErrRequeue signals the consumer handler that the message should be nacked with requeue=true.
-	ErrRequeue = errors.New("amqp: nack with requeue")
+	ErrRequeue = errors.New("warren: nack with requeue")
 	// ErrPoison signals the consumer handler that the message should be nacked without requeue.
-	ErrPoison = errors.New("amqp: poison message (nack no requeue)")
+	ErrPoison = errors.New("warren: poison message (nack no requeue)")
 	// ErrMaxRedeliveries is returned when a message exceeds the MaxRedeliveries limit.
-	ErrMaxRedeliveries = errors.New("amqp: max redeliveries exceeded")
+	ErrMaxRedeliveries = errors.New("warren: max redeliveries exceeded")
 	// ErrConsumerCancelled is returned when the broker cancels the consumer via basic.cancel
 	// (e.g. the queue was deleted or the exclusive lock was revoked).
-	ErrConsumerCancelled = errors.New("amqp: consumer cancelled by broker (basic.cancel)")
+	ErrConsumerCancelled = errors.New("warren: consumer cancelled by broker (basic.cancel)")
 
 	// Codec / payload errors.
 
 	// ErrInvalidMessage is returned when the message payload cannot be encoded or decoded,
 	// or when a Message field value violates a SPEC constraint.
-	ErrInvalidMessage = errors.New("amqp: invalid message payload")
+	ErrInvalidMessage = errors.New("warren: invalid message payload")
 
 	// Topology errors.
 
 	// ErrTopologyMismatch is returned when Topology.Declare finds an existing queue or exchange
 	// whose properties conflict with the requested declaration. It wraps ErrPreconditionFailed.
-	ErrTopologyMismatch = errors.New("amqp: topology mismatch")
+	ErrTopologyMismatch = errors.New("warren: topology mismatch")
 	// ErrTopologyRedeclareFailed is returned when the reconnect barrier cannot redeclare the topology.
 	// The connection enters a degraded state; this error is permanent until a successful redeclare.
-	ErrTopologyRedeclareFailed = errors.New("amqp: topology redeclare failed")
+	ErrTopologyRedeclareFailed = errors.New("warren: topology redeclare failed")
 
 	// Reconnect lifecycle.
 
 	// ErrReconnecting is returned while the connection is inside the synchronous reconnect barrier
 	// (redeclare → re-subscribe → WithOnReconnect). Publish blocks until the barrier clears. Transient.
-	ErrReconnecting = errors.New("amqp: connection reconnecting")
+	ErrReconnecting = errors.New("warren: connection reconnecting")
 
 	// RPC errors.
 
 	// ErrCallTimeout is returned when an RPC call exceeds its deadline.
-	ErrCallTimeout = errors.New("amqp: rpc call timed out")
+	ErrCallTimeout = errors.New("warren: rpc call timed out")
 
 	// Configuration errors.
 
 	// ErrInvalidOptions is returned when a builder option value violates a SPEC constraint.
-	ErrInvalidOptions = errors.New("amqp: invalid options")
+	ErrInvalidOptions = errors.New("warren: invalid options")
 
 	// AMQP 0-9-1 reply-code sentinels.
 	//
@@ -90,49 +90,49 @@ var (
 	// branching or IsTransient/IsPermanent for coarse classification.
 
 	// ErrContentTooLarge wraps AMQP reply code 311 (content-too-large).
-	ErrContentTooLarge = errors.New("amqp: content too large (311)")
+	ErrContentTooLarge = errors.New("warren: content too large (311)")
 	// ErrConnectionForced wraps AMQP reply code 320 (connection-forced).
-	ErrConnectionForced = errors.New("amqp: connection forced (320)")
+	ErrConnectionForced = errors.New("warren: connection forced (320)")
 	// ErrInvalidPath wraps AMQP reply code 402 (invalid-path). Permanent.
-	ErrInvalidPath = errors.New("amqp: invalid path (402)")
+	ErrInvalidPath = errors.New("warren: invalid path (402)")
 	// ErrAccessRefused wraps AMQP reply code 403 (access-refused). Permanent.
-	ErrAccessRefused = errors.New("amqp: access refused (403)")
+	ErrAccessRefused = errors.New("warren: access refused (403)")
 	// ErrNotFound wraps AMQP reply code 404 (not-found). Permanent.
-	ErrNotFound = errors.New("amqp: not found (404)")
+	ErrNotFound = errors.New("warren: not found (404)")
 	// ErrResourceLocked wraps AMQP reply code 405 (resource-locked). Permanent.
-	ErrResourceLocked = errors.New("amqp: resource locked (405)")
+	ErrResourceLocked = errors.New("warren: resource locked (405)")
 	// ErrPreconditionFailed wraps AMQP reply code 406 (precondition-failed). Permanent.
-	ErrPreconditionFailed = errors.New("amqp: precondition failed (406)")
+	ErrPreconditionFailed = errors.New("warren: precondition failed (406)")
 	// ErrFrameError wraps AMQP reply code 501 (frame-error). Permanent.
-	ErrFrameError = errors.New("amqp: frame error (501)")
+	ErrFrameError = errors.New("warren: frame error (501)")
 	// ErrSyntaxError wraps AMQP reply code 502 (syntax-error). Permanent.
-	ErrSyntaxError = errors.New("amqp: syntax error (502)")
+	ErrSyntaxError = errors.New("warren: syntax error (502)")
 	// ErrCommandInvalid wraps AMQP reply code 503 (command-invalid). Permanent.
-	ErrCommandInvalid = errors.New("amqp: command invalid (503)")
+	ErrCommandInvalid = errors.New("warren: command invalid (503)")
 	// ErrChannelError wraps AMQP reply code 504 (channel-error). Transient.
-	ErrChannelError = errors.New("amqp: channel error (504)")
+	ErrChannelError = errors.New("warren: channel error (504)")
 	// ErrUnexpectedFrame wraps AMQP reply code 505 (unexpected-frame). Permanent.
-	ErrUnexpectedFrame = errors.New("amqp: unexpected frame (505)")
+	ErrUnexpectedFrame = errors.New("warren: unexpected frame (505)")
 	// ErrResourceError wraps AMQP reply code 506 (resource-error). Permanent by default.
 	// Resource errors cover both transient (disk pressure) and permanent (FD exhaustion)
 	// conditions; retrying blindly amplifies pressure. Callers that know their workload
 	// can re-classify by wrapping with ErrTransient explicitly.
-	ErrResourceError = errors.New("amqp: resource error (506)")
+	ErrResourceError = errors.New("warren: resource error (506)")
 	// ErrNotAllowed wraps AMQP reply code 530 (not-allowed). Permanent.
-	ErrNotAllowed = errors.New("amqp: not allowed (530)")
+	ErrNotAllowed = errors.New("warren: not allowed (530)")
 	// ErrNotImplemented wraps AMQP reply code 540 (not-implemented). Permanent.
-	ErrNotImplemented = errors.New("amqp: not implemented (540)")
+	ErrNotImplemented = errors.New("warren: not implemented (540)")
 	// ErrInternalError wraps AMQP reply code 541 (internal-error). Transient.
-	ErrInternalError = errors.New("amqp: internal error (541)")
+	ErrInternalError = errors.New("warren: internal error (541)")
 
 	// Retry classifiers.
 
 	// ErrTransient is a sentinel that callers can wrap around any error to mark it as retryable.
 	// IsTransient returns true for any error in the chain that wraps ErrTransient.
-	ErrTransient = errors.New("amqp: transient error")
+	ErrTransient = errors.New("warren: transient error")
 	// ErrPermanent is a sentinel that callers can wrap around any error to mark it as non-retryable.
 	// IsPermanent returns true for any error in the chain that wraps ErrPermanent.
-	ErrPermanent = errors.New("amqp: permanent error")
+	ErrPermanent = errors.New("warren: permanent error")
 )
 
 // amqpCodeSentinels maps each AMQP reply-code sentinel to its wire code.

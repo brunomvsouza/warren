@@ -58,7 +58,7 @@ Module path is `github.com/brunomvsouza/warren` (note: **no `.go` suffix** despi
 `.golangci.yml` enables `errcheck`, `govet`, `staticcheck`, `gosec`, `revive`, `gocritic`, `unparam`, `bodyclose`, `nilerr`, **`errorlint`**. Consequences:
 
 - Always compare errors with `errors.Is` / `errors.As` — never `==` (errorlint).
-- `revive`'s `exported` rule runs with `disableStutteringCheck` (package `amqp` exports `amqp.Headers` etc. on purpose).
+- `revive`'s `exported` rule runs with `disableStutteringCheck` (package `amqp` exports `warren.Headers` etc. on purpose).
 - `gosec` excludes `G115` (AMQP frames are uint16/uint8 by spec) and `G101` (test fixtures use fake AMQP credentials).
 
 ## Testing conventions

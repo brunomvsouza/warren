@@ -212,7 +212,7 @@ through this helper.
 
 ### [x] T07d — Multi-TCP fan-out by role · M
 SPEC §6.1 calls for `*Connection` to wrap a pool of TCP connections
-split by role. `amqp091-go` serializes I/O per `amqp.Connection`,
+split by role. `amqp091-go` serializes I/O per `warren.Connection`,
 so a single socket bounds confirm throughput. T07 covered the
 single-socket lifecycle; T07d adds the pool.
 - **Acceptance:**
@@ -363,7 +363,7 @@ examples at checkpoints" + §10 Rev decision 49. Must land in the
 same PR (or immediately after) as T13 so the Phase 2 checkpoint
 can close.
 - **Acceptance:**
-  - [ ] `examples/publish/main.go` is `package main`, reads broker URL from `AMQP_URL` (default `amqp://guest:guest@localhost:5672/`), declares its own ad-hoc topology (one exchange + one queue + one binding) via `Topology.Declare`, and demonstrates: `PublisherFor[M]` with a concrete user-defined `Order` payload, single `Publish` with `Mandatory()` + `OnReturn` callback, `ConfirmTimeout(30*time.Second)`, and `PublishRetry(amqp.RetryPolicy{...})`. Returns non-zero exit code on any unexpected error; exits 0 on success.
+  - [ ] `examples/publish/main.go` is `package main`, reads broker URL from `AMQP_URL` (default `amqp://guest:guest@localhost:5672/`), declares its own ad-hoc topology (one exchange + one queue + one binding) via `Topology.Declare`, and demonstrates: `PublisherFor[M]` with a concrete user-defined `Order` payload, single `Publish` with `Mandatory()` + `OnReturn` callback, `ConfirmTimeout(30*time.Second)`, and `PublishRetry(warren.RetryPolicy{...})`. Returns non-zero exit code on any unexpected error; exits 0 on success.
   - [ ] Top-of-file godoc block lists (a) what the example demonstrates, (b) the command to run it (`go run ./examples/publish`), (c) the env vars it reads, (d) any topology side-effects on the broker.
   - [ ] `go build ./examples/...` is green on the unit lane (no broker required).
   - [ ] An integration test (`examples/publish/example_integration_test.go`, build tag `integration`) spins up the same testcontainer the rest of the integration suite uses, runs the example as a subprocess (`exec.Command("go", "run", ".")`) against it with `AMQP_URL` injected, and asserts (a) exit code 0; (b) the test-side consumer attached to the example's queue receives the expected payload exactly once; (c) `goleak.VerifyNone(t)` is clean after the subprocess exits.
@@ -774,7 +774,7 @@ adds the at-least-once reply ordering contract.
 - **Acceptance:**
   - [ ] `Message[M].Delay` field honored at publish time (sets `x-delay` header).
   - [ ] `Topology` declares `x-delayed-message` exchanges when `Kind = ExchangeDelayed`; `Args` carries `x-delayed-type` to specify the underlying type.
-  - [ ] Helper `amqp.DelayedTopic(name string)` constructs the right `Exchange{}` literal.
+  - [ ] Helper `warren.DelayedTopic(name string)` constructs the right `Exchange{}` literal.
 - **Verify:** Integration test: testcontainer with `rabbitmq_delayed_message_exchange` plugin enabled; publish with 2s delay; assert delivery happens between 2s and 2.5s.
 - **Files:** `delay.go`, edits to `topology.go`, `message.go`, `delay_integration_test.go`.
 - **Integration fixture:** **`amqptest/`** (T37) — three plugin modes and `amqptest.RequireDelayedExchange(t)` per SPEC §6.9; do not add a parallel `testing/` package. If T31 lands before T37, keep delayed tests behind skip/minimal container wiring until the shared `amqptest` helper exists.
@@ -785,7 +785,7 @@ Per SPEC §7 "Executable examples at checkpoints" + §10 Rev
 decision 49. Closes the Phase 7 checkpoint.
 - **Acceptance:**
   - [ ] `examples/rpc/main.go` is `package main`, reads `AMQP_URL`, declares a request queue with a `DeadLetter` entry, runs a `ReplierFor[PriceReq, PriceResp]` with `.Topology(t)` (which auto-validates DLX presence) and `.Serve(ctx, handler)`, runs a `CallerFor[PriceReq, PriceResp]` that performs 3 concurrent `Call(ctx, req)` invocations and asserts each response matches its request via `CorrelationID`, and exits 0 after all three succeed. A negative-path block additionally demonstrates `ErrCallTimeout` by sending a request with a 50ms ctx against a handler that sleeps 200ms.
-  - [ ] `examples/delayed/main.go` is `package main`, reads `AMQP_URL`, declares an `Exchange{Kind: ExchangeDelayed, Args: amqp.Headers{"x-delayed-type": "topic"}}` + a bound queue, publishes a message with `Message[M].Delay = 2*time.Second`, runs a consumer that records the arrival time, asserts the arrival is between 2s and 2.5s of publish, and exits 0.
+  - [ ] `examples/delayed/main.go` is `package main`, reads `AMQP_URL`, declares an `Exchange{Kind: ExchangeDelayed, Args: warren.Headers{"x-delayed-type": "topic"}}` + a bound queue, publishes a message with `Message[M].Delay = 2*time.Second`, runs a consumer that records the arrival time, asserts the arrival is between 2s and 2.5s of publish, and exits 0.
   - [ ] Top-of-file godoc on `rpc/` documents the at-least-once reply ordering contract (per Rev 5 + T30) — consumers MUST dedupe by `CorrelationID`. Top-of-file godoc on `delayed/` documents the `x-delayed-message` plugin requirement and points at `amqptest.RequireDelayedExchange(t)`.
   - [ ] `go build ./examples/...` green on the unit lane (no plugin required for build).
   - [ ] Integration test per example (`example_integration_test.go` in each subdir, `integration` tag) runs the example as a subprocess. The `rpc/` test runs against the standard testcontainer broker. The `delayed/` test calls `amqptest.RequireDelayedExchange(t)` once T37 has landed, skipping cleanly when the plugin is unavailable; if T31b lands before T37, the `delayed/` integration test guards itself with the same env-var check (`AMQPTEST_IMAGE` / `AMQPTEST_DELAYED_PLUGIN_FILE`) and `t.Skip`s otherwise. Asserts exit 0 + the example's stdout contains the expected ordering / timing logs. `goleak.VerifyNone(t)` clean.

@@ -6,7 +6,7 @@ import "errors"
 
 // ErrInvalidMessage is returned by Encode/Decode when the payload cannot be
 // processed. Publishers and consumers in the amqp package wrap this error into
-// amqp.ErrInvalidMessage so callers can use either sentinel with errors.Is.
+// warren.ErrInvalidMessage so callers can use either sentinel with errors.Is.
 var ErrInvalidMessage = errors.New("codec: invalid message")
 
 // Codec encodes and decodes message payloads.

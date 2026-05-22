@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	amqplog "github.com/brunomvsouza/warren/log"
+	warrenlog "github.com/brunomvsouza/warren/log"
 )
 
 // sensitiveURI is used across all redaction tests. It contains a
@@ -21,7 +21,7 @@ const sensitiveURI = "amqp://user:p%40ss@h:5672/v"
 // — NoOp adapter ——————————————————————————————————————————————————————————————
 
 func TestNoOp_doesNotPanic(t *testing.T) {
-	l := amqplog.NewNoOp()
+	l := warrenlog.NewNoOp()
 	require.NotNil(t, l)
 	l.Debug("d")
 	l.Info("i")
@@ -35,27 +35,27 @@ func TestNoOp_doesNotPanic(t *testing.T) {
 
 // — Slog adapter ——————————————————————————————————————————————————————————————
 
-func newSlogLogger(t *testing.T, buf *bytes.Buffer) amqplog.Logger {
+func newSlogLogger(t *testing.T, buf *bytes.Buffer) warrenlog.Logger {
 	t.Helper()
 	h := slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})
-	return amqplog.NewSlog(slog.New(h))
+	return warrenlog.NewSlog(slog.New(h))
 }
 
 func TestSlog_roundTrip(t *testing.T) {
 	tests := []struct {
 		name    string
-		call    func(l amqplog.Logger)
+		call    func(l warrenlog.Logger)
 		wantKey string // slog text key to look for
 		wantMsg string
 	}{
-		{"Debug", func(l amqplog.Logger) { l.Debug("debug msg") }, "level=DEBUG", "debug msg"},
-		{"Info", func(l amqplog.Logger) { l.Info("info msg") }, "level=INFO", "info msg"},
-		{"Warning", func(l amqplog.Logger) { l.Warning("warn msg") }, "level=WARN", "warn msg"},
-		{"Error", func(l amqplog.Logger) { l.Error("error msg") }, "level=ERROR", "error msg"},
-		{"Debugf", func(l amqplog.Logger) { l.Debugf("debug %s", "fmt") }, "level=DEBUG", "debug fmt"},
-		{"Infof", func(l amqplog.Logger) { l.Infof("info %s", "fmt") }, "level=INFO", "info fmt"},
-		{"Warningf", func(l amqplog.Logger) { l.Warningf("warn %s", "fmt") }, "level=WARN", "warn fmt"},
-		{"Errorf", func(l amqplog.Logger) { l.Errorf("error %s", "fmt") }, "level=ERROR", "error fmt"},
+		{"Debug", func(l warrenlog.Logger) { l.Debug("debug msg") }, "level=DEBUG", "debug msg"},
+		{"Info", func(l warrenlog.Logger) { l.Info("info msg") }, "level=INFO", "info msg"},
+		{"Warning", func(l warrenlog.Logger) { l.Warning("warn msg") }, "level=WARN", "warn msg"},
+		{"Error", func(l warrenlog.Logger) { l.Error("error msg") }, "level=ERROR", "error msg"},
+		{"Debugf", func(l warrenlog.Logger) { l.Debugf("debug %s", "fmt") }, "level=DEBUG", "debug fmt"},
+		{"Infof", func(l warrenlog.Logger) { l.Infof("info %s", "fmt") }, "level=INFO", "info fmt"},
+		{"Warningf", func(l warrenlog.Logger) { l.Warningf("warn %s", "fmt") }, "level=WARN", "warn fmt"},
+		{"Errorf", func(l warrenlog.Logger) { l.Errorf("error %s", "fmt") }, "level=ERROR", "error fmt"},
 	}
 
 	for _, tc := range tests {
@@ -95,25 +95,25 @@ func TestSlog_redactsAMQPCredentials_amqps(t *testing.T) {
 
 // — Std adapter ———————————————————————————————————————————————————————————————
 
-func newStdLogger(t *testing.T, buf *bytes.Buffer) amqplog.Logger {
+func newStdLogger(t *testing.T, buf *bytes.Buffer) warrenlog.Logger {
 	t.Helper()
-	return amqplog.NewStd(stdlog.New(buf, "", 0))
+	return warrenlog.NewStd(stdlog.New(buf, "", 0))
 }
 
 func TestStd_roundTrip(t *testing.T) {
 	tests := []struct {
 		name   string
-		call   func(l amqplog.Logger)
+		call   func(l warrenlog.Logger)
 		wantIn string
 	}{
-		{"Debug", func(l amqplog.Logger) { l.Debug("debug msg") }, "debug msg"},
-		{"Info", func(l amqplog.Logger) { l.Info("info msg") }, "info msg"},
-		{"Warning", func(l amqplog.Logger) { l.Warning("warn msg") }, "warn msg"},
-		{"Error", func(l amqplog.Logger) { l.Error("error msg") }, "error msg"},
-		{"Debugf", func(l amqplog.Logger) { l.Debugf("debug %s", "fmt") }, "debug fmt"},
-		{"Infof", func(l amqplog.Logger) { l.Infof("info %s", "fmt") }, "info fmt"},
-		{"Warningf", func(l amqplog.Logger) { l.Warningf("warn %s", "fmt") }, "warn fmt"},
-		{"Errorf", func(l amqplog.Logger) { l.Errorf("error %s", "fmt") }, "error fmt"},
+		{"Debug", func(l warrenlog.Logger) { l.Debug("debug msg") }, "debug msg"},
+		{"Info", func(l warrenlog.Logger) { l.Info("info msg") }, "info msg"},
+		{"Warning", func(l warrenlog.Logger) { l.Warning("warn msg") }, "warn msg"},
+		{"Error", func(l warrenlog.Logger) { l.Error("error msg") }, "error msg"},
+		{"Debugf", func(l warrenlog.Logger) { l.Debugf("debug %s", "fmt") }, "debug fmt"},
+		{"Infof", func(l warrenlog.Logger) { l.Infof("info %s", "fmt") }, "info fmt"},
+		{"Warningf", func(l warrenlog.Logger) { l.Warningf("warn %s", "fmt") }, "warn fmt"},
+		{"Errorf", func(l warrenlog.Logger) { l.Errorf("error %s", "fmt") }, "error fmt"},
 	}
 
 	for _, tc := range tests {
@@ -131,13 +131,13 @@ func TestStd_roundTrip(t *testing.T) {
 func TestStd_roundTrip_includesLevelPrefix(t *testing.T) {
 	tests := []struct {
 		name   string
-		call   func(l amqplog.Logger)
+		call   func(l warrenlog.Logger)
 		prefix string
 	}{
-		{"Debug", func(l amqplog.Logger) { l.Debug("x") }, "DEBUG"},
-		{"Info", func(l amqplog.Logger) { l.Info("x") }, "INFO"},
-		{"Warning", func(l amqplog.Logger) { l.Warning("x") }, "WARN"},
-		{"Error", func(l amqplog.Logger) { l.Error("x") }, "ERROR"},
+		{"Debug", func(l warrenlog.Logger) { l.Debug("x") }, "DEBUG"},
+		{"Info", func(l warrenlog.Logger) { l.Info("x") }, "INFO"},
+		{"Warning", func(l warrenlog.Logger) { l.Warning("x") }, "WARN"},
+		{"Error", func(l warrenlog.Logger) { l.Error("x") }, "ERROR"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

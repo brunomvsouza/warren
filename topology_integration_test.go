@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	amqp "github.com/brunomvsouza/warren"
+	"github.com/brunomvsouza/warren"
 )
 
 func TestTopology_Declare_happyPath_integration(t *testing.T) {
@@ -20,7 +20,7 @@ func TestTopology_Declare_happyPath_integration(t *testing.T) {
 	url := amqpTestURL(t)
 	ctx := context.Background()
 
-	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
+	conn, err := warren.Dial(ctx, warren.WithAddr(url))
 	require.NoError(t, err)
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -28,14 +28,14 @@ func TestTopology_Declare_happyPath_integration(t *testing.T) {
 		_ = conn.Close(closeCtx)
 	}()
 
-	topo := &amqp.Topology{
-		Exchanges: []amqp.Exchange{
-			{Name: "test.events", Kind: amqp.ExchangeTopic, Durable: false, AutoDelete: true},
+	topo := &warren.Topology{
+		Exchanges: []warren.Exchange{
+			{Name: "test.events", Kind: warren.ExchangeTopic, Durable: false, AutoDelete: true},
 		},
-		Queues: []amqp.Queue{
+		Queues: []warren.Queue{
 			{Name: "test.orders", Durable: false, AutoDelete: true},
 		},
-		Bindings: []amqp.Binding{
+		Bindings: []warren.Binding{
 			{Exchange: "test.events", Queue: "test.orders", RoutingKey: "order.#"},
 		},
 	}
@@ -50,7 +50,7 @@ func TestTopology_Declare_idempotent_integration(t *testing.T) {
 	url := amqpTestURL(t)
 	ctx := context.Background()
 
-	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
+	conn, err := warren.Dial(ctx, warren.WithAddr(url))
 	require.NoError(t, err)
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -58,8 +58,8 @@ func TestTopology_Declare_idempotent_integration(t *testing.T) {
 		_ = conn.Close(closeCtx)
 	}()
 
-	topo := &amqp.Topology{
-		Queues: []amqp.Queue{
+	topo := &warren.Topology{
+		Queues: []warren.Queue{
 			{Name: "test.idempotent", Durable: false, AutoDelete: true},
 		},
 	}
@@ -74,7 +74,7 @@ func TestTopology_Declare_mismatch_integration(t *testing.T) {
 	url := amqpTestURL(t)
 	ctx := context.Background()
 
-	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
+	conn, err := warren.Dial(ctx, warren.WithAddr(url))
 	require.NoError(t, err)
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -83,14 +83,14 @@ func TestTopology_Declare_mismatch_integration(t *testing.T) {
 	}()
 
 	// Declare a durable queue first.
-	topo1 := &amqp.Topology{
-		Queues: []amqp.Queue{
+	topo1 := &warren.Topology{
+		Queues: []warren.Queue{
 			{Name: "test.mismatch", Durable: true},
 		},
 	}
 	require.NoError(t, topo1.Declare(ctx, conn))
 
-	conn2, err := amqp.Dial(ctx, amqp.WithAddr(url))
+	conn2, err := warren.Dial(ctx, warren.WithAddr(url))
 	require.NoError(t, err)
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -99,15 +99,15 @@ func TestTopology_Declare_mismatch_integration(t *testing.T) {
 	}()
 
 	// Try to redeclare with a conflicting non-durable flag.
-	topo2 := &amqp.Topology{
-		Queues: []amqp.Queue{
+	topo2 := &warren.Topology{
+		Queues: []warren.Queue{
 			{Name: "test.mismatch", Durable: false},
 		},
 	}
 	err = topo2.Declare(ctx, conn2)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, amqp.ErrTopologyMismatch, "must be ErrTopologyMismatch")
-	assert.ErrorIs(t, err, amqp.ErrPreconditionFailed, "must also unwrap ErrPreconditionFailed")
+	assert.ErrorIs(t, err, warren.ErrTopologyMismatch, "must be ErrTopologyMismatch")
+	assert.ErrorIs(t, err, warren.ErrPreconditionFailed, "must also unwrap ErrPreconditionFailed")
 }
 
 func TestTopology_Declare_dlxExpansion_integration(t *testing.T) {
@@ -116,7 +116,7 @@ func TestTopology_Declare_dlxExpansion_integration(t *testing.T) {
 	url := amqpTestURL(t)
 	ctx := context.Background()
 
-	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
+	conn, err := warren.Dial(ctx, warren.WithAddr(url))
 	require.NoError(t, err)
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -124,11 +124,11 @@ func TestTopology_Declare_dlxExpansion_integration(t *testing.T) {
 		_ = conn.Close(closeCtx)
 	}()
 
-	topo := &amqp.Topology{
-		Queues: []amqp.Queue{
+	topo := &warren.Topology{
+		Queues: []warren.Queue{
 			{Name: "test.dlx.source", Durable: false, AutoDelete: true},
 		},
-		DeadLetters: []amqp.DeadLetter{
+		DeadLetters: []warren.DeadLetter{
 			{Source: "test.dlx.source", Exchange: "test.dlx.exchange"},
 		},
 	}
@@ -145,7 +145,7 @@ func TestTopology_Declare_quorumWithDeliveryLimit_integration(t *testing.T) {
 	url := amqpTestURL(t)
 	ctx := context.Background()
 
-	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
+	conn, err := warren.Dial(ctx, warren.WithAddr(url))
 	require.NoError(t, err)
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -153,12 +153,12 @@ func TestTopology_Declare_quorumWithDeliveryLimit_integration(t *testing.T) {
 		_ = conn.Close(closeCtx)
 	}()
 
-	topo := &amqp.Topology{
-		Queues: []amqp.Queue{
+	topo := &warren.Topology{
+		Queues: []warren.Queue{
 			{
 				Name:          "test.quorum.dl",
 				Durable:       true,
-				Type:          amqp.QueueTypeQuorum,
+				Type:          warren.QueueTypeQuorum,
 				DeliveryLimit: 5,
 			},
 		},
