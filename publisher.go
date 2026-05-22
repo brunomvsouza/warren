@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -250,8 +251,7 @@ func (p *Publisher[M]) callOnReturn(r amqp091.Return) {
 	}
 	var exp time.Duration
 	if ms := r.Expiration; ms != "" {
-		var ms64 int64
-		if _, err := fmt.Sscanf(ms, "%d", &ms64); err == nil {
+		if ms64, err := strconv.ParseInt(ms, 10, 64); err == nil {
 			exp = time.Duration(ms64) * time.Millisecond
 		}
 	}
@@ -337,7 +337,7 @@ func (p *Publisher[M]) Publish(ctx context.Context, msg Message[M]) error {
 	// the connection identity, reject locally without writing a publish frame.
 	// This prevents the 406-channel-close footgun from a mismatched stamp.
 	if msg.UserID != "" && p.authUser != "" && msg.UserID != p.authUser {
-		return fmt.Errorf("%w: UserID %q does not match authenticated user %q", ErrInvalidMessage, msg.UserID, p.authUser)
+		return fmt.Errorf("%w: UserID %q does not match the authenticated connection identity", ErrInvalidMessage, msg.UserID)
 	}
 
 	body, err := p.codec.Encode(msg.Body)
@@ -360,10 +360,12 @@ func (p *Publisher[M]) Publish(ctx context.Context, msg Message[M]) error {
 		attempt++
 		p.pm.RecordRetry(p.exchange, retryReason(err))
 		d := p.retryPolicy.NextBackoff(attempt)
+		timer := time.NewTimer(d)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return err
-		case <-time.After(d):
+		case <-timer.C:
 		}
 	}
 }

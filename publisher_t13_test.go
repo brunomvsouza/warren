@@ -32,12 +32,11 @@ func wireReturnPool(ch pubChannel, onReturn func(amqp091.Return)) (*publisherCon
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		var rCh <-chan amqp091.Return = returnCh
 		for {
 			select {
-			case ret, ok := <-rCh:
+			case ret, ok := <-returnCh:
 				if !ok {
-					rCh = nil
+					returnCh = nil
 					continue
 				}
 				tag := at.Load()
@@ -259,6 +258,52 @@ func TestPublisher_Publish_publishRetry_doesNotRetryPermanent(t *testing.T) {
 	assert.Equal(t, int32(1), fake.publishCount.Load(), "permanent error must not be retried")
 }
 
+func TestPublisher_Publish_publishRetry_limitsAttempts(t *testing.T) {
+	// Retries=1 means 1 extra attempt after the first failure — 2 total calls.
+	defer goleak.VerifyNone(t)
+
+	fake := newFakePubChAlwaysNack()
+	pub, stopPool := newTestPubReturn[testPayload](fake, metrics.NoOpPublisherMetrics{}, nil)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	pub.retryPolicy = &RetryPolicy{Min: time.Millisecond, Max: 5 * time.Millisecond, WithoutJitter: true, Retries: 1}
+
+	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
+	require.Error(t, err)
+	assert.Equal(t, int32(2), fake.publishCount.Load(), "Retries=1 must produce exactly 2 PublishWithContext calls")
+}
+
+func TestPublisher_Publish_publishRetry_ctxCancelledDuringBackoff(t *testing.T) {
+	// ctx cancelled while waiting for the backoff timer must return promptly.
+	defer goleak.VerifyNone(t)
+
+	fake := newFakePubChAlwaysNack()
+	pub, stopPool := newTestPubReturn[testPayload](fake, metrics.NoOpPublisherMetrics{}, nil)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	pub.retryPolicy = &RetryPolicy{Min: 500 * time.Millisecond, Max: time.Second, WithoutJitter: true}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- pub.Publish(ctx, Message[testPayload]{Body: &testPayload{}})
+	}()
+
+	// Let the first attempt fail, then cancel before the backoff expires.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	start := time.Now()
+	err := <-done
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.True(t, elapsed < 200*time.Millisecond, "ctx cancel must abort backoff promptly, elapsed=%v", elapsed)
+}
+
 func TestPublisher_Publish_publishRetry_incrementsMetric(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -418,7 +463,168 @@ func TestPublisher_Publish_onReturn_firesBeforePublishUnblocks(t *testing.T) {
 	assert.Equal(t, uint16(312), capturedReturn.ReplyCode)
 }
 
+// — StampUserID edge cases ——————————————————————————————————————————————————
+
+func TestPublisher_Publish_stampUserID_doesNotOverwriteExistingUserID(t *testing.T) {
+	fake := newFakePubCh(true)
+	pub, _, stopPool := newTestPub[testPayload](fake, metrics.NoOpPublisherMetrics{})
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	pub.stampUserID = true
+	pub.authUser = "alice"
+
+	require.NoError(t, pub.Publish(context.Background(), Message[testPayload]{
+		Body:   &testPayload{},
+		UserID: "alice", // already set — must not be overwritten or rejected
+	}))
+
+	p, ok := fake.lastPublish()
+	require.True(t, ok)
+	assert.Equal(t, "alice", p.UserId)
+}
+
+func TestPublisher_Publish_userIDValidation_skippedWhenAuthUserEmpty(t *testing.T) {
+	// When authUser is empty (e.g. anonymous connection), validation is skipped.
+	fake := newFakePubCh(true)
+	pub, _, stopPool := newTestPub[testPayload](fake, metrics.NoOpPublisherMetrics{})
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	pub.authUser = "" // connection cannot determine identity
+
+	err := pub.Publish(context.Background(), Message[testPayload]{
+		Body:   &testPayload{},
+		UserID: "bob",
+	})
+	require.NoError(t, err, "UserID validation must be skipped when authUser is empty")
+}
+
+// — callOnReturn Expiration parsing ————————————————————————————————————————
+
+func TestPublisher_callOnReturn_parsesExpiration(t *testing.T) {
+	var captured Return
+	pub := &Publisher[testPayload]{
+		onReturn: func(r Return) { captured = r },
+	}
+
+	pub.callOnReturn(amqp091.Return{
+		ReplyCode:  312,
+		ReplyText:  "NO_ROUTE",
+		Expiration: "5000",
+	})
+
+	assert.Equal(t, 5*time.Second, captured.Properties.Expiration)
+}
+
+func TestPublisher_callOnReturn_ignoresInvalidExpiration(t *testing.T) {
+	var captured Return
+	pub := &Publisher[testPayload]{
+		onReturn: func(r Return) { captured = r },
+	}
+
+	pub.callOnReturn(amqp091.Return{
+		ReplyCode:  312,
+		Expiration: "not-a-number",
+	})
+
+	assert.Equal(t, time.Duration(0), captured.Properties.Expiration)
+}
+
+// — buildPublishing Expiration field ———————————————————————————————————————
+
+func TestBuildPublishing_setsExpirationField(t *testing.T) {
+	msg := Message[testPayload]{Expiration: 2500 * time.Millisecond}
+	pub := buildPublishing(msg, []byte("body"))
+	assert.Equal(t, "2500", pub.Expiration)
+}
+
+func TestBuildPublishing_zeroExpirationOmitted(t *testing.T) {
+	msg := Message[testPayload]{Expiration: 0}
+	pub := buildPublishing(msg, []byte("body"))
+	assert.Equal(t, "", pub.Expiration)
+}
+
+// — retryReason label coverage —————————————————————————————————————————————
+
+func TestRetryReason_allLabels(t *testing.T) {
+	tests := []struct {
+		err    error
+		reason string
+	}{
+		{ErrPublishNacked, "nacked"},
+		{ErrConfirmTimeout, "confirm_timeout"},
+		{ErrChannelClosed, "channel_closed"},
+		{ErrChannelPoolExhausted, "pool_exhausted"},
+		{ErrConnectionBlocked, "blocked"},
+		{ErrReconnecting, "reconnecting"},
+		{errors.New("some network error"), "network"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.reason, func(t *testing.T) {
+			assert.Equal(t, tc.reason, retryReason(tc.err))
+		})
+	}
+}
+
 // — helper fake channels ————————————————————————————————————————————————————
+
+// fakePubChAlwaysNack nacks every publish unconditionally.
+type fakePubChAlwaysNack struct {
+	mu           sync.Mutex
+	seq          uint64
+	confirmCh    chan amqp091.Confirmation
+	closedCh     chan *amqp091.Error
+	publishCount atomic.Int32
+}
+
+func newFakePubChAlwaysNack() *fakePubChAlwaysNack {
+	return &fakePubChAlwaysNack{seq: 1, closedCh: make(chan *amqp091.Error, 1)}
+}
+
+func (f *fakePubChAlwaysNack) GetNextPublishSeqNo() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := f.seq
+	f.seq++
+	return s
+}
+func (f *fakePubChAlwaysNack) Confirm(bool) error { return nil }
+func (f *fakePubChAlwaysNack) NotifyPublish(ch chan amqp091.Confirmation) chan amqp091.Confirmation {
+	f.mu.Lock()
+	f.confirmCh = ch
+	f.mu.Unlock()
+	return ch
+}
+func (f *fakePubChAlwaysNack) NotifyReturn(ch chan amqp091.Return) chan amqp091.Return { return ch }
+func (f *fakePubChAlwaysNack) NotifyClose(ch chan *amqp091.Error) chan *amqp091.Error {
+	return f.closedCh
+}
+func (f *fakePubChAlwaysNack) Close() error {
+	f.mu.Lock()
+	ch := f.confirmCh
+	f.confirmCh = nil
+	f.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+	return nil
+}
+func (f *fakePubChAlwaysNack) PublishWithContext(_ context.Context, _, _ string, _, _ bool, _ amqp091.Publishing) error {
+	f.publishCount.Add(1)
+	f.mu.Lock()
+	tag := f.seq - 1
+	ch := f.confirmCh
+	f.mu.Unlock()
+	go func() {
+		if ch != nil {
+			ch <- amqp091.Confirmation{DeliveryTag: tag, Ack: false}
+		}
+	}()
+	return nil
+}
 
 // fakePubChNackOnce nacks the first publish and auto-acks subsequent ones.
 type fakePubChNackOnce struct {

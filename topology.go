@@ -117,6 +117,12 @@ func (t *Topology) validate() error {
 		if q.DeliveryLimit > 0 && q.Type != QueueTypeQuorum {
 			return fmt.Errorf("%w: Queue %q: DeliveryLimit requires Type=QueueTypeQuorum", ErrInvalidOptions, q.Name)
 		}
+		if q.MaxPriority > 0 && q.Type != "" && q.Type != QueueTypeClassic {
+			return fmt.Errorf("%w: Queue %q: MaxPriority requires Type=QueueTypeClassic", ErrInvalidOptions, q.Name)
+		}
+		if q.MaxPriority > 255 {
+			return fmt.Errorf("%w: Queue %q: MaxPriority must be in [1, 255]", ErrInvalidOptions, q.Name)
+		}
 		if q.Type == QueueTypeStream {
 			if q.SingleActiveConsumer {
 				return fmt.Errorf("%w: Queue %q: SingleActiveConsumer is not supported on stream queues", ErrInvalidOptions, q.Name)
@@ -147,6 +153,12 @@ func (t *Topology) validate() error {
 			if k, ok := exchKind[b.Exchange]; ok && k == ExchangeFanout {
 				return fmt.Errorf("%w: Binding to fanout exchange %q must have an empty RoutingKey", ErrInvalidOptions, b.Exchange)
 			}
+		}
+	}
+
+	for _, dl := range t.DeadLetters {
+		if dl.Source == "" {
+			return fmt.Errorf("%w: DeadLetter.Source must not be empty", ErrInvalidOptions)
 		}
 	}
 

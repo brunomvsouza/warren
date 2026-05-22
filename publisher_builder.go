@@ -136,6 +136,11 @@ func (b *PublisherBuilder[M]) PublishRetry(p RetryPolicy) *PublisherBuilder[M] {
 // StampUserID auto-sets Message[M].UserID to conn.AuthenticatedUser() on every
 // Publish call. Use this to avoid manually populating UserID when the broker
 // validates the stamp. Last-wins against a previous StampUserID() call.
+//
+// Note: for SASL EXTERNAL with a dynamic GetClientCertificate callback, the
+// authenticated user is resolved once at Dial() time and may not reflect
+// a certificate rotated after that. In that configuration, set stampUserID=false
+// and populate Message.UserID manually from the current certificate's CN.
 func (b *PublisherBuilder[M]) StampUserID() *PublisherBuilder[M] {
 	b.stampUserID = true
 	return b
