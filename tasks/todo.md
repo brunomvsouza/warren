@@ -39,7 +39,7 @@ unchanged.
 ### [x] T01 — Repo bootstrap · S
 Set up the empty Go module with the bare-minimum dev ergonomics.
 - **Acceptance:**
-  - [ ] `go.mod` declares `module github.com/brunomvsouza/amqp` and Go 1.23.
+  - [ ] `go.mod` declares `module github.com/brunomvsouza/warren` and Go 1.23.
   - [ ] `LICENSE` is MIT with the user's copyright.
   - [ ] `Makefile` exposes `build`, `test`, `test-integration`, `test-conformance`, `lint`, `mocks`, `doc`, `hooks`.
   - [ ] `make hooks` writes `.git/hooks/pre-commit` running `make lint test` (opt-in only; never auto-installed).

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/brunomvsouza/amqp/internal/redact"
+	"github.com/brunomvsouza/warren/internal/redact"
 )
 
 // slogLogger wraps a *slog.Logger, routing every message through

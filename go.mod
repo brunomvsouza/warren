@@ -1,4 +1,4 @@
-module github.com/brunomvsouza/amqp
+module github.com/brunomvsouza/warren
 
 go 1.23
 

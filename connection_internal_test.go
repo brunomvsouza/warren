@@ -1,7 +1,7 @@
-package amqp
+package warren
 
 // White-box tests for unexported Connection and managedConn methods.
-// Package amqp (not amqp_test) to access unexported fields and functions.
+// Package warren (not amqp_test) to access unexported fields and functions.
 
 import (
 	"context"

@@ -18,7 +18,7 @@ import (
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
-	amqp "github.com/brunomvsouza/amqp"
+	amqp "github.com/brunomvsouza/warren"
 )
 
 // codeTable maps AMQP 0-9-1 reply codes to their sentinel errors in the root package.

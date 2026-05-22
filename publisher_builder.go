@@ -1,13 +1,13 @@
-package amqp
+package warren
 
 import (
 	"context"
 	"fmt"
 	"time"
 
-	"github.com/brunomvsouza/amqp/codec"
-	"github.com/brunomvsouza/amqp/metrics"
-	"github.com/brunomvsouza/amqp/otel"
+	"github.com/brunomvsouza/warren/codec"
+	"github.com/brunomvsouza/warren/metrics"
+	"github.com/brunomvsouza/warren/otel"
 )
 
 // PublisherBuilder configures and builds a Publisher[M].

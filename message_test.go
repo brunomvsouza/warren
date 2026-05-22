@@ -1,4 +1,4 @@
-package amqp
+package warren
 
 import (
 	"strings"
@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/brunomvsouza/amqp/codec"
+	"github.com/brunomvsouza/warren/codec"
 )
 
 // applyDefaults fills MessageID, Timestamp, and ContentType if not set.

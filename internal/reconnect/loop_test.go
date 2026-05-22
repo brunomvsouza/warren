@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	"github.com/brunomvsouza/amqp/internal/reconnect"
+	"github.com/brunomvsouza/warren/internal/reconnect"
 )
 
 func TestMain(m *testing.M) {

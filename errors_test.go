@@ -1,4 +1,4 @@
-package amqp_test
+package warren_test
 
 import (
 	"errors"
@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	amqp "github.com/brunomvsouza/amqp"
+	amqp "github.com/brunomvsouza/warren"
 )
 
 func TestAMQPCode(t *testing.T) {

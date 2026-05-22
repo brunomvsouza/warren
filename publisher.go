@@ -1,4 +1,4 @@
-package amqp
+package warren
 
 import (
 	"context"
@@ -11,10 +11,10 @@ import (
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
-	"github.com/brunomvsouza/amqp/codec"
-	"github.com/brunomvsouza/amqp/internal/confirms"
-	"github.com/brunomvsouza/amqp/metrics"
-	"github.com/brunomvsouza/amqp/otel"
+	"github.com/brunomvsouza/warren/codec"
+	"github.com/brunomvsouza/warren/internal/confirms"
+	"github.com/brunomvsouza/warren/metrics"
+	"github.com/brunomvsouza/warren/otel"
 )
 
 // pubChannel is the AMQP channel interface required by Publisher.

@@ -35,4 +35,4 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/brunomvsouza/amqp
+        - github.com/brunomvsouza/warren

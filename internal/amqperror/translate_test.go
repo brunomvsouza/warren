@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	amqp "github.com/brunomvsouza/amqp"
-	"github.com/brunomvsouza/amqp/internal/amqperror"
+	amqp "github.com/brunomvsouza/warren"
+	"github.com/brunomvsouza/warren/internal/amqperror"
 )
 
 // rawAMQPErr builds a *amqp091.Error as the broker would deliver it.

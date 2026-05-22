@@ -10,7 +10,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
 	"go.opentelemetry.io/otel/trace"
 
-	amqpotel "github.com/brunomvsouza/amqp/otel"
+	amqpotel "github.com/brunomvsouza/warren/otel"
 )
 
 // — Compile-time interface check ———————————————————————————————————————————

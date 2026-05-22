@@ -109,8 +109,8 @@ Go developers building message-driven systems against RabbitMQ.
 | Component       | Choice                                             |
 | --------------- | -------------------------------------------------- |
 | Language        | Go **1.23+**                                       |
-| Module path     | `github.com/brunomvsouza/amqp`                     |
-| Repo            | `github.com/brunomvsouza/amqp.go` (working dir)    |
+| Module path     | `github.com/brunomvsouza/warren`                     |
+| Repo            | `github.com/brunomvsouza/amqp.go` (working dir)     |
 | AMQP transport  | `github.com/rabbitmq/amqp091-go` (BSD-2-Clause)    |
 | Broker          | RabbitMQ 3.13 LTS and 4.x                          |
 | Mocks           | `go.uber.org/mock` (gomock) — in `amqpmock/`       |
@@ -301,9 +301,9 @@ import (
     "syscall"
     "time"
 
-    "github.com/brunomvsouza/amqp"
-    "github.com/brunomvsouza/amqp/codec"
-    amqplog "github.com/brunomvsouza/amqp/log"
+    "github.com/brunomvsouza/warren"
+    "github.com/brunomvsouza/warren/codec"
+    amqplog "github.com/brunomvsouza/warren/log"
 )
 
 type OrderPlaced struct {

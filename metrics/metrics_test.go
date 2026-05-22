@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/brunomvsouza/amqp/metrics"
+	"github.com/brunomvsouza/warren/metrics"
 )
 
 // compile-time interface checks

@@ -38,7 +38,7 @@ go test -race -run '^TestRetryPolicy_NextBackoff$' ./...
 go test -race -tags=integration -run '^TestDial_' .
 ```
 
-Module path is `github.com/brunomvsouza/amqp` (note: **no `.go` suffix** despite the directory name). Go 1.23. `goimports` local-prefix is set to the module path — keep imports grouped accordingly.
+Module path is `github.com/brunomvsouza/warren` (note: **no `.go` suffix** despite the directory name). Go 1.23. `goimports` local-prefix is set to the module path — keep imports grouped accordingly.
 
 ## Linter contract
 

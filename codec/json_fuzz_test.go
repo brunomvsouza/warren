@@ -3,7 +3,7 @@ package codec_test
 import (
 	"testing"
 
-	"github.com/brunomvsouza/amqp/codec"
+	"github.com/brunomvsouza/warren/codec"
 )
 
 func FuzzCodecJSON(f *testing.F) {

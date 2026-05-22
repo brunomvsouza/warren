@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	amqplog "github.com/brunomvsouza/amqp/log"
+	amqplog "github.com/brunomvsouza/warren/log"
 )
 
 // sensitiveURI is used across all redaction tests. It contains a

@@ -1,6 +1,6 @@
 //go:build integration
 
-package amqp_test
+package warren_test
 
 // Multi-connection integration tests for T07d.
 //
