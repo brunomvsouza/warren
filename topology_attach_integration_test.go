@@ -1,0 +1,140 @@
+//go:build integration
+
+package warren_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
+
+	amqp "github.com/brunomvsouza/warren"
+)
+
+func TestTopology_AttachTo_redeclaresAfterReconnect_integration(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	url := amqpTestURL(t)
+	ctx := context.Background()
+
+	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	})
+
+	topo := &amqp.Topology{
+		Queues: []amqp.Queue{
+			{Name: "test.attach.q1", Durable: false, AutoDelete: true},
+		},
+	}
+	require.NoError(t, topo.Declare(ctx, conn))
+	topo.AttachTo(conn)
+
+	// Force a reconnect to exercise the barrier.
+	require.NoError(t, conn.ForceReconnect())
+
+	// Brief wait for reconnect to complete.
+	time.Sleep(500 * time.Millisecond)
+
+	// Health confirms the connection is back.
+	healthCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	require.NoError(t, conn.Health(healthCtx))
+}
+
+func TestTopology_AttachTo_onReconnectFiresAfterTopologyRedeclared_integration(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	url := amqpTestURL(t)
+	ctx := context.Background()
+
+	reconnected := make(chan struct{}, 1)
+	conn, err := amqp.Dial(ctx,
+		amqp.WithAddr(url),
+		amqp.WithOnReconnect(func() {
+			select {
+			case reconnected <- struct{}{}:
+			default:
+			}
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	})
+
+	topo := &amqp.Topology{
+		Queues: []amqp.Queue{
+			{Name: "test.attach.order.q", Durable: false, AutoDelete: true},
+		},
+	}
+	require.NoError(t, topo.Declare(ctx, conn))
+	topo.AttachTo(conn)
+
+	require.NoError(t, conn.ForceReconnect())
+
+	select {
+	case <-reconnected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for WithOnReconnect callback")
+	}
+}
+
+func TestTopology_AttachTo_degradedOnMismatch_integration(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	url := amqpTestURL(t)
+	ctx := context.Background()
+
+	degradedCh := make(chan error, 1)
+	conn, err := amqp.Dial(ctx,
+		amqp.WithAddr(url),
+		amqp.WithOnTopologyDegraded(func(err error) {
+			select {
+			case degradedCh <- err:
+			default:
+			}
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	})
+
+	// Declare a durable queue.
+	topo1 := &amqp.Topology{
+		Queues: []amqp.Queue{
+			{Name: "test.attach.durable", Durable: true},
+		},
+	}
+	require.NoError(t, topo1.Declare(ctx, conn))
+
+	// Register a topology that conflicts: non-durable declaration of the same queue.
+	conflicting := &amqp.Topology{
+		Queues: []amqp.Queue{
+			{Name: "test.attach.durable", Durable: false},
+		},
+	}
+	conflicting.AttachTo(conn)
+
+	// Force reconnect — the hook will fail with PRECONDITION_FAILED.
+	require.NoError(t, conn.ForceReconnect())
+
+	// Wait for degraded callback.
+	select {
+	case degradedErr := <-degradedCh:
+		assert.ErrorIs(t, degradedErr, amqp.ErrTopologyRedeclareFailed)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for WithOnTopologyDegraded callback")
+	}
+}

@@ -433,7 +433,7 @@ stays untouched.
 - **Files:** edits to `topology.go`, `topology_test.go`, `topology_integration_test.go`.
 - **Deps:** T07b, T14.
 
-### [ ] T16 — `Topology.AttachTo` reconnect redeclare + barrier + degraded state · M
+### [x] T16 — `Topology.AttachTo` reconnect redeclare + barrier + degraded state · M
 Rev 6 grows the contract: deep snapshot, synchronous barrier
 integration with T07, persistent-failure degraded state.
 - **Acceptance:**

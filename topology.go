@@ -86,6 +86,75 @@ type DeadLetter struct {
 	Overflow OverflowPolicy
 }
 
+// AttachTo registers a deep snapshot of t as a reconnect redeclare callback on
+// conn. On every reconnect cycle, the snapshot is passed to Topology.Declare
+// inside the synchronous reconnect barrier — before publishers resume and before
+// consumers re-issue basic.consume.
+//
+// Snapshots are keyed by the pointer address of t. Calling AttachTo(conn) with
+// the same *Topology pointer a second time replaces the prior snapshot (useful
+// when the caller edits the topology and wants the new shape on the next
+// reconnect). Calling AttachTo(conn) with a different pointer appends a new
+// snapshot; all registered snapshots fire in registration order.
+//
+// Topology.Declare and AttachTo are NOT concurrency-safe with each other.
+// Recommended pattern: call Declare once at startup (sync.Once), then call
+// AttachTo on the same topology to wire up reconnect.
+func (t *Topology) AttachTo(conn *Connection) {
+	snapshot := t.expand()
+
+	conn.topoMu.Lock()
+	if conn.topoSnaps == nil {
+		conn.topoSnaps = make(map[*Topology]*Topology)
+	}
+	if _, exists := conn.topoSnaps[t]; !exists {
+		conn.topoKeys = append(conn.topoKeys, t)
+	}
+	conn.topoSnaps[t] = snapshot
+	alreadyHooked := conn.topoHooked
+	conn.topoHooked = true
+	conn.topoMu.Unlock()
+
+	if alreadyHooked {
+		return
+	}
+
+	// Register one hook per managed connection, capturing mc so the hook can
+	// open a channel on the specific reconnected socket.
+	for _, mc := range append(conn.pubConns, conn.conConns...) {
+		mc := mc
+		mc.registerHook(func(ctx context.Context) error {
+			return conn.runTopologyRedeclare(ctx, mc)
+		})
+	}
+}
+
+// runTopologyRedeclare iterates the registered topology snapshots in registration
+// order and declares each on ch. Called from the synchronous reconnect barrier.
+func (c *Connection) runTopologyRedeclare(ctx context.Context, mc *managedConn) error {
+	c.topoMu.RLock()
+	keys := make([]*Topology, len(c.topoKeys))
+	copy(keys, c.topoKeys)
+	c.topoMu.RUnlock()
+
+	for _, key := range keys {
+		c.topoMu.RLock()
+		snap := c.topoSnaps[key]
+		c.topoMu.RUnlock()
+
+		ch, err := mc.openChannel()
+		if err != nil {
+			return err
+		}
+		declErr := declareOnChannel(snap, ch)
+		_ = ch.Close()
+		if declErr != nil {
+			return declErr
+		}
+	}
+	return nil
+}
+
 // topologyChannel is the AMQP channel interface used by Topology.Declare.
 // *amqp091.Channel satisfies this interface; tests may inject fakes.
 type topologyChannel interface {
