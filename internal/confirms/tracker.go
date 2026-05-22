@@ -134,13 +134,20 @@ func (t *Tracker) CloseAll() {
 	}
 }
 
-// Cancel removes deliveryTag from the pending map without resolving it. Use when
-// the corresponding publish was never sent (e.g. PublishWithContext returned an error
-// after Register was called). After Cancel, Wait for the same tag returns ErrClosed.
+// Cancel resolves deliveryTag with ErrClosed and removes it from the pending map.
+// Use when the corresponding publish was never sent (e.g. PublishWithContext returned
+// an error after Register was called). Any Wait for this tag — whether called before
+// or after Cancel — returns ErrClosed immediately.
 func (t *Tracker) Cancel(deliveryTag uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.pending, deliveryTag)
+	if w, ok := t.pending[deliveryTag]; ok {
+		select {
+		case w.done <- ErrClosed:
+		default: // already resolved (buffer full); leave for Wait to clean up
+		}
+		delete(t.pending, deliveryTag)
+	}
 }
 
 // Wait blocks until deliveryTag is confirmed, ctx is cancelled, or timeout elapses.
