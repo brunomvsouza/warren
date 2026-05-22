@@ -272,12 +272,12 @@ A `Makefile` will expose these as `make build`, `make test`,
 - **Handler signature is payload-first**: `func(ctx, M) error`.
   Returning `nil` Acks; any other error Nacks **without requeue**
   (poison messages go to DLX, never loop). To request requeue, wrap
-  the error: `fmt.Errorf("transient: %w", amqp.ErrRequeue)`.
+  the error: `fmt.Errorf("transient: %w", warren.ErrRequeue)`.
   Escape hatch: `Consumer[M].ConsumeRaw(ctx, func(ctx, Delivery[M]) error)`.
 - **`Topology` is the only place that declares.** Publisher/Consumer
   receive names; they do not declare exchanges/queues/bindings.
 - **Sentinel errors** in `errors.go`. Wrap with
-  `fmt.Errorf("amqp: …: %w", err)` at boundaries. Callers use
+  `fmt.Errorf("warren: …: %w", err)` at boundaries. Callers use
   `errors.Is`/`errors.As`.
 - **`context.Context` is mandatory** on every blocking operation
   (`Dial`, `Publish`, `PublishBatch`, `Consume`, `Health`, `Close`).
@@ -316,12 +316,12 @@ func main() {
         syscall.SIGINT, syscall.SIGTERM)
     defer stop()
 
-    conn, err := amqp.Dial(ctx,
-        amqp.WithAddrs([]string{
+    conn, err := warren.Dial(ctx,
+        warren.WithAddrs([]string{
             "amqps://user:pass@rabbit-1:5671",
             "amqps://user:pass@rabbit-2:5671",
         }),
-        amqp.WithLogger(amqplog.NewSlog(slog.Default())),
+        warren.WithLogger(amqplog.NewSlog(slog.Default())),
     )
     if err != nil {
         panic(err)
@@ -329,14 +329,14 @@ func main() {
     defer conn.Close(ctx)
 
     // Topology — declared once, separately.
-    topo := amqp.Topology{
-        Exchanges: []amqp.Exchange{
-            {Name: "orders", Kind: amqp.ExchangeTopic, Durable: true},
+    topo := warren.Topology{
+        Exchanges: []warren.Exchange{
+            {Name: "orders", Kind: warren.ExchangeTopic, Durable: true},
         },
-        Queues: []amqp.Queue{
+        Queues: []warren.Queue{
             {Name: "orders.placed", Durable: true},
         },
-        Bindings: []amqp.Binding{
+        Bindings: []warren.Binding{
             {Exchange: "orders", Queue: "orders.placed", RoutingKey: "orders.placed"},
         },
     }
@@ -346,7 +346,7 @@ func main() {
     topo.AttachTo(conn) // re-declare automatically on reconnect
 
     // Publisher — references topology by name; does not declare anything.
-    pub, err := amqp.PublisherFor[OrderPlaced](conn).
+    pub, err := warren.PublisherFor[OrderPlaced](conn).
         Codec(codec.NewJSON()).
         Exchange("orders").
         RoutingKey("orders.placed").
@@ -358,7 +358,7 @@ func main() {
     }
     defer pub.Close(ctx)
 
-    err = pub.Publish(ctx, amqp.Message[OrderPlaced]{
+    err = pub.Publish(ctx, warren.Message[OrderPlaced]{
         Body:          &OrderPlaced{OrderID: "o-42", Total: 99.90},
         CorrelationID: "trace-abc",
     })
@@ -371,7 +371,7 @@ func main() {
 ### Example: consume
 
 ```go
-con, err := amqp.ConsumerFor[OrderPlaced](conn).
+con, err := warren.ConsumerFor[OrderPlaced](conn).
     Codec(codec.NewJSON()).
     Queue("orders.placed").
     Concurrency(8).
@@ -381,10 +381,10 @@ if err != nil { panic(err) }
 
 err = con.Consume(ctx, func(ctx context.Context, o OrderPlaced) error {
     if !o.Valid() {
-        return amqp.ErrPoison           // Nack(requeue=false) → DLX
+        return warren.ErrPoison           // Nack(requeue=false) → DLX
     }
     if err := process(ctx, o); err != nil {
-        return fmt.Errorf("retry: %w", amqp.ErrRequeue)  // Nack(requeue=true)
+        return fmt.Errorf("retry: %w", warren.ErrRequeue)  // Nack(requeue=true)
     }
     return nil                          // Ack
 })
@@ -393,7 +393,7 @@ err = con.Consume(ctx, func(ctx context.Context, o OrderPlaced) error {
 ### Example: consume raw (escape hatch)
 
 ```go
-err = con.ConsumeRaw(ctx, func(ctx context.Context, d amqp.Delivery[OrderPlaced]) error {
+err = con.ConsumeRaw(ctx, func(ctx context.Context, d warren.Delivery[OrderPlaced]) error {
     if d.Redelivered() && d.DeathCount() > 3 {
         return d.Nack(false) // give up
     }
@@ -531,7 +531,7 @@ split by role:
   connections. Default `2` (minimum viable for graceful failover:
   one socket draining while the other is reconnecting). For sustained
   throughput > ~50k msg/s, raise to 4–8; `amqp091-go` serializes I/O
-  per `amqp.Connection`, so one TCP socket bounds the achievable
+  per `warren.Connection`, so one TCP socket bounds the achievable
   confirm rate. Setting `n=1` is supported but explicitly logs a
   warning at `Dial` ("single publisher connection: broker restart
   produces a full-availability gap during reconnect").
@@ -925,8 +925,8 @@ Semantics:
   Consumers MUST be idempotent. See §6.2.1 for the canonical
   pattern.
 - Publish errors are classifiable:
-  `errors.Is(err, amqp.ErrTransient)` indicates the caller may retry;
-  `errors.Is(err, amqp.ErrPermanent)` indicates the caller should not.
+  `errors.Is(err, warren.ErrTransient)` indicates the caller may retry;
+  `errors.Is(err, warren.ErrPermanent)` indicates the caller should not.
 
 ### 6.2.1 At-least-once semantics and consumer-side deduplication
 
@@ -1131,9 +1131,9 @@ events).
 Set this once on the queue in `Topology`:
 
 ```go
-amqp.Queue{
+warren.Queue{
     Name:          "orders.placed",
-    Type:          amqp.QueueTypeQuorum,
+    Type:          warren.QueueTypeQuorum,
     DeliveryLimit: 5,           // broker-enforced; survives consumer restarts
     Durable:       true,
 }
@@ -1278,7 +1278,7 @@ The contract mirrors `Consumer[M]` at the batch granularity:
   highest delivery-tag in the batch — one frame instead of N.
 - non-nil error → `batch.Nack(false)` is called automatically, sent
   as a single `basic.nack` with `multiple=true` + `requeue=false`.
-  Wrap with `ErrRequeue` (`fmt.Errorf("retry: %w", amqp.ErrRequeue)`)
+  Wrap with `ErrRequeue` (`fmt.Errorf("retry: %w", warren.ErrRequeue)`)
   to request `requeue=true` for the whole batch instead.
 - For **partial outcomes**, the handler calls `Batch.Deliveries()`
   and acks/nacks individual deliveries explicitly, then returns
@@ -1667,67 +1667,67 @@ auto-delete reply queue when the builder calls
 ```go
 var (
     // Connection lifecycle
-    ErrNotConnected         = errors.New("amqp: not connected")
-    ErrAlreadyClosed        = errors.New("amqp: already closed")
-    ErrShutdown             = errors.New("amqp: client is shutting down")
-    ErrChannelClosed        = errors.New("amqp: channel closed")
-    ErrConnectionBlocked    = errors.New("amqp: connection blocked by broker") // memory/disk alarm
-    ErrChannelPoolExhausted = errors.New("amqp: channel pool exhausted")        // all channels in-flight; transient
+    ErrNotConnected         = errors.New("warren: not connected")
+    ErrAlreadyClosed        = errors.New("warren: already closed")
+    ErrShutdown             = errors.New("warren: client is shutting down")
+    ErrChannelClosed        = errors.New("warren: channel closed")
+    ErrConnectionBlocked    = errors.New("warren: connection blocked by broker") // memory/disk alarm
+    ErrChannelPoolExhausted = errors.New("warren: channel pool exhausted")        // all channels in-flight; transient
 
     // Publisher
-    ErrConfirmTimeout = errors.New("amqp: publisher confirm timeout")
-    ErrUnroutable    = errors.New("amqp: mandatory publish was returned")
-    ErrPublishNacked = errors.New("amqp: broker nacked publish")         // basic.nack from broker (e.g. overflow=reject-publish, disk alarm mid-publish)
-    ErrPartialBatch  = errors.New("amqp: batch publish partially failed")
-    ErrBatchTooLarge = errors.New("amqp: PublishBatch exceeds max in-flight budget")
+    ErrConfirmTimeout = errors.New("warren: publisher confirm timeout")
+    ErrUnroutable    = errors.New("warren: mandatory publish was returned")
+    ErrPublishNacked = errors.New("warren: broker nacked publish")         // basic.nack from broker (e.g. overflow=reject-publish, disk alarm mid-publish)
+    ErrPartialBatch  = errors.New("warren: batch publish partially failed")
+    ErrBatchTooLarge = errors.New("warren: PublishBatch exceeds max in-flight budget")
 
     // Consumer
-    ErrRequeue           = errors.New("amqp: nack with requeue")
-    ErrPoison            = errors.New("amqp: poison message (nack no requeue)")
-    ErrMaxRedeliveries   = errors.New("amqp: max redeliveries exceeded")
-    ErrConsumerCancelled = errors.New("amqp: consumer cancelled by broker (basic.cancel)") // queue deleted, exclusive forced off, etc.
+    ErrRequeue           = errors.New("warren: nack with requeue")
+    ErrPoison            = errors.New("warren: poison message (nack no requeue)")
+    ErrMaxRedeliveries   = errors.New("warren: max redeliveries exceeded")
+    ErrConsumerCancelled = errors.New("warren: consumer cancelled by broker (basic.cancel)") // queue deleted, exclusive forced off, etc.
 
     // Codec / payload
-    ErrInvalidMessage = errors.New("amqp: invalid message payload")
+    ErrInvalidMessage = errors.New("warren: invalid message payload")
 
     // Topology
-    ErrTopologyMismatch        = errors.New("amqp: topology mismatch")         // wraps ErrPreconditionFailed
-    ErrTopologyRedeclareFailed = errors.New("amqp: topology redeclare failed") // connection in degraded state; permanent until next successful redeclare
+    ErrTopologyMismatch        = errors.New("warren: topology mismatch")         // wraps ErrPreconditionFailed
+    ErrTopologyRedeclareFailed = errors.New("warren: topology redeclare failed") // connection in degraded state; permanent until next successful redeclare
 
     // Reconnect lifecycle
-    ErrReconnecting = errors.New("amqp: connection reconnecting") // blocks Publish during the redeclare barrier; transient
+    ErrReconnecting = errors.New("warren: connection reconnecting") // blocks Publish during the redeclare barrier; transient
 
     // RPC
-    ErrCallTimeout = errors.New("amqp: rpc call timed out")
+    ErrCallTimeout = errors.New("warren: rpc call timed out")
 
     // Config
-    ErrInvalidOptions = errors.New("amqp: invalid options")
+    ErrInvalidOptions = errors.New("warren: invalid options")
 
     // AMQP 0-9-1 reply codes — broker-originated errors. Any error from
     // a publish/consume/declare operation that traces back to a broker
     // channel/connection close wraps one of these so users can branch
     // on `errors.Is`.
-    ErrContentTooLarge    = errors.New("amqp: content too large (311)")
-    ErrConnectionForced   = errors.New("amqp: connection forced (320)")
-    ErrInvalidPath        = errors.New("amqp: invalid path (402)")
-    ErrAccessRefused      = errors.New("amqp: access refused (403)")
-    ErrNotFound           = errors.New("amqp: not found (404)")
-    ErrResourceLocked     = errors.New("amqp: resource locked (405)")
-    ErrPreconditionFailed = errors.New("amqp: precondition failed (406)")
-    ErrFrameError         = errors.New("amqp: frame error (501)")
-    ErrSyntaxError        = errors.New("amqp: syntax error (502)")
-    ErrCommandInvalid     = errors.New("amqp: command invalid (503)")
-    ErrChannelError       = errors.New("amqp: channel error (504)")
-    ErrUnexpectedFrame    = errors.New("amqp: unexpected frame (505)")
-    ErrResourceError      = errors.New("amqp: resource error (506)")
-    ErrNotAllowed         = errors.New("amqp: not allowed (530)")
-    ErrNotImplemented     = errors.New("amqp: not implemented (540)")
-    ErrInternalError      = errors.New("amqp: internal error (541)")
+    ErrContentTooLarge    = errors.New("warren: content too large (311)")
+    ErrConnectionForced   = errors.New("warren: connection forced (320)")
+    ErrInvalidPath        = errors.New("warren: invalid path (402)")
+    ErrAccessRefused      = errors.New("warren: access refused (403)")
+    ErrNotFound           = errors.New("warren: not found (404)")
+    ErrResourceLocked     = errors.New("warren: resource locked (405)")
+    ErrPreconditionFailed = errors.New("warren: precondition failed (406)")
+    ErrFrameError         = errors.New("warren: frame error (501)")
+    ErrSyntaxError        = errors.New("warren: syntax error (502)")
+    ErrCommandInvalid     = errors.New("warren: command invalid (503)")
+    ErrChannelError       = errors.New("warren: channel error (504)")
+    ErrUnexpectedFrame    = errors.New("warren: unexpected frame (505)")
+    ErrResourceError      = errors.New("warren: resource error (506)")
+    ErrNotAllowed         = errors.New("warren: not allowed (530)")
+    ErrNotImplemented     = errors.New("warren: not implemented (540)")
+    ErrInternalError      = errors.New("warren: internal error (541)")
 
     // Retry classifiers (errors are wrapped with one of these for callers
     // that don't want to switch over the specific reply codes).
-    ErrTransient = errors.New("amqp: transient error")
-    ErrPermanent = errors.New("amqp: permanent error")
+    ErrTransient = errors.New("warren: transient error")
+    ErrPermanent = errors.New("warren: permanent error")
 )
 
 // AMQPCode returns the AMQP reply code embedded in err (if any) and
@@ -1775,8 +1775,8 @@ func IsPermanent(err error) bool
 Errors originating from the broker (`amqp091.Error` with reply code)
 are translated into wraps of the corresponding reply-code sentinel.
 Users may classify either coarsely
-(`errors.Is(err, amqp.ErrPermanent)`) or precisely
-(`errors.Is(err, amqp.ErrNotFound)`) — both work on the same error
+(`errors.Is(err, warren.ErrPermanent)`) or precisely
+(`errors.Is(err, warren.ErrNotFound)`) — both work on the same error
 value.
 
 ### 6.9 Subpackages
@@ -2360,7 +2360,7 @@ the next reader so the rationale survives the conversation:
     connections, split by role.** `*Connection` wraps a pool with
     `WithPublisherConnections(n)` (default 1) and
     `WithConsumerConnections(n)` (default 1). The reason is
-    `amqp091-go` serializes I/O per `amqp.Connection`: one TCP
+    `amqp091-go` serializes I/O per `warren.Connection`: one TCP
     socket bounds confirm throughput to whatever a single goroutine
     can drive. A single socket is fine for tens of thousands of
     messages/second; sustained higher rates require role-based

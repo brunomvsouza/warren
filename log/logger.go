@@ -1,5 +1,5 @@
 // Package log provides the Logger interface and three adapters (NoOp, Slog,
-// Std) used by the amqp library for structured log emission.
+// Std) used by the warren library for structured log emission.
 //
 // All adapters route every string through [internal/redact.URI] before
 // emission, so AMQP URIs containing credentials never appear in log output.

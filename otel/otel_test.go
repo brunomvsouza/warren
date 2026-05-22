@@ -10,18 +10,18 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
 	"go.opentelemetry.io/otel/trace"
 
-	amqpotel "github.com/brunomvsouza/warren/otel"
+	warrenotel "github.com/brunomvsouza/warren/otel"
 )
 
 // — Compile-time interface check ———————————————————————————————————————————
 
-var _ amqpotel.Tracer = amqpotel.NoOpTracer{}
+var _ warrenotel.Tracer = warrenotel.NoOpTracer{}
 
 // — NoOpTracer ——————————————————————————————————————————————————————————————
 
 func TestNoOpTracer_doesNotPanic(t *testing.T) {
-	var tr amqpotel.Tracer = amqpotel.NoOpTracer{}
-	ctx, span := tr.Start(context.Background(), "amqp.publish", attribute.String("k", "v"))
+	var tr warrenotel.Tracer = warrenotel.NoOpTracer{}
+	ctx, span := tr.Start(context.Background(), "warren.publish", attribute.String("k", "v"))
 	require.NotNil(t, span)
 	require.NotNil(t, ctx)
 	span.SetAttributes(attribute.Int("size", 42))
@@ -32,7 +32,7 @@ func TestNoOpTracer_doesNotPanic(t *testing.T) {
 
 func TestNoOpTracer_returnsOriginalContext(t *testing.T) {
 	parent := context.WithValue(context.Background(), "key", "val") //nolint:staticcheck
-	tr := amqpotel.NoOpTracer{}
+	tr := warrenotel.NoOpTracer{}
 	got, _ := tr.Start(parent, "span")
 	assert.Equal(t, "val", got.Value("key"), "Start must preserve the parent context")
 }
@@ -53,7 +53,7 @@ func TestPropagator_roundTrip(t *testing.T) {
 	sc := validSpanContext()
 	ctx := trace.ContextWithSpanContext(context.Background(), sc)
 
-	p := amqpotel.NewPropagator()
+	p := warrenotel.NewPropagator()
 	h := map[string]any{}
 	p.Inject(ctx, h)
 
@@ -68,7 +68,7 @@ func TestPropagator_roundTrip(t *testing.T) {
 }
 
 func TestPropagator_emptyHeaders_noValidContext(t *testing.T) {
-	p := amqpotel.NewPropagator()
+	p := warrenotel.NewPropagator()
 	ctx := p.Extract(map[string]any{})
 	sc := trace.SpanContextFromContext(ctx)
 	assert.False(t, sc.IsValid(), "empty headers must not produce a valid SpanContext")
@@ -78,7 +78,7 @@ func TestPropagator_injectOnlyWritesTraceHeaders(t *testing.T) {
 	sc := validSpanContext()
 	ctx := trace.ContextWithSpanContext(context.Background(), sc)
 
-	p := amqpotel.NewPropagator()
+	p := warrenotel.NewPropagator()
 	h := map[string]any{}
 	p.Inject(ctx, h)
 
@@ -94,7 +94,7 @@ func TestPropagator_noCEHeaderCollision(t *testing.T) {
 	sc := validSpanContext()
 	ctx := trace.ContextWithSpanContext(context.Background(), sc)
 
-	p := amqpotel.NewPropagator()
+	p := warrenotel.NewPropagator()
 	h := map[string]any{}
 	p.Inject(ctx, h)
 

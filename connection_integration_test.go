@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	amqp "github.com/brunomvsouza/warren"
+	"github.com/brunomvsouza/warren"
 )
 
 // amqpTestURL returns the broker URL for integration tests. The variable
@@ -36,7 +36,7 @@ func TestDial_health_close_integration(t *testing.T) {
 	url := amqpTestURL(t)
 	ctx := context.Background()
 
-	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
+	conn, err := warren.Dial(ctx, warren.WithAddr(url))
 	require.NoError(t, err)
 	require.NotNil(t, conn)
 
@@ -52,28 +52,28 @@ func TestDial_health_close_integration(t *testing.T) {
 func TestDial_health_afterClose_returnsErrAlreadyClosed_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	conn, err := amqp.Dial(context.Background(), amqp.WithAddr(amqpTestURL(t)))
+	conn, err := warren.Dial(context.Background(), warren.WithAddr(amqpTestURL(t)))
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	require.NoError(t, conn.Close(ctx))
 
-	assert.ErrorIs(t, conn.Health(context.Background()), amqp.ErrAlreadyClosed,
+	assert.ErrorIs(t, conn.Health(context.Background()), warren.ErrAlreadyClosed,
 		"Health after Close must return ErrAlreadyClosed")
 }
 
 func TestDial_close_idempotent_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	conn, err := amqp.Dial(context.Background(), amqp.WithAddr(amqpTestURL(t)))
+	conn, err := warren.Dial(context.Background(), warren.WithAddr(amqpTestURL(t)))
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	require.NoError(t, conn.Close(ctx))
-	assert.ErrorIs(t, conn.Close(ctx), amqp.ErrAlreadyClosed,
+	assert.ErrorIs(t, conn.Close(ctx), warren.ErrAlreadyClosed,
 		"second Close must return ErrAlreadyClosed")
 }
 
@@ -82,8 +82,8 @@ func TestDial_close_idempotent_integration(t *testing.T) {
 func TestDial_authUser_plain_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	conn, err := amqp.Dial(context.Background(),
-		amqp.WithAddr(amqpTestURL(t)),
+	conn, err := warren.Dial(context.Background(),
+		warren.WithAddr(amqpTestURL(t)),
 		// The default guest/guest credentials are fine for local broker.
 		// Use WithAuth to exercise the PLAIN path with a known username.
 	)
@@ -100,9 +100,9 @@ func TestDial_authUser_plain_integration(t *testing.T) {
 func TestDial_authUser_withAuthOption_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
-	conn, err := amqp.Dial(context.Background(),
-		amqp.WithAddr(amqpTestURL(t)),
-		amqp.WithAuth("guest", "guest"),
+	conn, err := warren.Dial(context.Background(),
+		warren.WithAddr(amqpTestURL(t)),
+		warren.WithAuth("guest", "guest"),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "guest", conn.AuthenticatedUser())
@@ -119,10 +119,10 @@ func TestDial_authUser_degradedState_stillReadable_integration(t *testing.T) {
 
 	degradedCh := make(chan error, 1)
 
-	conn, err := amqp.Dial(context.Background(),
-		amqp.WithAddr(amqpTestURL(t)),
-		amqp.WithAuth("guest", "guest"),
-		amqp.WithOnTopologyDegraded(func(e error) { degradedCh <- e }),
+	conn, err := warren.Dial(context.Background(),
+		warren.WithAddr(amqpTestURL(t)),
+		warren.WithAuth("guest", "guest"),
+		warren.WithOnTopologyDegraded(func(e error) { degradedCh <- e }),
 	)
 	require.NoError(t, err)
 

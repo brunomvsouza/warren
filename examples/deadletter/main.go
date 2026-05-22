@@ -39,7 +39,7 @@ import (
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
-	amqp "github.com/brunomvsouza/warren"
+	"github.com/brunomvsouza/warren"
 )
 
 // Order is the payload type for this example.
@@ -63,7 +63,7 @@ func run() error {
 
 	ctx := context.Background()
 
-	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
+	conn, err := warren.Dial(ctx, warren.WithAddr(url))
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -77,26 +77,26 @@ func run() error {
 	// explicitly so we can add the binding from DLX → DLQ. The DeadLetter
 	// entry instructs the in-memory pre-pass to inject x-dead-letter-* args
 	// into the source queue before the broker call — no re-declare needed.
-	topo := &amqp.Topology{
-		Exchanges: []amqp.Exchange{
+	topo := &warren.Topology{
+		Exchanges: []warren.Exchange{
 			{
 				Name:    "warren.examples.dl.topic",
-				Kind:    amqp.ExchangeTopic,
+				Kind:    warren.ExchangeTopic,
 				Durable: true,
 			},
 			{
 				// DLX exchange — also created by the DLX pre-pass, but declared
 				// here explicitly so we can bind the DLQ to it below.
 				Name:    "warren.examples.dl.orders.dlx",
-				Kind:    amqp.ExchangeTopic,
+				Kind:    warren.ExchangeTopic,
 				Durable: true,
 			},
 		},
-		Queues: []amqp.Queue{
+		Queues: []warren.Queue{
 			{
 				Name:          "warren.examples.dl.orders",
 				Durable:       true,
-				Type:          amqp.QueueTypeQuorum,
+				Type:          warren.QueueTypeQuorum,
 				DeliveryLimit: 3,
 			},
 			{
@@ -106,7 +106,7 @@ func run() error {
 				Durable: true,
 			},
 		},
-		Bindings: []amqp.Binding{
+		Bindings: []warren.Binding{
 			{
 				Exchange:   "warren.examples.dl.topic",
 				Queue:      "warren.examples.dl.orders",
@@ -120,14 +120,14 @@ func run() error {
 				RoutingKey: "dead.#",
 			},
 		},
-		DeadLetters: []amqp.DeadLetter{
+		DeadLetters: []warren.DeadLetter{
 			{
 				Source:     "warren.examples.dl.orders",
 				Exchange:   "warren.examples.dl.orders.dlx",
 				RoutingKey: "dead.#", // injected as x-dead-letter-routing-key on the source queue
 				TTL:        30 * time.Second,
 				MaxLength:  100,
-				Overflow:   amqp.OverflowRejectPublishDLX,
+				Overflow:   warren.OverflowRejectPublishDLX,
 			},
 		},
 	}
@@ -137,7 +137,7 @@ func run() error {
 	log.Println("topology declared (DLX expansion applied in-memory before broker call)")
 
 	// Publish one message to the source queue.
-	pub, err := amqp.PublisherFor[Order](conn).
+	pub, err := warren.PublisherFor[Order](conn).
 		Exchange("warren.examples.dl.topic").
 		RoutingKey("order.created").
 		ConfirmTimeout(10 * time.Second).
@@ -152,7 +152,7 @@ func run() error {
 	}()
 
 	order := Order{ID: "dead-001", Amount: 99}
-	if err := pub.Publish(ctx, amqp.Message[Order]{Body: &order}); err != nil {
+	if err := pub.Publish(ctx, warren.Message[Order]{Body: &order}); err != nil {
 		return fmt.Errorf("publish: %w", err)
 	}
 	log.Printf("order published: id=%s", order.ID)

@@ -21,13 +21,13 @@ func NewPropagator() Propagator {
 }
 
 // Inject injects the trace context from ctx into h using W3C traceparent
-// and tracestate headers. h is typically amqp.Headers (map[string]any).
+// and tracestate headers. h is typically warren.Headers (map[string]any).
 func (p Propagator) Inject(ctx context.Context, h map[string]any) {
 	p.prop.Inject(ctx, headerCarrier(h))
 }
 
 // Extract extracts a W3C trace context from h and returns a context with
-// it attached. h is typically amqp.Headers (map[string]any).
+// it attached. h is typically warren.Headers (map[string]any).
 // Returns context.Background() enriched with the extracted span context,
 // or an empty context if no valid traceparent is present.
 func (p Propagator) Extract(h map[string]any) context.Context {

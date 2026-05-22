@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	amqp "github.com/brunomvsouza/warren"
+	"github.com/brunomvsouza/warren"
 	"github.com/brunomvsouza/warren/internal/amqperror"
 )
 
@@ -38,22 +38,22 @@ var codeToSentinel = []struct {
 	code     uint16
 	sentinel error
 }{
-	{311, amqp.ErrContentTooLarge},
-	{320, amqp.ErrConnectionForced},
-	{402, amqp.ErrInvalidPath},
-	{403, amqp.ErrAccessRefused},
-	{404, amqp.ErrNotFound},
-	{405, amqp.ErrResourceLocked},
-	{406, amqp.ErrPreconditionFailed},
-	{501, amqp.ErrFrameError},
-	{502, amqp.ErrSyntaxError},
-	{503, amqp.ErrCommandInvalid},
-	{504, amqp.ErrChannelError},
-	{505, amqp.ErrUnexpectedFrame},
-	{506, amqp.ErrResourceError},
-	{530, amqp.ErrNotAllowed},
-	{540, amqp.ErrNotImplemented},
-	{541, amqp.ErrInternalError},
+	{311, warren.ErrContentTooLarge},
+	{320, warren.ErrConnectionForced},
+	{402, warren.ErrInvalidPath},
+	{403, warren.ErrAccessRefused},
+	{404, warren.ErrNotFound},
+	{405, warren.ErrResourceLocked},
+	{406, warren.ErrPreconditionFailed},
+	{501, warren.ErrFrameError},
+	{502, warren.ErrSyntaxError},
+	{503, warren.ErrCommandInvalid},
+	{504, warren.ErrChannelError},
+	{505, warren.ErrUnexpectedFrame},
+	{506, warren.ErrResourceError},
+	{530, warren.ErrNotAllowed},
+	{540, warren.ErrNotImplemented},
+	{541, warren.ErrInternalError},
 }
 
 func TestWrap_allChannelCloseCodes(t *testing.T) {
@@ -88,7 +88,7 @@ func TestWrap_AMQPCodeExtraction(t *testing.T) {
 	for _, tc := range codeToSentinel {
 		t.Run(fmt.Sprintf("code_%d", tc.code), func(t *testing.T) {
 			wrapped := amqperror.Wrap(rawAMQPErr(tc.code, "reason"))
-			code, ok := amqp.AMQPCode(wrapped)
+			code, ok := warren.AMQPCode(wrapped)
 			assert.True(t, ok)
 			assert.Equal(t, tc.code, code)
 		})
@@ -104,16 +104,16 @@ func TestWrap_classifiers(t *testing.T) {
 	for _, code := range transientCodes {
 		t.Run(fmt.Sprintf("transient_%d", code), func(t *testing.T) {
 			wrapped := amqperror.Wrap(rawAMQPErr(code, "reason"))
-			assert.True(t, amqp.IsTransient(wrapped), "code %d must be transient", code)
-			assert.False(t, amqp.IsPermanent(wrapped), "code %d must not be permanent", code)
+			assert.True(t, warren.IsTransient(wrapped), "code %d must be transient", code)
+			assert.False(t, warren.IsPermanent(wrapped), "code %d must not be permanent", code)
 		})
 	}
 
 	for _, code := range permanentCodes {
 		t.Run(fmt.Sprintf("permanent_%d", code), func(t *testing.T) {
 			wrapped := amqperror.Wrap(rawAMQPErr(code, "reason"))
-			assert.True(t, amqp.IsPermanent(wrapped), "code %d must be permanent", code)
-			assert.False(t, amqp.IsTransient(wrapped), "code %d must not be transient", code)
+			assert.True(t, warren.IsPermanent(wrapped), "code %d must be permanent", code)
+			assert.False(t, warren.IsTransient(wrapped), "code %d must not be transient", code)
 		})
 	}
 }
@@ -122,8 +122,8 @@ func TestWrap_classifiers(t *testing.T) {
 
 func TestWrap_resourceError506_isPermanent(t *testing.T) {
 	wrapped := amqperror.Wrap(rawAMQPErr(506, "fd exhausted"))
-	assert.False(t, amqp.IsTransient(wrapped), "506 ErrResourceError must NOT be transient")
-	assert.True(t, amqp.IsPermanent(wrapped), "506 ErrResourceError must be permanent")
+	assert.False(t, warren.IsTransient(wrapped), "506 ErrResourceError must NOT be transient")
+	assert.True(t, warren.IsPermanent(wrapped), "506 ErrResourceError must be permanent")
 }
 
 // — Wrap: unknown code passes through unchanged ———————————————————————————
@@ -144,7 +144,7 @@ func TestWrap_nestedAMQPError(t *testing.T) {
 	outer := fmt.Errorf("channel closed: %w", raw)
 	wrapped := amqperror.Wrap(outer)
 
-	assert.True(t, errors.Is(wrapped, amqp.ErrAccessRefused),
+	assert.True(t, errors.Is(wrapped, warren.ErrAccessRefused),
 		"Wrap must detect *amqp091.Error nested via errors.As")
 	var amqpErr *amqp091.Error
 	require.True(t, errors.As(wrapped, &amqpErr))

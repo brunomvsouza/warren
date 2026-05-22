@@ -2,11 +2,11 @@
 // It tracks in-flight publishes, correlates basic.return + basic.ack frames for
 // mandatory messages, and resolves each Wait call with the appropriate outcome.
 //
-// Import-cycle note: this package does not import the root amqp package so it
+// Import-cycle note: this package does not import the root warren package so it
 // can itself be imported by files in that package (channelpool, publisher, etc.).
-// Callers are responsible for mapping ErrNacked → amqp.ErrPublishNacked,
-// ErrClosed → amqp.ErrChannelClosed, ErrTimeout → amqp.ErrConfirmTimeout, and
-// *UnroutableError → wrapCode(ue.ReplyCode, amqp.ErrUnroutable).
+// Callers are responsible for mapping ErrNacked → warren.ErrPublishNacked,
+// ErrClosed → warren.ErrChannelClosed, ErrTimeout → warren.ErrConfirmTimeout, and
+// *UnroutableError → wrapCode(ue.ReplyCode, warren.ErrUnroutable).
 package confirms
 
 import (

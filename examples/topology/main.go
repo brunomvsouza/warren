@@ -35,7 +35,7 @@ import (
 	"os"
 	"time"
 
-	amqp "github.com/brunomvsouza/warren"
+	"github.com/brunomvsouza/warren"
 )
 
 func main() {
@@ -55,9 +55,9 @@ func run() error {
 
 	reconnected := make(chan struct{}, 1)
 
-	conn, err := amqp.Dial(ctx,
-		amqp.WithAddr(url),
-		amqp.WithOnReconnect(func() {
+	conn, err := warren.Dial(ctx,
+		warren.WithAddr(url),
+		warren.WithOnReconnect(func() {
 			select {
 			case reconnected <- struct{}{}:
 			default:
@@ -73,25 +73,25 @@ func run() error {
 		_ = conn.Close(closeCtx)
 	}()
 
-	topo := &amqp.Topology{
-		Exchanges: []amqp.Exchange{
+	topo := &warren.Topology{
+		Exchanges: []warren.Exchange{
 			{
 				Name:    "warren.examples.events",
-				Kind:    amqp.ExchangeTopic,
+				Kind:    warren.ExchangeTopic,
 				Durable: true,
 			},
 			{
 				Name:    "warren.examples.notify",
-				Kind:    amqp.ExchangeFanout,
+				Kind:    warren.ExchangeFanout,
 				Durable: true,
 			},
 		},
-		Queues: []amqp.Queue{
+		Queues: []warren.Queue{
 			{Name: "warren.examples.orders", Durable: true},
 			{Name: "warren.examples.payments", Durable: true},
 			{Name: "warren.examples.alerts", Durable: true},
 		},
-		Bindings: []amqp.Binding{
+		Bindings: []warren.Binding{
 			{Exchange: "warren.examples.events", Queue: "warren.examples.orders", RoutingKey: "order.#"},
 			{Exchange: "warren.examples.events", Queue: "warren.examples.payments", RoutingKey: "payment.#"},
 			{Exchange: "warren.examples.notify", Queue: "warren.examples.alerts"},

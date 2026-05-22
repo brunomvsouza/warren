@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	amqp "github.com/brunomvsouza/warren"
+	"github.com/brunomvsouza/warren"
 )
 
 // selfSignedCert creates a self-signed TLS certificate with the given CN.
@@ -47,9 +47,9 @@ func selfSignedCert(t *testing.T, cn string) tls.Certificate {
 
 func TestDial_frameMaxBelowMinimum_returnsErrInvalidOptions(t *testing.T) {
 	ctx := context.Background()
-	_, err := amqp.Dial(ctx, amqp.WithFrameMax(1000))
+	_, err := warren.Dial(ctx, warren.WithFrameMax(1000))
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions),
 		"expected ErrInvalidOptions, got: %v", err)
 }
 
@@ -58,51 +58,51 @@ func TestDial_frameMaxExactlyMinimum_doesNotFailOnValidation(t *testing.T) {
 	// still fail if no broker is reachable, but not with ErrInvalidOptions).
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithFrameMax(4096),
+	_, err := warren.Dial(ctx,
+		warren.WithFrameMax(4096),
 		// instant-fail dialer so we don't actually try the network
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
 		"FrameMax=4096 must pass validation; got: %v", err)
 }
 
 func TestDial_sASLExternal_withoutTLSConfig_returnsErrInvalidOptions(t *testing.T) {
 	ctx := context.Background()
-	_, err := amqp.Dial(ctx,
-		amqp.WithSASLMechanism(amqp.SASLExternal),
-		amqp.WithAddr("amqps://h:5671/"),
+	_, err := warren.Dial(ctx,
+		warren.WithSASLMechanism(warren.SASLExternal),
+		warren.WithAddr("amqps://h:5671/"),
 	)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions), "got: %v", err)
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions), "got: %v", err)
 	assert.Contains(t, err.Error(), "TLSConfig", "error must name the missing field")
 }
 
 func TestDial_sASLExternal_withTLSButNoClientCert_returnsErrInvalidOptions(t *testing.T) {
 	ctx := context.Background()
-	_, err := amqp.Dial(ctx,
-		amqp.WithSASLMechanism(amqp.SASLExternal),
-		amqp.WithAddr("amqps://h:5671/"),
-		amqp.WithTLSConfig(&tls.Config{}), // no certificates
+	_, err := warren.Dial(ctx,
+		warren.WithSASLMechanism(warren.SASLExternal),
+		warren.WithAddr("amqps://h:5671/"),
+		warren.WithTLSConfig(&tls.Config{}), // no certificates
 	)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions), "got: %v", err)
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions), "got: %v", err)
 	assert.Contains(t, err.Error(), "certificate")
 }
 
 func TestDial_sASLExternal_withPlainScheme_returnsErrInvalidOptions(t *testing.T) {
 	cert := selfSignedCert(t, "svc")
 	ctx := context.Background()
-	_, err := amqp.Dial(ctx,
-		amqp.WithSASLMechanism(amqp.SASLExternal),
-		amqp.WithAddr("amqp://h:5672/"), // plain, not amqps
-		amqp.WithTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}}),
+	_, err := warren.Dial(ctx,
+		warren.WithSASLMechanism(warren.SASLExternal),
+		warren.WithAddr("amqp://h:5672/"), // plain, not amqps
+		warren.WithTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}}),
 	)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions), "got: %v", err)
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions), "got: %v", err)
 	assert.Contains(t, err.Error(), "amqps")
 }
 
@@ -110,19 +110,19 @@ func TestDial_sASLExternal_validConfig_passesValidation(t *testing.T) {
 	cert := selfSignedCert(t, "test-client")
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithSASLMechanism(amqp.SASLExternal),
-		amqp.WithAddr("amqps://h:5671/"),
-		amqp.WithTLSConfig(&tls.Config{
+	_, err := warren.Dial(ctx,
+		warren.WithSASLMechanism(warren.SASLExternal),
+		warren.WithAddr("amqps://h:5671/"),
+		warren.WithTLSConfig(&tls.Config{
 			Certificates:       []tls.Certificate{cert},
 			InsecureSkipVerify: true, //nolint:gosec // test only
 		}),
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
 		"valid EXTERNAL config must pass validation; got: %v", err)
 }
 
@@ -137,14 +137,14 @@ func TestDial_defaultConnectionName_matchesExpectedFormat(t *testing.T) {
 	defer cancel()
 
 	captured := ""
-	_, err := amqp.Dial(ctx,
-		amqp.WithDialer(func(_, addr string) (net.Conn, error) {
+	_, err := warren.Dial(ctx,
+		warren.WithDialer(func(_, addr string) (net.Conn, error) {
 			captured = addr // just to confirm it was called
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions))
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions))
 	assert.NotEmpty(t, captured, "dialer should have been called")
 	_ = captured
 }
@@ -159,14 +159,14 @@ func TestDial_authUser_plainCredentials(t *testing.T) {
 	// the error does NOT come from a validation problem (i.e., WithAuth is valid).
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithAuth("alice", "secret"),
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+	_, err := warren.Dial(ctx,
+		warren.WithAuth("alice", "secret"),
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
 		"WithAuth must not cause a validation error; got: %v", err)
 }
 
@@ -176,14 +176,14 @@ func TestDial_authUser_plainCredentials(t *testing.T) {
 func TestDial_zeroHeartbeat_doesNotReturnErrInvalidOptions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithHeartbeat(0),
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+	_, err := warren.Dial(ctx,
+		warren.WithHeartbeat(0),
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions))
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions))
 }
 
 // — WithoutMetrics / option last-wins ————————————————————————————————————
@@ -191,20 +191,20 @@ func TestDial_zeroHeartbeat_doesNotReturnErrInvalidOptions(t *testing.T) {
 func TestDial_withoutMetrics_doesNotReturnErrInvalidOptions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithoutMetrics(),
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+	_, err := warren.Dial(ctx,
+		warren.WithoutMetrics(),
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions))
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions))
 }
 
 // — Connection name validation (exported helper) ——————————————————————————
 
 func TestDefaultConnectionNameFormat(t *testing.T) {
-	name := amqp.DefaultConnectionName()
+	name := warren.DefaultConnectionName()
 	// Expected format: "<binary>-<hostname>-<pid>"
 	// At least two dashes, non-empty segments.
 	re := regexp.MustCompile(`^.+-.+-.+$`)
@@ -219,20 +219,20 @@ func TestDial_sASLExternalWithAuth_passesValidation(t *testing.T) {
 	cert := selfSignedCert(t, "svc")
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithSASLMechanism(amqp.SASLExternal),
-		amqp.WithAddr("amqps://h:5671/"),
-		amqp.WithTLSConfig(&tls.Config{
+	_, err := warren.Dial(ctx,
+		warren.WithSASLMechanism(warren.SASLExternal),
+		warren.WithAddr("amqps://h:5671/"),
+		warren.WithTLSConfig(&tls.Config{
 			Certificates:       []tls.Certificate{cert},
 			InsecureSkipVerify: true, //nolint:gosec // test only
 		}),
-		amqp.WithAuth("ignored", "also-ignored"),
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+		warren.WithAuth("ignored", "also-ignored"),
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions), "got: %v", err)
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions), "got: %v", err)
 }
 
 // — WithPublisherConnections(1) warning test (no broker; just verifies no
@@ -241,14 +241,14 @@ func TestDial_sASLExternalWithAuth_passesValidation(t *testing.T) {
 func TestDial_singlePubConn_doesNotReturnErrInvalidOptions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithPublisherConnections(1),
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+	_, err := warren.Dial(ctx,
+		warren.WithPublisherConnections(1),
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
 		"WithPublisherConnections(1) logs a warning but is not invalid; got: %v", err)
 }
 
@@ -259,11 +259,11 @@ func TestDial_singlePubConn_doesNotReturnErrInvalidOptions(t *testing.T) {
 func TestDial_unreachableAddr_returnsNonValidationError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithAddr("amqp://127.0.0.1:1/"),
+	_, err := warren.Dial(ctx,
+		warren.WithAddr("amqp://127.0.0.1:1/"),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
 		"network failure must not masquerade as ErrInvalidOptions; got: %v", err)
 }
 
@@ -271,23 +271,23 @@ func TestDial_unreachableAddr_returnsNonValidationError(t *testing.T) {
 
 func TestDial_frameMaxAboveCeiling_returnsErrInvalidOptions(t *testing.T) {
 	ctx := context.Background()
-	_, err := amqp.Dial(ctx, amqp.WithFrameMax(200_000_000)) // 200 MiB — above 100 MiB ceiling
+	_, err := warren.Dial(ctx, warren.WithFrameMax(200_000_000)) // 200 MiB — above 100 MiB ceiling
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions),
 		"frameMax above ceiling must return ErrInvalidOptions; got: %v", err)
 }
 
 func TestDial_frameMaxAtCeiling_passesValidation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithFrameMax(104_857_600), // exactly 100 MiB
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+	_, err := warren.Dial(ctx,
+		warren.WithFrameMax(104_857_600), // exactly 100 MiB
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
 		"frameMax at ceiling must pass validation; got: %v", err)
 }
 
@@ -295,25 +295,25 @@ func TestDial_frameMaxAtCeiling_passesValidation(t *testing.T) {
 
 func TestDial_publisherConnectionsZero_returnsErrInvalidOptions(t *testing.T) {
 	ctx := context.Background()
-	_, err := amqp.Dial(ctx, amqp.WithPublisherConnections(0))
+	_, err := warren.Dial(ctx, warren.WithPublisherConnections(0))
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions),
 		"WithPublisherConnections(0) must return ErrInvalidOptions; got: %v", err)
 }
 
 func TestDial_consumerConnectionsZero_returnsErrInvalidOptions(t *testing.T) {
 	ctx := context.Background()
-	_, err := amqp.Dial(ctx, amqp.WithConsumerConnections(0))
+	_, err := warren.Dial(ctx, warren.WithConsumerConnections(0))
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions),
 		"WithConsumerConnections(0) must return ErrInvalidOptions; got: %v", err)
 }
 
 func TestDial_channelPoolSizeZero_returnsErrInvalidOptions(t *testing.T) {
 	ctx := context.Background()
-	_, err := amqp.Dial(ctx, amqp.WithChannelPoolSize(0))
+	_, err := warren.Dial(ctx, warren.WithChannelPoolSize(0))
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions),
 		"WithChannelPoolSize(0) must return ErrInvalidOptions; got: %v", err)
 }
 
@@ -322,14 +322,14 @@ func TestDial_channelPoolSizeZero_returnsErrInvalidOptions(t *testing.T) {
 func TestDial_sASLExternal_schemeError_doesNotLeakCredentials(t *testing.T) {
 	cert := selfSignedCert(t, "svc")
 	ctx := context.Background()
-	_, err := amqp.Dial(ctx,
-		amqp.WithSASLMechanism(amqp.SASLExternal),
+	_, err := warren.Dial(ctx,
+		warren.WithSASLMechanism(warren.SASLExternal),
 		// amqp:// URI with embedded credentials — must not appear in error
-		amqp.WithAddr("amqp://secret:password@host:5672/"),
-		amqp.WithTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}}),
+		warren.WithAddr("amqp://secret:password@host:5672/"),
+		warren.WithTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}}),
 	)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, amqp.ErrInvalidOptions), "got: %v", err)
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions), "got: %v", err)
 	assert.NotContains(t, err.Error(), "secret",
 		"error must not leak username from URI")
 	assert.NotContains(t, err.Error(), "password",
@@ -341,11 +341,11 @@ func TestDial_sASLExternal_schemeError_doesNotLeakCredentials(t *testing.T) {
 func TestDial_connectDelay_cancelledContext_returnsCtxErr(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
-	_, err := amqp.Dial(ctx,
-		amqp.WithConnectDelay(10*time.Second), // long delay — ctx already done
+	_, err := warren.Dial(ctx,
+		warren.WithConnectDelay(10*time.Second), // long delay — ctx already done
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions), "got: %v", err)
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions), "got: %v", err)
 	assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got: %v", err)
 }
 
@@ -353,21 +353,21 @@ func TestDial_connectDelay_cancelledContext_returnsCtxErr(t *testing.T) {
 
 func TestDial_publisherConnectionsZero_errorMentionsWithPublisherConnections(t *testing.T) {
 	ctx := context.Background()
-	_, err := amqp.Dial(ctx, amqp.WithPublisherConnections(0))
+	_, err := warren.Dial(ctx, warren.WithPublisherConnections(0))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "WithPublisherConnections")
 }
 
 func TestDial_consumerConnectionsZero_errorMentionsWithConsumerConnections(t *testing.T) {
 	ctx := context.Background()
-	_, err := amqp.Dial(ctx, amqp.WithConsumerConnections(0))
+	_, err := warren.Dial(ctx, warren.WithConsumerConnections(0))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "WithConsumerConnections")
 }
 
 func TestDial_channelPoolSizeZero_errorMentionsWithChannelPoolSize(t *testing.T) {
 	ctx := context.Background()
-	_, err := amqp.Dial(ctx, amqp.WithChannelPoolSize(0))
+	_, err := warren.Dial(ctx, warren.WithChannelPoolSize(0))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "WithChannelPoolSize")
 }
@@ -377,14 +377,14 @@ func TestDial_channelPoolSizeZero_errorMentionsWithChannelPoolSize(t *testing.T)
 func TestDial_negativeHeartbeat_doesNotReturnErrInvalidOptions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithHeartbeat(-1*time.Second),
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+	_, err := warren.Dial(ctx,
+		warren.WithHeartbeat(-1*time.Second),
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
 		"WithHeartbeat(-1) must not fail validation; got: %v", err)
 }
 
@@ -393,14 +393,14 @@ func TestDial_negativeHeartbeat_doesNotReturnErrInvalidOptions(t *testing.T) {
 func TestDial_singleConsumerConn_doesNotReturnErrInvalidOptions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithConsumerConnections(1),
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+	_, err := warren.Dial(ctx,
+		warren.WithConsumerConnections(1),
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
 		"WithConsumerConnections(1) logs a warning but is not invalid; got: %v", err)
 }
 
@@ -410,21 +410,21 @@ func TestDial_sASLExternal_getClientCertificateFn_passesValidation(t *testing.T)
 	cert := selfSignedCert(t, "via-fn")
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithSASLMechanism(amqp.SASLExternal),
-		amqp.WithAddr("amqps://h:5671/"),
-		amqp.WithTLSConfig(&tls.Config{
+	_, err := warren.Dial(ctx,
+		warren.WithSASLMechanism(warren.SASLExternal),
+		warren.WithAddr("amqps://h:5671/"),
+		warren.WithTLSConfig(&tls.Config{
 			GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 				return &cert, nil
 			},
 			InsecureSkipVerify: true, //nolint:gosec // test only
 		}),
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions),
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
 		"GetClientCertificate must satisfy cert requirement; got: %v", err)
 }
 
@@ -438,11 +438,11 @@ func TestDial_multiConn_dialCalledPubPlusConTimes(t *testing.T) {
 	var count int32
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithPublisherConnections(pubN),
-		amqp.WithConsumerConnections(conN),
-		amqp.WithReconnectBackoff(amqp.RetryPolicy{Retries: 1}),
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+	_, err := warren.Dial(ctx,
+		warren.WithPublisherConnections(pubN),
+		warren.WithConsumerConnections(conN),
+		warren.WithReconnectBackoff(warren.RetryPolicy{Retries: 1}),
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			// Use a closure variable; atomic not needed because the dialer is
 			// only called from Dial (sequential pool opening).
 			count++
@@ -450,7 +450,7 @@ func TestDial_multiConn_dialCalledPubPlusConTimes(t *testing.T) {
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions))
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions))
 	// Dial opens pubN publisher connections first; first failure aborts the pool.
 	// So we get exactly 1 call (the first connection in the publisher pool fails).
 	// With Retries=1 exactly one attempt is made per socket.
@@ -466,15 +466,15 @@ func TestDial_multiConn_singlePub_opensCorrectPools(t *testing.T) {
 	// with the right number of calls = pubConns (first pool always attempted).
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := amqp.Dial(ctx,
-		amqp.WithPublisherConnections(1),
-		amqp.WithConsumerConnections(1),
-		amqp.WithDialer(func(_, _ string) (net.Conn, error) {
+	_, err := warren.Dial(ctx,
+		warren.WithPublisherConnections(1),
+		warren.WithConsumerConnections(1),
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, amqp.ErrInvalidOptions))
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions))
 }
 
 // — Suppress unused import warning for fmt ————————————————————————————————

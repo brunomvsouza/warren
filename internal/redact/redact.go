@@ -1,5 +1,5 @@
 // Package redact is the mandatory credential-redaction choke-point for the
-// amqp library. Every string handed to logs, metric labels, span attributes,
+// warren library. Every string handed to logs, metric labels, span attributes,
 // or error messages that may contain an AMQP URI passes through URI before
 // emission, satisfying the SPEC §8 "Always: redact credentials" rule.
 package redact
