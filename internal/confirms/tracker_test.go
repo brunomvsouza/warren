@@ -305,3 +305,20 @@ func TestTracker_MarkReturned_UnregisteredTag_IsNoOp(t *testing.T) {
 	tr := confirms.New()
 	tr.MarkReturned(99, 312) // must not panic or have any effect
 }
+
+// — Cancel ————————————————————————————————————————————————————————————————
+
+// Cancel removes the slot; a subsequent Wait returns ErrClosed.
+func TestTracker_Cancel_SubsequentWait_ReturnsErrClosed(t *testing.T) {
+	tr := confirms.New()
+	require.NoError(t, tr.Register(1))
+	tr.Cancel(1)
+	err := tr.Wait(context.Background(), 1, shortTimeout)
+	assert.ErrorIs(t, err, confirms.ErrClosed)
+}
+
+// Cancel of a tag that was never registered must not panic.
+func TestTracker_Cancel_UnregisteredTag_IsNoOp(t *testing.T) {
+	tr := confirms.New()
+	tr.Cancel(99) // must not panic or have any effect
+}
