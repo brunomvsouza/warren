@@ -1960,6 +1960,66 @@ checks use a test AMQP server stub.
 - Nightly 100x stress loop of connect/disconnect cycles to surface
   goroutine leaks under realistic timing.
 
+### Executable examples at checkpoints
+
+The library ships a runnable example for every public-surface
+checkpoint, not only at v0.1.0 cut. A user-visible feature lands
+together with the `examples/<feature>/main.go` that demonstrates
+it, so anyone reading the repo at any commit on `main` can see
+how to exercise what is already merged.
+
+- **Mandatory checkpoint examples** (the phases listed are the
+  ones in `tasks/plan.md`):
+  - **Phase 2 — Producer:** `examples/publish/main.go` —
+    `PublisherFor[M]`, `Publish`, mandatory + `OnReturn`,
+    `ConfirmTimeout`, `PublishRetry`.
+  - **Phase 3 — Topology:** `examples/topology/main.go` and
+    `examples/deadletter/main.go` — `Topology.Declare`,
+    `AttachTo`, DLX expansion, quorum queue.
+  - **Phase 4 — Consumer:** `examples/consume/main.go` —
+    `ConsumerFor[M]`, payload-first handler, default
+    `Nack(false)` on error, `ErrRequeue` opt-in,
+    `MaxRedeliveries`, `HandlerTimeout`.
+  - **Phase 5 — Batch:** `examples/batch_publish/main.go` and
+    `examples/batch_consume/main.go` — `PublishBatch`
+    always-all + `[]PublishResult`, `BatchConsumer` with
+    `Size`/`FlushAfter`.
+  - **Phase 7 — Advanced:** `examples/rpc/main.go` and
+    `examples/delayed/main.go` — `Caller[Req,Resp]`,
+    `Replier[Req,Resp]`, `Message[M].Delay` via
+    `x-delayed-message`.
+- **Phases 1, 6, 8** do not introduce new mandatory examples.
+  Phase 1 has no user-facing publish/consume surface yet; Phase 6
+  (codecs + OTel) and Phase 8 (TLS/mTLS/cluster failover) evolve
+  the examples already on disk (e.g. `examples/publish/main.go`
+  gains an OTel exporter wiring; `examples/consume/main.go` gains
+  an mTLS variant). New top-level examples are encouraged but not
+  required at those checkpoints.
+- **Format.** Every example is a `package main` under
+  `examples/<feature>/` with a single `main.go`. It dials a local
+  broker (env-driven `AMQP_URL`, default
+  `amqp://guest:guest@localhost:5672/`), declares any required
+  topology in-process via `Topology.Declare`, and runs to
+  completion (or until `ctrl-c` for long-lived consumer
+  examples). Each example carries a top-of-file godoc block
+  explaining what it demonstrates and the command to run it.
+- **CI verification.** Every PR runs `go build ./examples/...`
+  on the unit lane (fast, no broker required). The
+  `integration` lane additionally runs every example end-to-end
+  against a `amqptest.NewRabbitMQ(t)` broker as a smoke test
+  (re-using the same testcontainer the integration suite spins
+  up). Failure to build or to run end-to-end on the integration
+  lane blocks merge.
+- **Pinning to plan checkpoints.** Each Phase 2/3/4/5/7
+  checkpoint in `tasks/plan.md` carries an `Example(s):` line
+  listing the example file(s) that must build + smoke-run before
+  the checkpoint is considered closed. T38 (Phase 9) is the
+  consolidation/polish pass: it does not introduce the
+  checkpoint examples (they already exist on `main`) — it adds
+  the remaining release-only examples (`otel/`,
+  `idempotent_consume/`, `ordered_consume/`) and aligns the
+  README links.
+
 ---
 
 ## 8. Boundaries
@@ -2002,6 +2062,15 @@ checks use a test AMQP server stub.
   cancelled with cause `ErrChannelClosed` when the underlying
   channel dies, so handlers can abort orphan work. `Close(ctx)` on
   the consumer also cancels with cause `ErrAlreadyClosed`.
+- **Ship an executable example whenever a checkpoint exposes new
+  user-facing surface.** Closing a Phase 2/3/4/5/7 checkpoint in
+  `tasks/plan.md` requires the matching `examples/<feature>/main.go`
+  to build (every PR) and to smoke-run end-to-end against the
+  testcontainer broker (`integration` CI lane). Examples are part
+  of the deliverable, not a release-only artefact (see §7
+  "Executable examples at checkpoints"). Feature work that
+  invalidates an existing example updates the example in the same
+  PR.
 
 ### Ask first
 
@@ -2534,3 +2603,22 @@ the Rev 5 surface still left invisible to a non-specialist user.
 
 These 24 Rev 6 decisions are closed. Any reopening needs a fresh
 spec amendment.
+
+49. **Executable examples land at checkpoints, not only at release.**
+    Phase 2/3/4/5/7 checkpoints in `tasks/plan.md` each carry an
+    `Example(s):` line listing one or more `examples/<feature>/main.go`
+    files that must build (every PR, unit lane) and smoke-run against
+    a testcontainer broker (`integration` lane) before the checkpoint
+    is considered closed. Layout is one directory per feature
+    (matching §4); later phases enrich the same directory rather
+    than spawning new ones (e.g. Phase 6 adds OTel wiring to the
+    existing `examples/publish/`). T38 in Phase 9 becomes the
+    consolidation/polish pass: it adds the remaining release-only
+    examples (`otel/`, `idempotent_consume/`, `ordered_consume/`)
+    and aligns the README quickstart links — it does not introduce
+    the checkpoint examples, which already exist on `main`. The
+    motivation is that prior iterations of this library shipped
+    examples only at release time, leaving users without a runnable
+    reference for any feature that had landed but not yet been cut.
+    See §7 "Executable examples at checkpoints" for the policy and
+    §8 Always for the enforcement bullet.

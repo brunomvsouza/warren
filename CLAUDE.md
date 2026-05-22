@@ -20,7 +20,17 @@ make test-conformance   # build tag 'conformance' (requires Docker)
 make test-all           # unit + integration + conformance
 make lint               # golangci-lint run ./...
 make mocks              # go generate ./... (gomock)
+make examples-build     # go build ./examples/... (unit lane; no broker required)
+make examples-smoke     # go test -race -tags=integration ./examples/... (requires Docker)
 ```
+
+`examples-build` and `examples-smoke` enforce SPEC §7 "Executable
+examples at checkpoints" + §10 Rev decision 49: every checkpoint
+example under `examples/<feature>/` must build on every PR and
+smoke-run end-to-end on the `integration` CI lane. The targets
+are introduced by T13b (Phase 2) and extended by every subsequent
+checkpoint task (T16b, T21b, T23b, T31b). T38 (Phase 9) wires
+them into `.github/workflows/ci.yml` as required gates.
 
 Run a single test:
 ```

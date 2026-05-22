@@ -494,6 +494,7 @@ nacks wired; emits Prometheus metrics and OTel spans; concurrency-safe.
 - **T11** `internal/confirms`: publisher-confirm tracker handling ack, nack (→ `ErrPublishNacked`), return-then-ack (→ `ErrUnroutable` **wrapped with the originating `basic.return` reply code 312/313** so `AMQPCode(err)` returns it), and channel-close (→ `ErrChannelClosed`); per-channel tracker; `multiple=true` semantics
 - **T12** `publisher.go` + `publisher_builder.go`: `PublisherFor[M]` builder (no `Immediate()` — RabbitMQ rejects it) + `Publish` (sync-confirm, concurrency-safe, channel acquired from publisher pool) + `Close(ctx)` drain
 - **T13** Mandatory + `OnReturn(Return)` with rich `ReturnedProperties` + `ConfirmTimeout` **(default 30 s)** + `PublishTimeout` (end-to-end cap including pool acquire / blocked-wait / reconnect barrier) + **`PublishBatchMaxSize`** (renamed from `PublishBatchMaxInFlight`) + `PublishRetry(p)` (retries only `IsTransient` errors, **emits `publisher_retry_total{exchange, reason}`** on each retry) + `StampUserID()` builder + **client-side `UserID` validation** in `Publish` → `ErrInvalidMessage` on divergence + **functional-options last-wins** asserted on `PublisherBuilder` (per SPEC §6.1 line 515; covers `.Metrics`/`.WithoutMetrics`/`.Tracer` chains) + `ErrUnroutable` + `ErrConfirmTimeout` + `ErrPublishNacked` + `ErrConnectionBlocked` on ctx-cancel while broker-blocked + `ErrReconnecting` on ctx-cancel while reconnect barrier holds
+- **T13b** Checkpoint example `examples/publish/main.go` (SPEC §7 + Rev decision 49): `package main` reading `AMQP_URL` env (default `amqp://guest:guest@localhost:5672/`), declaring topology in-process, demonstrating `PublisherFor[M]`, `Publish`, mandatory + `OnReturn`, `ConfirmTimeout`, and `PublishRetry`. CI: build in unit lane (`go build ./examples/...`) + smoke-run in `integration` lane against a testcontainer broker (the integration suite's existing wiring; will migrate to `amqptest.NewRabbitMQ(t)` once T37 lands).
 
 **Checkpoint Phase 2:**
 - [ ] Publish a typed message end-to-end against a testcontainer
@@ -509,6 +510,11 @@ nacks wired; emits Prometheus metrics and OTel spans; concurrency-safe.
 - [ ] Concurrent `Publish` from N goroutines on a single `Publisher[M]`
       with `Concurrency` workers: zero data races (`go test -race`),
       `goleak.VerifyNone` clean.
+- [ ] **Example(s):** `examples/publish/main.go` builds on the unit
+      lane and smoke-runs end-to-end against `amqptest.NewRabbitMQ(t)`
+      on the integration lane. Demonstrates `PublisherFor[M]`,
+      `Publish`, mandatory + `OnReturn`, `ConfirmTimeout`, and
+      `PublishRetry` per SPEC §7 "Executable examples at checkpoints".
 
 ---
 
@@ -520,6 +526,7 @@ re-declare automatically on reconnect.
 - **T14** `topology.go`: `Topology` + `Exchange`/`Queue`/`Binding` (all with `NoWait`) + `Queue.Type` (`QueueType`) + `DeadLetter` (with `MaxLengthBytes` + `Overflow`) + `OverflowPolicy` constants
 - **T15** `Topology.Declare(ctx, conn)`: **two-step pipeline** — in-memory DLX expansion (merges args into source `Queue.Args`, appends DLX exchange + `<Source>.dlq` queue) **before** any broker call; then broker-side declare in order exchanges → queues → bindings. Idempotent; `ErrTopologyMismatch` (wrapping `ErrPreconditionFailed`) on conflict; `NoWait=true` downgrades mismatch detection to async (documented)
 - **T16** `Topology.AttachTo(conn)` registers a **deep snapshot keyed by the pointer address of the input `*Topology`** (Rev 7) as a reconnect hook: `AttachTo` with the same pointer replaces the prior snapshot for that key; `AttachTo` with a different pointer appends an additional snapshot — both fire on every reconnect in registration order; redeclare runs **inside the synchronous reconnect barrier** (§6.1) before publishers resume / consumers re-`basic.consume`; persistent redeclare failure → **degraded state** with `ErrTopologyRedeclareFailed`, mandatory metric `connection_degraded_total{role, reason}`, `WithOnTopologyDegraded(func(error))` callback; `topology_redeclare_seconds{role}` histogram records the barrier duration
+- **T16b** Checkpoint examples `examples/topology/main.go` and `examples/deadletter/main.go` (SPEC §7 + Rev decision 49): both `package main` reading `AMQP_URL`. `topology/` demonstrates `Topology.Declare` (exchanges → queues → bindings), idempotent re-declare, and `AttachTo` with a forced reconnect. `deadletter/` demonstrates a `DeadLetter` entry expanding to the right `x-dead-letter-*` args + a quorum queue with `DeliveryLimit`. CI build (unit lane) + smoke-run (integration lane).
 
 **Checkpoint Phase 3:**
 - [ ] Declare same topology twice → no error, no state change.
@@ -532,6 +539,11 @@ re-declare automatically on reconnect.
       `x-max-length-bytes`, `x-overflow`.
 - [ ] `QueueTypeQuorum` declares a queue with `x-queue-type=quorum`
       visible via `rabbitmqctl list_queues name type`.
+- [ ] **Example(s):** `examples/topology/main.go` and
+      `examples/deadletter/main.go` build on the unit lane and
+      smoke-run end-to-end on the integration lane. Demonstrate
+      `Topology.Declare`, `AttachTo`, DLX expansion, and a quorum
+      queue per SPEC §7 "Executable examples at checkpoints".
 
 ---
 
@@ -549,6 +561,7 @@ infinite loops; consumer survives reconnects (re-issues
 - **T19** `ConsumerMetrics` interface + Prometheus impl + wired into `Consume`; mandatory metrics include `consumer_resubscribed_total`, `consumer_handler_aborted_channel_closed_total`, `consumer_handler_seconds` (histogram)
 - **T20** `MaxRedeliveries` enforcement: **two-counter design** with quorum-queue carve-out. (A) `x-death`-based ceiling for DLX-bounce loops (cross-process); (B) in-process counter keyed by **`(channel-instance-id, MessageID)`** for `ErrRequeue` loops (process-local, resets on consumer restart and on channel close). Either ceiling escalates to `Nack(false)` + `ErrMaxRedeliveries`. When the source queue is `QueueTypeQuorum` with `DeliveryLimit>0`, counter B is auto-disabled (broker is authoritative); metric label `cause=delivery-limit|x-death|in-process` distinguishes the three paths. Required because AMQP 0-9-1 only writes `x-death` on dead-letter events, not on `Nack(requeue=true)`
 - **T21** `ConsumeRaw(ctx, RawHandler[M])` + `Delivery.AckIf(err)`
+- **T21b** Checkpoint example `examples/consume/main.go` (SPEC §7 + Rev decision 49): `package main` reading `AMQP_URL`, declaring topology in-process, running a `ConsumerFor[M]` with a payload-first handler that demonstrates the three result classes (Ack on nil, `Nack(false)` on error, `Nack(true)` on `ErrRequeue`), `MaxRedeliveries(3)`, and `HandlerTimeout(2*time.Second)`. CI build (unit lane) + smoke-run (integration lane).
 
 **Checkpoint Phase 4:**
 - [ ] Handler returning `nil` ⇒ Ack; `errors.New("bad")` ⇒
@@ -571,6 +584,12 @@ infinite loops; consumer survives reconnects (re-issues
 - [ ] `HandlerTimeout(50ms)` with a 200ms handler: handler ctx is
       cancelled at 50ms, default verdict is `Nack(false)`, message
       goes to DLX.
+- [ ] **Example(s):** `examples/consume/main.go` builds on the unit
+      lane and smoke-runs end-to-end on the integration lane.
+      Demonstrates `ConsumerFor[M]` with a payload-first handler,
+      default `Nack(false)` on error, opt-in `ErrRequeue`,
+      `MaxRedeliveries`, and `HandlerTimeout` per SPEC §7
+      "Executable examples at checkpoints".
 
 ---
 
@@ -582,6 +601,7 @@ documented Ack/Nack-with-`multiple=true` semantics.
 
 - **T22** `Publisher.PublishBatch(ctx, []Message[M]) ([]PublishResult, error)` + `ErrPartialBatch` + **`ErrBatchTooLarge`** when the call exceeds `PublishBatchMaxSize` (default 1024). All N publishes pipeline on a **single channel** to preserve per-channel input order. Per-message failure fixture uses **client-side `ErrInvalidMessage`** (unsupported `Headers` type) so the channel stays open across the batch — body-too-large /311 would close the channel mid-batch and corrupt the always-all contract. **Documented contract:** `PublishRetry` does NOT apply to `PublishBatch`; per-message `ErrChannelClosed` cannot distinguish "broker persisted" from "broker did not receive", so retry is the caller's problem (chunking + dedupe-by-`MessageID`)
 - **T23** `batch_consumer.go` + `batch_consumer_builder.go` + concrete `Batch[M]` struct + auto-Ack/Nack with `multiple=true` on the highest delivery-tag in the batch; handler-explicit acking via `Batch.Deliveries()` suppresses the auto-verdict (idempotent guard inside `Batch`); `HandlerTimeout(d)` applies to the whole batch with default verdict `Nack(false)` on timeout
+- **T23b** Checkpoint examples `examples/batch_publish/main.go` and `examples/batch_consume/main.go` (SPEC §7 + Rev decision 49): both `package main` reading `AMQP_URL`. `batch_publish/` demonstrates `PublishBatch` always-all + `[]PublishResult` interpretation + `ErrBatchTooLarge` guard. `batch_consume/` demonstrates `BatchConsumerFor[M]` with `Size(100)` + `FlushAfter(1s)` + auto-`multiple=true` ack on nil handler return. CI build (unit lane) + smoke-run (integration lane).
 
 **Checkpoint Phase 5:**
 - [ ] `PublishBatch` of 1000 JSON messages: zero loss, single
@@ -600,6 +620,12 @@ documented Ack/Nack-with-`multiple=true` semantics.
 - [ ] Per-message benchmark report: `Publish` baseline vs
       `PublishBatch` throughput (must be at least 5× faster on local
       broker).
+- [ ] **Example(s):** `examples/batch_publish/main.go` and
+      `examples/batch_consume/main.go` build on the unit lane and
+      smoke-run end-to-end on the integration lane. Demonstrate
+      `PublishBatch` always-all + `[]PublishResult` and
+      `BatchConsumer` with `Size`/`FlushAfter` per SPEC §7
+      "Executable examples at checkpoints".
 
 ---
 
@@ -634,6 +660,7 @@ Goal: request/reply via `direct reply-to`; delayed publish via
 - **T29** `rpc.go`: `Caller[Req,Resp]` + `Call(ctx, req)` + `ErrCallTimeout` (direct reply-to: caller auto-enables no-ack, declares reply consumer before publishing) + `UseExclusiveReplyQueue()` fallback builder method
 - **T30** `rpc.go`: `Replier[Req,Resp]` + `Serve(ctx, handler)` + `OnError(func)` for error replies + **`ReplierBuilder.Topology(t)` auto-validates DLX presence on the request queue** (returns `ErrInvalidOptions` unless `AllowMissingDLX()` opts in) + mandatory metric **`replier_drop_no_dlx_total{queue}`** so the silent-drop failure mode is always observable. **At-least-once reply ordering**: handler runs → reply published → reply confirm awaited → request acked. If reply publish fails (`ErrPublishNacked`/`ErrConfirmTimeout`/`ErrChannelClosed`), request is `Nack(false)` so it goes to the request queue's DLX if configured. Crash between confirm and ack causes broker to redeliver the request, replier sends second reply — callers MUST dedupe by `CorrelationID`. Documented in godoc on `Serve`.
 - **T31** `delay.go` + `Message[M].Delay` + `Topology` support for `x-delayed-message`
+- **T31b** Checkpoint examples `examples/rpc/main.go` and `examples/delayed/main.go` (SPEC §7 + Rev decision 49): both `package main` reading `AMQP_URL`. `rpc/` demonstrates `Caller[Req,Resp]` (direct reply-to) + `Replier[Req,Resp]` with `Topology(t)` + a DLX on the request queue. `delayed/` demonstrates `Message[M].Delay = 2*time.Second` against an `ExchangeDelayed` exchange. CI build (unit lane) + smoke-run (integration lane); the `delayed/` smoke-run uses `amqptest.RequireDelayedExchange(t)` once T37 lands (skip-clean otherwise).
 
 **Checkpoint Phase 7:**
 - [ ] RPC happy path: caller gets response within 100ms locally.
@@ -641,6 +668,14 @@ Goal: request/reply via `direct reply-to`; delayed publish via
       to dead channel.
 - [ ] Delayed message: `Delay: 2 * time.Second` causes consumer to
       see message after ≥ 2s, < 2.5s.
+- [ ] **Example(s):** `examples/rpc/main.go` and
+      `examples/delayed/main.go` build on the unit lane and
+      smoke-run end-to-end on the integration lane (the delayed
+      example uses `amqptest.RequireDelayedExchange(t)` to skip
+      cleanly when the plugin is absent). Demonstrate
+      `Caller[Req,Resp]`/`Replier[Req,Resp]` and `Message[M].Delay`
+      via `x-delayed-message` per SPEC §7 "Executable examples at
+      checkpoints".
 
 ---
 
@@ -681,7 +716,17 @@ options surface, and `amqpmock/` ready for downstream tests.
 
 Goal: cut `v0.1.0`.
 
-- **T38** Examples: `publish/`, `consume/`, `batch_publish/`, `batch_consume/`, `rpc/`, `delayed/`, `deadletter/`, `topology/`, `otel/`
+- **T38** Examples consolidation/polish pass (per SPEC §7
+  "Executable examples at checkpoints" + Rev decision 49):
+  `publish/`, `consume/`, `batch_publish/`, `batch_consume/`,
+  `rpc/`, `delayed/`, `deadletter/`, `topology/` already exist on
+  `main` (landed in their respective Phase 2/3/4/5/7 checkpoints);
+  T38 adds the remaining release-only examples — `otel/`
+  (depends on Phase 6 instrumentation), polishes existing examples
+  for consistency (env-var conventions, godoc header, README
+  cross-links), and ensures every example builds on the unit lane
+  and smoke-runs on the integration lane via `examples/...`
+  targets in the CI workflow.
 - **T38b** `examples/idempotent_consume/main.go`: canonical dedupe-by-`MessageID` pattern referenced from SPEC §6.2.1; uses a bounded in-memory LRU cache; CI smoke test asserts duplicate publishes (forced via `PublishRetry`) are observed once by the handler
 - **T38c** `examples/ordered_consume/main.go`: strict per-queue ordering via `Queue.SingleActiveConsumer=true` + `Consumer[M].Concurrency(1)`; CI smoke test asserts the publish order = handler observe order across an active-consumer failover
 - **T39** README quickstart + links to every example

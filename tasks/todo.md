@@ -308,14 +308,14 @@ Publisher confirm tracker preserved across reconnects. Rev 5 adds
 - **Files:** `internal/confirms/tracker.go`, `internal/confirms/*_test.go`.
 - **Deps:** T02.
 
-### [ ] T12 — Publisher + builder (no mandatory yet) · M
+### [x] T12 — Publisher + builder (no mandatory yet) · M
 - **Acceptance:**
-  - [ ] `PublisherFor[M](conn) *PublisherBuilder[M]` with builder methods from SPEC §6.2 (excluding Mandatory/OnReturn — those are T13). **Note:** no `Immediate()` method — the flag is unsupported by RabbitMQ.
-  - [ ] `Publisher.Publish(ctx, Message[M])` is synchronous-with-confirm. **Concurrency-safe**: many goroutines may share one `*Publisher[M]`; each call acquires a channel from the publisher-conn pool with `least-in-flight` selection (see T07d), publishes, awaits its own confirm, returns the channel. Verified by a `go test -race` stress with N=64 goroutines.
-  - [ ] `Publisher.Close(ctx)` drains in-flight publishes.
-  - [ ] `PublisherMetrics` calls fire for success and error paths; `publisher_in_flight{exchange}` gauge tracks outstanding confirms.
-  - [ ] Errors from the broker are wrapped via `internal/amqperror.Wrap`, so `errors.Is(err, ErrAccessRefused)` etc. work for publish failures.
-  - [ ] `ErrChannelPoolExhausted` surfaces when ctx is cancelled waiting on a saturated pool (asserted in a unit test against T08).
+  - [x] `PublisherFor[M](conn) *PublisherBuilder[M]` with builder methods from SPEC §6.2 (excluding Mandatory/OnReturn — those are T13). **Note:** no `Immediate()` method — the flag is unsupported by RabbitMQ.
+  - [x] `Publisher.Publish(ctx, Message[M])` is synchronous-with-confirm. **Concurrency-safe**: many goroutines may share one `*Publisher[M]`; each call acquires a channel from the publisher-conn pool with `least-in-flight` selection (see T07d), publishes, awaits its own confirm, returns the channel. Verified by a `go test -race` stress with N=64 goroutines.
+  - [x] `Publisher.Close(ctx)` drains in-flight publishes.
+  - [x] `PublisherMetrics` calls fire for success and error paths; `publisher_in_flight{exchange}` gauge tracks outstanding confirms.
+  - [x] Errors from the broker are wrapped via `internal/amqperror.Wrap`, so `errors.Is(err, ErrAccessRefused)` etc. work for publish failures.
+  - [x] `ErrChannelPoolExhausted` surfaces when ctx is cancelled waiting on a saturated pool (asserted in a unit test against T08).
 - **Verify:** Integration test: publish a JSON message, fetch it via `rabbitmqadmin get`, assert body + properties (including the right `content-type` vs `content-encoding` placement). Concurrency test: 64 goroutines × 1000 publishes each = 64k publishes total, all confirmed, `go test -race` clean.
 - **Files:** `publisher.go`, `publisher_builder.go`, `publisher_test.go`, `publisher_integration_test.go`.
 - **Deps:** T07b, T07d, T08, T09, T10, T11.
@@ -357,9 +357,25 @@ mandatory metric `publisher_retry_total{exchange, reason}`.
 - **Files:** edits to `publisher.go`, `publisher_builder.go`, plus `publisher_returns_integration_test.go`, `publisher_confirm_timeout_test.go`, `publisher_blocked_integration_test.go`, `publisher_nack_integration_test.go`, `publisher_retry_test.go`, `publisher_timeout_test.go`, `publisher_userid_test.go`, `publisher_amqpcode_returns_test.go`, `publisher_retry_metric_test.go`.
 - **Deps:** T11, T12.
 
+### [ ] T13b — Checkpoint example: `examples/publish/main.go` · S
+First runnable example shipped on `main`, per SPEC §7 "Executable
+examples at checkpoints" + §10 Rev decision 49. Must land in the
+same PR (or immediately after) as T13 so the Phase 2 checkpoint
+can close.
+- **Acceptance:**
+  - [ ] `examples/publish/main.go` is `package main`, reads broker URL from `AMQP_URL` (default `amqp://guest:guest@localhost:5672/`), declares its own ad-hoc topology (one exchange + one queue + one binding) via `Topology.Declare`, and demonstrates: `PublisherFor[M]` with a concrete user-defined `Order` payload, single `Publish` with `Mandatory()` + `OnReturn` callback, `ConfirmTimeout(30*time.Second)`, and `PublishRetry(amqp.RetryPolicy{...})`. Returns non-zero exit code on any unexpected error; exits 0 on success.
+  - [ ] Top-of-file godoc block lists (a) what the example demonstrates, (b) the command to run it (`go run ./examples/publish`), (c) the env vars it reads, (d) any topology side-effects on the broker.
+  - [ ] `go build ./examples/...` is green on the unit lane (no broker required).
+  - [ ] An integration test (`examples/publish/example_integration_test.go`, build tag `integration`) spins up the same testcontainer the rest of the integration suite uses, runs the example as a subprocess (`exec.Command("go", "run", ".")`) against it with `AMQP_URL` injected, and asserts (a) exit code 0; (b) the test-side consumer attached to the example's queue receives the expected payload exactly once; (c) `goleak.VerifyNone(t)` is clean after the subprocess exits.
+  - [ ] CI workflow (`.github/workflows/ci.yml`) runs `go build ./examples/...` as a unit-lane step and the example integration tests as part of the `integration` lane. Failure in either blocks merge.
+- **Verify:** `go build ./examples/...` locally; `go test -race -tags=integration ./examples/...` against a local broker; subprocess smoke-run produces the expected message; review the godoc header for clarity.
+- **Files:** `examples/publish/main.go`, `examples/publish/example_integration_test.go`, edits to `.github/workflows/ci.yml`, `Makefile` (add `examples-build` and `examples-smoke` targets), `README.md` (link to the new example).
+- **Deps:** T13. (Strong pairing — T13b cannot close before T13.)
+
 ### Checkpoint — Phase 2 done
 - [ ] One end-to-end publish/consume-via-cli demo works.
 - [ ] Mandatory + Returns integration test green.
+- [ ] **`examples/publish/main.go` builds (unit lane) and smoke-runs end-to-end (integration lane)** per T13b — SPEC §7 + Rev decision 49.
 - [ ] **Review with human before Phase 3.**
 
 ---
@@ -431,10 +447,26 @@ integration with T07, persistent-failure degraded state.
 - **Files:** edits to `topology.go`, `topology_attach_integration_test.go`, `topology_degraded_integration_test.go`, `topology_snapshot_test.go`.
 - **Deps:** T15, T07.
 
+### [ ] T16b — Checkpoint examples: `examples/topology/main.go` + `examples/deadletter/main.go` · S
+Two examples land together (per SPEC §7 "Executable examples at
+checkpoints" + §10 Rev decision 49): one for the bare `Topology`
+flow, one for the DLX + quorum-queue flow that hardens production
+workloads.
+- **Acceptance:**
+  - [ ] `examples/topology/main.go` is `package main`, reads `AMQP_URL`, builds a `Topology` with two exchanges + three queues + four bindings, calls `Topology.Declare(ctx, conn)`, calls it again to demonstrate idempotency (no error, no broker mutation), then calls `Topology.AttachTo(conn)` and forces a reconnect via `(*Connection).ForceReconnect()`; on reconnect the redeclare callback fires and the example prints "topology re-declared" before exiting 0.
+  - [ ] `examples/deadletter/main.go` is `package main`, reads `AMQP_URL`, declares a `QueueTypeQuorum` source queue with `DeliveryLimit(3)` and a `DeadLetter{Exchange, RoutingKey, TTL, MaxLength, Overflow: OverflowRejectPublishDLX}` entry; publishes one message; runs a consumer that always errors so the message dead-letters; the example then opens an inspection consumer on the DLQ and prints the DLX-bounced payload + the `x-death` header before exiting 0.
+  - [ ] Top-of-file godoc blocks on both files follow the same shape as T13b (purpose, run command, env vars, broker side-effects).
+  - [ ] `go build ./examples/...` green on the unit lane.
+  - [ ] Integration test per example (`example_integration_test.go` in each subdir, `integration` build tag) spins up a testcontainer, runs the example as a subprocess, and asserts (a) exit 0; (b) for `topology/`: the declared queue is visible via `rabbitmqctl list_queues name arguments` after the example exits (test cleans up afterwards); (c) for `deadletter/`: a message lands in the configured DLQ and carries the expected `x-death` header; (d) `goleak.VerifyNone(t)` clean after each subprocess exits.
+- **Verify:** `go build ./examples/...`; `go test -race -tags=integration ./examples/topology/... ./examples/deadletter/...`; manual subprocess smoke-run against a local broker.
+- **Files:** `examples/topology/main.go`, `examples/topology/example_integration_test.go`, `examples/deadletter/main.go`, `examples/deadletter/example_integration_test.go`, edits to `README.md`.
+- **Deps:** T16. (`deadletter/` also depends on T15 for DLX expansion semantics — already a prerequisite of T16.)
+
 ### Checkpoint — Phase 3 done
 - [ ] Topology declare idempotent under repeat.
 - [ ] Mismatch detected and surfaced.
 - [ ] AttachTo re-declares cleanly after broker restart.
+- [ ] **`examples/topology/main.go` and `examples/deadletter/main.go` build (unit lane) and smoke-run end-to-end (integration lane)** per T16b — SPEC §7 + Rev decision 49.
 - [ ] **Review with human before Phase 4.**
 
 ---
@@ -551,10 +583,25 @@ the consumer-side counter B is auto-disabled.
 - **Files:** edits to `consumer.go`, `consumer_raw_integration_test.go`.
 - **Deps:** T18.
 
+### [ ] T21b — Checkpoint example: `examples/consume/main.go` · S
+Per SPEC §7 "Executable examples at checkpoints" + §10 Rev
+decision 49. Lands together with the rest of the Phase 4
+acceptance to close the checkpoint.
+- **Acceptance:**
+  - [ ] `examples/consume/main.go` is `package main`, reads `AMQP_URL`, declares topology in-process (one exchange + one queue + one DLX), spawns a `PublisherFor[Order]` that publishes 5 messages (good + bad + slow + transient + poison), and runs a `ConsumerFor[Order]` with `Concurrency(4)`, `Prefetch(8)`, `MaxRedeliveries(3)`, `HandlerTimeout(2*time.Second)`, and a payload-first handler that demonstrates each of the three result classes (`nil` → Ack; default error → `Nack(false)`; `errors.Join(err, ErrRequeue)` → `Nack(true)`). The example logs each verdict and exits 0 after observing the expected mix on the source + DLX queues.
+  - [ ] Top-of-file godoc block follows the T13b shape.
+  - [ ] `go build ./examples/...` green on the unit lane.
+  - [ ] Integration test (`examples/consume/example_integration_test.go`, `integration` tag) runs the example as a subprocess against a testcontainer, with `AMQP_URL` injected; asserts (a) exit 0; (b) the source queue is empty after the example exits; (c) one message is observable on the DLX queue (the always-erroring one, after `MaxRedeliveries` exhaustion); (d) `goleak.VerifyNone(t)` clean.
+  - [ ] If T21b lands before T19 (consumer metrics), the example skips the metrics assertion and the integration test marks that section as `t.Skip("metrics arrive in T19")`. (Acceptable because T19 ships in the same phase.)
+- **Verify:** `go build ./examples/...`; `go test -race -tags=integration ./examples/consume/...`; manual subprocess smoke-run.
+- **Files:** `examples/consume/main.go`, `examples/consume/example_integration_test.go`, edits to `README.md`.
+- **Deps:** T18, T20, T21. (Strong pairing — T21b cannot close until T18/T20/T21 land.)
+
 ### Checkpoint — Phase 4 done
 - [ ] Error-driven semantics validated for all three classes.
 - [ ] Poison-loop bounded.
 - [ ] Escape hatch usable for raw envelope inspection.
+- [ ] **`examples/consume/main.go` builds (unit lane) and smoke-runs end-to-end (integration lane)** per T21b — SPEC §7 + Rev decision 49.
 - [ ] **Review with human before Phase 5.**
 
 ---
@@ -606,9 +653,24 @@ Rev 5 documents the handler error semantics (auto-Ack/Nack with
 - **Files:** `batch_consumer.go`, `batch_consumer_builder.go`, `batch_consumer_integration_test.go`, `batch_consumer_autoack_test.go`.
 - **Deps:** T18.
 
+### [ ] T23b — Checkpoint examples: `examples/batch_publish/main.go` + `examples/batch_consume/main.go` · S
+Per SPEC §7 "Executable examples at checkpoints" + §10 Rev
+decision 49. Both files land in the same PR (or back-to-back PRs)
+before Phase 5 can close.
+- **Acceptance:**
+  - [ ] `examples/batch_publish/main.go` is `package main`, reads `AMQP_URL`, declares topology in-process, builds a `[]Message[Order]` of length 1000, demonstrates `PublishBatch` returning `[]PublishResult` with all-nil errors, and additionally demonstrates the `ErrBatchTooLarge` guard by attempting a batch of length 2000 against the default `PublishBatchMaxSize=1024` and printing the error class. Exits 0.
+  - [ ] `examples/batch_consume/main.go` is `package main`, reads `AMQP_URL`, runs a `BatchConsumerFor[Order]` with `Size(100)` + `FlushAfter(500*time.Millisecond)`, prints the batch size for each flush (demonstrating both flush triggers — by publishing 250 messages in two bursts, the first 200 trigger size-based flushes and the trailing 50 trigger a timer flush), and exits 0 once all 250 messages are observed.
+  - [ ] Top-of-file godoc on both files explicitly notes (per SPEC §6.2 / Rev 6 decision 43) that `PublishRetry` does NOT apply to `PublishBatch` and that consumers MUST be idempotent — a one-paragraph reminder linked to `examples/idempotent_consume/` (which lands in T38b).
+  - [ ] `go build ./examples/...` green on the unit lane.
+  - [ ] Integration test per example (`example_integration_test.go` in each subdir, `integration` tag) runs the example as a subprocess against a testcontainer; asserts exit 0; for `batch_publish/` asserts via `rabbitmqadmin get` that all 1000 messages reached the broker; for `batch_consume/` asserts the example's stdout contains both "flush-by-size" and "flush-by-timer" log lines. `goleak.VerifyNone(t)` clean.
+- **Verify:** `go build ./examples/...`; `go test -race -tags=integration ./examples/batch_publish/... ./examples/batch_consume/...`; manual subprocess smoke-run.
+- **Files:** `examples/batch_publish/main.go`, `examples/batch_publish/example_integration_test.go`, `examples/batch_consume/main.go`, `examples/batch_consume/example_integration_test.go`, edits to `README.md`.
+- **Deps:** T22, T23.
+
 ### Checkpoint — Phase 5 done
 - [ ] Bench documented: `PublishBatch` ≥ 5× `Publish` on local broker.
 - [ ] BatchConsumer flushes on both triggers.
+- [ ] **`examples/batch_publish/main.go` and `examples/batch_consume/main.go` build (unit lane) and smoke-run end-to-end (integration lane)** per T23b — SPEC §7 + Rev decision 49.
 - [ ] **Review with human before Phase 6.**
 
 ---
@@ -718,9 +780,23 @@ adds the at-least-once reply ordering contract.
 - **Integration fixture:** **`amqptest/`** (T37) — three plugin modes and `amqptest.RequireDelayedExchange(t)` per SPEC §6.9; do not add a parallel `testing/` package. If T31 lands before T37, keep delayed tests behind skip/minimal container wiring until the shared `amqptest` helper exists.
 - **Deps:** T15, T12. (Strong pairing with **T37** for the canonical broker image/plugins.)
 
+### [ ] T31b — Checkpoint examples: `examples/rpc/main.go` + `examples/delayed/main.go` · S
+Per SPEC §7 "Executable examples at checkpoints" + §10 Rev
+decision 49. Closes the Phase 7 checkpoint.
+- **Acceptance:**
+  - [ ] `examples/rpc/main.go` is `package main`, reads `AMQP_URL`, declares a request queue with a `DeadLetter` entry, runs a `ReplierFor[PriceReq, PriceResp]` with `.Topology(t)` (which auto-validates DLX presence) and `.Serve(ctx, handler)`, runs a `CallerFor[PriceReq, PriceResp]` that performs 3 concurrent `Call(ctx, req)` invocations and asserts each response matches its request via `CorrelationID`, and exits 0 after all three succeed. A negative-path block additionally demonstrates `ErrCallTimeout` by sending a request with a 50ms ctx against a handler that sleeps 200ms.
+  - [ ] `examples/delayed/main.go` is `package main`, reads `AMQP_URL`, declares an `Exchange{Kind: ExchangeDelayed, Args: amqp.Headers{"x-delayed-type": "topic"}}` + a bound queue, publishes a message with `Message[M].Delay = 2*time.Second`, runs a consumer that records the arrival time, asserts the arrival is between 2s and 2.5s of publish, and exits 0.
+  - [ ] Top-of-file godoc on `rpc/` documents the at-least-once reply ordering contract (per Rev 5 + T30) — consumers MUST dedupe by `CorrelationID`. Top-of-file godoc on `delayed/` documents the `x-delayed-message` plugin requirement and points at `amqptest.RequireDelayedExchange(t)`.
+  - [ ] `go build ./examples/...` green on the unit lane (no plugin required for build).
+  - [ ] Integration test per example (`example_integration_test.go` in each subdir, `integration` tag) runs the example as a subprocess. The `rpc/` test runs against the standard testcontainer broker. The `delayed/` test calls `amqptest.RequireDelayedExchange(t)` once T37 has landed, skipping cleanly when the plugin is unavailable; if T31b lands before T37, the `delayed/` integration test guards itself with the same env-var check (`AMQPTEST_IMAGE` / `AMQPTEST_DELAYED_PLUGIN_FILE`) and `t.Skip`s otherwise. Asserts exit 0 + the example's stdout contains the expected ordering / timing logs. `goleak.VerifyNone(t)` clean.
+- **Verify:** `go build ./examples/...`; `go test -race -tags=integration ./examples/rpc/... ./examples/delayed/...`; manual subprocess smoke-run.
+- **Files:** `examples/rpc/main.go`, `examples/rpc/example_integration_test.go`, `examples/delayed/main.go`, `examples/delayed/example_integration_test.go`, edits to `README.md`.
+- **Deps:** T29, T30, T31. (Soft pairing with T37 for the delayed-exchange plugin; not a blocker — skip-clean until T37 lands.)
+
 ### Checkpoint — Phase 7 done
 - [ ] RPC happy path + timeout green.
 - [ ] Delayed delivery within ±20% of requested delay.
+- [ ] **`examples/rpc/main.go` and `examples/delayed/main.go` build (unit lane) and smoke-run end-to-end (integration lane; `delayed/` may skip when the plugin is unavailable)** per T31b — SPEC §7 + Rev decision 49.
 - [ ] **Review with human before Phase 8.**
 
 ---
@@ -835,11 +911,23 @@ subpackage so downstream applications can reuse the fixture.
 
 ## Phase 9 — Release readiness: v0.1.0
 
-### [ ] T38 — Examples · M
-- **Acceptance:** One runnable `main.go` under each of `examples/{publish,consume,batch_publish,batch_consume,rpc,delayed,deadletter,topology,otel}/`.
-- **Verify:** CI smoke step builds and runs each example against a testcontainer RabbitMQ.
-- **Files:** `examples/*/main.go`.
-- **Deps:** Phases 1–7.
+### [ ] T38 — Examples consolidation/polish pass · M
+Per SPEC §7 "Executable examples at checkpoints" + §10 Rev
+decision 49: the checkpoint examples (`publish/`, `topology/`,
+`deadletter/`, `consume/`, `batch_publish/`, `batch_consume/`,
+`rpc/`, `delayed/`) already exist on `main` when Phase 9 starts —
+they landed in T13b / T16b / T21b / T23b / T31b. T38 is the
+consolidation/polish pass: it adds the remaining release-only
+example (`otel/`, requires Phase 6 instrumentation) and aligns
+the existing examples for consistency.
+- **Acceptance:**
+  - [ ] `examples/otel/main.go` is `package main`, reads `AMQP_URL`, wires an in-process OTel tracer (stdout exporter is fine), runs a publish → consume round-trip, and prints the publisher and consumer span IDs demonstrating trace continuity (same trace-id, parent-span-id linkage).
+  - [ ] **Consistency pass** across every `examples/*/main.go` already on disk: same env-var conventions (`AMQP_URL` default), same top-of-file godoc shape (purpose / run command / env vars / broker side-effects), same exit-code conventions (0 on success, non-zero on error), same idiomatic `log.Fatal` vs `os.Exit` choices, same `flag` package wiring where applicable. No silent reflows that change behaviour.
+  - [ ] `Makefile` targets `examples-build` and `examples-smoke` exist (added in T13b) and run the full set.
+  - [ ] CI workflow (`.github/workflows/ci.yml`) runs `make examples-build` on the unit lane and `make examples-smoke` on the integration lane — confirmed green on a clean checkout.
+- **Verify:** CI smoke step builds and runs each example against a testcontainer RabbitMQ; manual `make examples-smoke` against a local broker.
+- **Files:** `examples/otel/main.go`, `examples/otel/example_integration_test.go`, edits to `examples/*/main.go` for consistency, edits to `Makefile`, `.github/workflows/ci.yml`, `README.md`.
+- **Deps:** T13b, T16b, T21b, T23b, T27, T28, T31b. (Cannot close until OTel instrumentation from Phase 6 + every checkpoint example is on `main`.)
 
 ### [ ] T38b — `examples/idempotent_consume/` · S
 Rev 6 canonical reference for the dedupe-by-`MessageID` pattern
