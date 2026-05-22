@@ -16,17 +16,21 @@ type Delivery[M any] struct {
 	queue string
 	raw   amqp091.Delivery
 	death headers.XDeathResult
+	// done is closed by the owning Consumer[M].Close to signal consumer shutdown.
+	// Nil means the consumer lifecycle is not being tracked (e.g. in tests).
+	done <-chan struct{}
 }
 
-// NewDelivery constructs a Delivery[M] from a decoded body, the queue name,
-// and the raw amqp091.Delivery. Intended for the consumer path and tests.
-func NewDelivery[M any](body *M, queue string, d amqp091.Delivery) *Delivery[M] {
-	death := headers.ParseXDeath(amqp091.Table(d.Headers), queue)
+// newDelivery constructs a Delivery[M] from a decoded body, the queue name,
+// the raw amqp091.Delivery, and the consumer's done channel. Called by Consumer[M].
+// Pass nil for done in unit tests that do not exercise consumer-closed behaviour.
+func newDelivery[M any](body *M, queue string, d amqp091.Delivery, done <-chan struct{}) *Delivery[M] {
 	return &Delivery[M]{
 		body:  body,
 		queue: queue,
 		raw:   d,
-		death: death,
+		death: headers.ParseXDeath(d.Headers, queue),
+		done:  done,
 	}
 }
 
@@ -65,9 +69,17 @@ func (d *Delivery[M]) DeathCountByReason(reason string) int {
 // current queue. Useful for custom redelivery policies that need all reasons.
 func (d *Delivery[M]) DeathReasons() []string { return d.death.Reasons }
 
-// Ack acknowledges the delivery to the broker. Returns ErrChannelClosed if
-// the underlying channel was closed before the ack could be sent.
+// Ack acknowledges the delivery to the broker.
+// Returns ErrAlreadyClosed if the owning consumer was shut down, ErrChannelClosed
+// if the underlying channel closed before the ack reached the broker.
 func (d *Delivery[M]) Ack() error {
+	if d.done != nil {
+		select {
+		case <-d.done:
+			return ErrAlreadyClosed
+		default:
+		}
+	}
 	if err := d.raw.Ack(false); err != nil {
 		return mapAckErr(err)
 	}
@@ -75,9 +87,17 @@ func (d *Delivery[M]) Ack() error {
 }
 
 // Nack negatively acknowledges the delivery. requeue=true re-queues the message;
-// requeue=false routes it to the DLX (or drops it). Returns ErrChannelClosed if
-// the underlying channel was closed.
+// requeue=false routes it to the DLX (or drops it).
+// Returns ErrAlreadyClosed if the owning consumer was shut down, ErrChannelClosed
+// if the underlying channel closed before the nack reached the broker.
 func (d *Delivery[M]) Nack(requeue bool) error {
+	if d.done != nil {
+		select {
+		case <-d.done:
+			return ErrAlreadyClosed
+		default:
+		}
+	}
 	if err := d.raw.Nack(false, requeue); err != nil {
 		return mapAckErr(err)
 	}
