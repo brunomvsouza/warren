@@ -318,6 +318,7 @@ func TestPublisher_Publish_returnsErrChannelPoolExhausted(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrChannelPoolExhausted), "expected ErrChannelPoolExhausted, got %v", err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded), "ctx.Err() must be unwrappable from pool exhaustion error, got %v", err)
 }
 
 func TestPublisher_Publish_metricsInFlight(t *testing.T) {
