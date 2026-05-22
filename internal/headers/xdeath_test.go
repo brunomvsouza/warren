@@ -114,3 +114,29 @@ func TestParseXDeath_DeliveryLimit(t *testing.T) {
 	assert.Equal(t, 4, result.Count)
 	assert.Equal(t, []string{"delivery-limit"}, result.Reasons)
 }
+
+func TestParseXDeath_FilterMaxlen(t *testing.T) {
+	// maxlen (broker overflow policy) must be excluded from DeathCount, same as expired.
+	tbl := amqp091.Table{
+		"x-death": []any{
+			makeEntry("myqueue", "maxlen", 50),
+			makeEntry("myqueue", "rejected", 3),
+		},
+	}
+	result := headers.ParseXDeath(tbl, "myqueue")
+	assert.Equal(t, 3, result.Count)
+	assert.Equal(t, 50, result.CountByReason("maxlen"))
+	assert.Equal(t, []string{"maxlen", "rejected"}, result.Reasons)
+}
+
+func TestParseXDeath_WrongEntryType(t *testing.T) {
+	// Entries that are not amqp091.Table must be silently skipped.
+	tbl := amqp091.Table{
+		"x-death": []any{
+			"not-a-table",
+			makeEntry("myqueue", "rejected", 2),
+		},
+	}
+	result := headers.ParseXDeath(tbl, "myqueue")
+	assert.Equal(t, 2, result.Count)
+}

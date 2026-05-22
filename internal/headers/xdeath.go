@@ -38,7 +38,6 @@ func ParseXDeath(tbl amqp091.Table, queue string) XDeathResult {
 		return result
 	}
 
-	seenReasons := make(map[string]bool)
 	for _, e := range entries {
 		entry, ok := e.(amqp091.Table)
 		if !ok {
@@ -51,8 +50,7 @@ func ParseXDeath(tbl amqp091.Table, queue string) XDeathResult {
 		reason, _ := entry["reason"].(string)
 		count, _ := entry["count"].(int64)
 
-		if !seenReasons[reason] {
-			seenReasons[reason] = true
+		if _, seen := result.byReason[reason]; !seen {
 			result.Reasons = append(result.Reasons, reason)
 		}
 		result.byReason[reason] += int(count)
