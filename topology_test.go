@@ -442,3 +442,234 @@ func TestTopology_declareOnChannel_missingExchangeWrapsTopologyMismatch(t *testi
 	assert.ErrorIs(t, err, ErrTopologyMismatch)
 	assert.ErrorIs(t, err, ErrPreconditionFailed)
 }
+
+func TestTopology_declareOnChannel_queueDeclare406WrapsTopologyMismatch(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{Name: "orders", Durable: true}},
+	}
+	amqpErr := &amqp091.Error{Code: 406, Reason: "PRECONDITION_FAILED"}
+	rec := &declareRecorder{err: amqpErr}
+	err := declareOnChannel(topo, rec)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTopologyMismatch)
+	assert.ErrorIs(t, err, ErrPreconditionFailed)
+}
+
+func TestTopology_declareOnChannel_queueBind406WrapsTopologyMismatch(t *testing.T) {
+	topo := &Topology{
+		Bindings: []Binding{{Exchange: "events", Queue: "orders", RoutingKey: "order.#"}},
+	}
+	amqpErr := &amqp091.Error{Code: 406, Reason: "PRECONDITION_FAILED"}
+	rec := &declareRecorder{err: amqpErr}
+	err := declareOnChannel(topo, rec)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTopologyMismatch)
+	assert.ErrorIs(t, err, ErrPreconditionFailed)
+}
+
+func TestTopology_declareOnChannel_non406ErrorNotMismatch(t *testing.T) {
+	topo := &Topology{
+		Exchanges: []Exchange{{Name: "events", Kind: ExchangeTopic}},
+	}
+	amqpErr := &amqp091.Error{Code: 404, Reason: "NOT_FOUND"}
+	rec := &declareRecorder{err: amqpErr}
+	err := declareOnChannel(topo, rec)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotFound, "404 must wrap ErrNotFound, not ErrTopologyMismatch")
+	assert.NotErrorIs(t, err, ErrTopologyMismatch, "non-406 error must not be wrapped as ErrTopologyMismatch")
+}
+
+func TestTopology_declareOnChannel_emptyTopologyNoError(t *testing.T) {
+	topo := &Topology{}
+	rec := &declareRecorder{}
+	err := declareOnChannel(topo, rec)
+	require.NoError(t, err)
+	assert.Empty(t, rec.calls, "empty topology must emit zero declare calls")
+}
+
+func TestTopology_declareOnChannel_onlyExchanges(t *testing.T) {
+	topo := &Topology{
+		Exchanges: []Exchange{{Name: "events", Kind: ExchangeTopic, Durable: true}},
+	}
+	rec := &declareRecorder{}
+	require.NoError(t, declareOnChannel(topo, rec))
+	require.Len(t, rec.calls, 1)
+	assert.Equal(t, "exchange:events", rec.calls[0])
+}
+
+func TestTopology_declareOnChannel_onlyQueues(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{Name: "orders", Durable: true}},
+	}
+	rec := &declareRecorder{}
+	require.NoError(t, declareOnChannel(topo, rec))
+	require.Len(t, rec.calls, 1)
+	assert.Equal(t, "queue:orders", rec.calls[0])
+}
+
+// — T15: validate — additional rules —————————————————————————————————————
+
+func TestTopology_validate_unknownExchangeKind(t *testing.T) {
+	topo := &Topology{
+		Exchanges: []Exchange{{Name: "ev", Kind: ExchangeKind("x-bogus")}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestTopology_validate_emptyExchangeKind(t *testing.T) {
+	topo := &Topology{
+		Exchanges: []Exchange{{Name: "ev", Kind: ""}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestTopology_validate_unknownQueueType(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{Name: "q", Type: QueueType("super-queue")}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestTopology_validate_maxPriorityNegative(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{Name: "q", MaxPriority: -1}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestTopology_validate_streamWithDeadLetter(t *testing.T) {
+	topo := &Topology{
+		Queues:      []Queue{{Name: "stream.q", Type: QueueTypeStream, Durable: true}},
+		DeadLetters: []DeadLetter{{Source: "stream.q"}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestTopology_validate_unknownOverflowPolicy(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{Name: "q", Durable: true}},
+		DeadLetters: []DeadLetter{
+			{Source: "q", Overflow: OverflowPolicy("drop-all")},
+		},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+// — T15: expand — additional coverage —————————————————————————————————————
+
+func TestTopology_expand_dlxSkipsUnknownSource(t *testing.T) {
+	topo := &Topology{
+		Queues:      []Queue{{Name: "orders", Durable: true}},
+		DeadLetters: []DeadLetter{{Source: "payments"}}, // not in Queues
+	}
+	expanded := topo.expand()
+	require.Len(t, expanded.Queues, 1, "unknown source must not append DLQ")
+	assert.Nil(t, expanded.Queues[0].Args, "unknown source must not inject args into any queue")
+	assert.Empty(t, expanded.Exchanges, "unknown source must not append DLX exchange")
+}
+
+func TestTopology_expand_exchangeArgsMutationDoesNotAffectSnapshot(t *testing.T) {
+	args := map[string]any{"x-custom": "val"}
+	topo := &Topology{
+		Exchanges: []Exchange{{Name: "ev", Kind: ExchangeTopic, Args: args}},
+	}
+	expanded := topo.expand()
+	expanded.Exchanges[0].Args["x-custom"] = "mutated"
+	assert.Equal(t, "val", args["x-custom"], "mutation in expanded copy must not affect original args map")
+}
+
+func TestTopology_expand_bindingArgsMutationDoesNotAffectSnapshot(t *testing.T) {
+	args := map[string]any{"x-match": "all"}
+	topo := &Topology{
+		Bindings: []Binding{{Exchange: "ev", Queue: "q", Args: args}},
+	}
+	expanded := topo.expand()
+	expanded.Bindings[0].Args["x-match"] = "any"
+	assert.Equal(t, "all", args["x-match"], "mutation in expanded copy must not affect original args map")
+}
+
+func TestTopology_expand_nestedArgsAreCopiedRecursively(t *testing.T) {
+	nested := map[string]any{"type": "order"}
+	topo := &Topology{
+		Queues: []Queue{{Name: "q", Args: map[string]any{"inner": nested}}},
+	}
+	expanded := topo.expand()
+	// Mutate the nested map in the expanded snapshot.
+	expandedInner := expanded.Queues[0].Args["inner"].(map[string]any)
+	expandedInner["type"] = "mutated"
+	assert.Equal(t, "order", nested["type"], "recursive copy must isolate nested maps")
+}
+
+func TestTopology_expand_multipleDeadLetters(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{
+			{Name: "payments", Durable: true},
+			{Name: "orders", Durable: true},
+		},
+		DeadLetters: []DeadLetter{
+			{Source: "payments", Exchange: "payments.dlx"},
+			{Source: "orders", Exchange: "orders.dlx"},
+		},
+	}
+	expanded := topo.expand()
+
+	exchNames := make(map[string]struct{})
+	for _, e := range expanded.Exchanges {
+		exchNames[e.Name] = struct{}{}
+	}
+	assert.Contains(t, exchNames, "payments.dlx", "payments DLX must be present")
+	assert.Contains(t, exchNames, "orders.dlx", "orders DLX must be present")
+
+	queueArgs := make(map[string]map[string]any)
+	for _, q := range expanded.Queues {
+		queueArgs[q.Name] = q.Args
+	}
+	assert.Equal(t, "payments.dlx", queueArgs["payments"]["x-dead-letter-exchange"])
+	assert.Equal(t, "orders.dlx", queueArgs["orders"]["x-dead-letter-exchange"])
+}
+
+func TestTopology_expand_dlxMergesIntoPrePopulatedQueueArgs(t *testing.T) {
+	topo := &Topology{
+		Queues:      []Queue{{Name: "orders", Args: map[string]any{"x-custom": "val"}}},
+		DeadLetters: []DeadLetter{{Source: "orders", Exchange: "orders.dlx"}},
+	}
+	expanded := topo.expand()
+	args := expanded.Queues[0].Args
+	assert.Equal(t, "val", args["x-custom"], "pre-existing args must survive DLX merge")
+	assert.Equal(t, "orders.dlx", args["x-dead-letter-exchange"], "DLX arg must be injected")
+}
+
+// — copyArgs unit test ————————————————————————————————————————————————————
+
+func TestCopyArgs_isolatesTopLevelKeys(t *testing.T) {
+	src := map[string]any{"k": "v"}
+	dst := copyArgs(src)
+	dst["k"] = "changed"
+	assert.Equal(t, "v", src["k"], "mutation of dst must not affect src")
+}
+
+func TestCopyArgs_isolatesNestedMaps(t *testing.T) {
+	nested := map[string]any{"inner": "val"}
+	src := map[string]any{"n": nested}
+	dst := copyArgs(src)
+	dst["n"].(map[string]any)["inner"] = "changed"
+	assert.Equal(t, "val", nested["inner"], "mutation of dst nested map must not affect src")
+}
+
+func TestCopyArgs_emptyMap(t *testing.T) {
+	dst := copyArgs(map[string]any{})
+	assert.Empty(t, dst)
+	assert.NotNil(t, dst)
+}

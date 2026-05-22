@@ -55,6 +55,10 @@ type managedConn struct {
 	wg sync.WaitGroup
 
 	opts *connOptions // shared with parent Connection; read-only after Dial
+
+	// chanFactory, if non-nil, replaces the real amqp091 channel open in openChannel.
+	// Used only in unit tests that inject a fake channel to avoid a live broker.
+	chanFactory func() (topologyChannel, error)
 }
 
 // — Connection ————————————————————————————————————————————————————————————
@@ -81,9 +85,9 @@ type Connection struct {
 
 	// topology snapshot registry — keyed by *Topology pointer identity (see AttachTo)
 	topoMu     sync.RWMutex
-	topoKeys   []*Topology            // registration order (for deterministic redeclare)
+	topoKeys   []*Topology             // registration order (for deterministic redeclare)
 	topoSnaps  map[*Topology]*Topology // original ptr → deep-expanded snapshot
-	topoHooked bool                   // true once the redeclare hook has been registered
+	topoHooked bool                    // true once the redeclare hook has been registered
 }
 
 // Dial establishes a supervised pool of AMQP connections and returns the
@@ -322,6 +326,9 @@ func (mc *managedConn) registerHook(fn func(ctx context.Context) error) {
 // openChannel opens a temporary AMQP channel on this managed connection.
 // The caller is responsible for closing the returned channel.
 func (mc *managedConn) openChannel() (topologyChannel, error) {
+	if mc.chanFactory != nil {
+		return mc.chanFactory()
+	}
 	mc.mu.RLock()
 	raw := mc.raw
 	mc.mu.RUnlock()

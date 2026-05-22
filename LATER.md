@@ -254,3 +254,77 @@ Alternativamente, usar um tipo de erro estruturado para `ErrChannelPoolExhausted
 
 **Pré-requisitos:** T13 (PublishRetry). Atacar este item antes de implementar PublishRetry para
 evitar que o loop de retry seja liberado com semântica incorreta.
+
+---
+
+### LATER-08 — CI actions pinadas em tags semver mutáveis
+
+**Contexto:** `.github/workflows/ci.yml` — `actions/checkout@v6`, `actions/setup-go@v6`,
+`golangci/golangci-lint-action@v9` usam tags semver que podem ser force-pushed por um maintainer
+comprometido, injetando código malicioso no contexto do workflow com acesso ao `GITHUB_TOKEN`.
+
+**Impacto:** Risco de supply chain no CI. Baixo agora (sem secrets críticos além do token de
+leitura), mas se torna crítico quando tokens de publicação (pkg.go.dev, GitHub Packages) forem
+adicionados.
+
+**Evidência:** `/ship` review de T15/T16 — security-auditor (Low).
+
+**Sugestão de solução:** Fixar cada action ao SHA imutável do commit com comentário do semver:
+```yaml
+- uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+```
+
+**Pré-requisitos:** Nenhum. Tarefa standalone de hardening de CI.
+
+---
+
+### LATER-09 — `golangci-lint-action` usa `version: latest` — builds não-determinísticos
+
+**Contexto:** `.github/workflows/ci.yml:33` — `version: latest` baixa a versão mais recente do
+linter a cada execução. Uma nova release pode introduzir regras que quebram o CI de forma
+imprevisível, ou regredir regras de segurança (`gosec`, `errcheck`) silenciosamente.
+
+**Impacto:** CI não-reproduzível; regras de lint auditáveis podem mudar sem rastreabilidade.
+
+**Evidência:** `/ship` review de T15/T16 — security-auditor (Low).
+
+**Sugestão de solução:** Fixar em versão específica: `version: v1.64.x` (ou versão corrente) e
+atualizar deliberadamente via commit dedicado.
+
+**Pré-requisitos:** LATER-08 (fixar SHAs é o passo natural para consolidar ambos numa única PR).
+
+---
+
+### LATER-10 — Imagem RabbitMQ com tag flutuante no CI de integração
+
+**Contexto:** `.github/workflows/ci.yml:43` — `rabbitmq:3-management` é uma tag mutável no
+Docker Hub. Um push malicioso para a tag pode injetar uma imagem comprometida que rode no
+runner de CI.
+
+**Impacto:** CI não-reproduzível; testes de integração podem quebrar por mudança de comportamento
+do broker sem aviso; risco teórico de supply chain.
+
+**Evidência:** `/ship` review de T15/T16 — security-auditor (Low).
+
+**Sugestão de solução:** Fixar em digest imutável ou ao menos em minor tag:
+`rabbitmq:3.13-management`.
+
+**Pré-requisitos:** LATER-08.
+
+---
+
+### LATER-11 — `registerReconnectHook` em `connection.go` sem chamadores diretos
+
+**Contexto:** `connection.go:308` — `Connection.registerReconnectHook` foi adicionado como API
+interna para `Topology.AttachTo` e `Consumer` (T18), mas `AttachTo` itera `pubConns`/`conConns`
+diretamente e não usa esta função. Com isso, a função está em 0% de cobertura e sem chamadores.
+
+**Impacto:** Dead code que confunde futuros leitores sobre o padrão de registro de hooks.
+
+**Evidência:** `/ship` review de T15/T16 — code-reviewer (Suggestion).
+
+**Sugestão de solução:** Quando Consumer (T18) for implementado, verificar se `registerReconnectHook`
+é o ponto de entrada correto. Se Consumer também iterar diretamente, remover a função. Se Consumer
+a usa, manter e adicionar cobertura.
+
+**Pré-requisitos:** T18 (Consumer re-subscribe hooks).
