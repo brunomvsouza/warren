@@ -1,4 +1,4 @@
-package amqp_test
+package warren_test
 
 import (
 	"testing"
@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	amqp "github.com/brunomvsouza/amqp"
+	amqp "github.com/brunomvsouza/warren"
 )
 
 func TestRetryPolicy_defaultsApplied(t *testing.T) {

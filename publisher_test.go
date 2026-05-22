@@ -1,4 +1,4 @@
-package amqp
+package warren
 
 import (
 	"context"
@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	"github.com/brunomvsouza/amqp/codec"
-	"github.com/brunomvsouza/amqp/internal/confirms"
-	"github.com/brunomvsouza/amqp/metrics"
+	"github.com/brunomvsouza/warren/codec"
+	"github.com/brunomvsouza/warren/internal/confirms"
+	"github.com/brunomvsouza/warren/metrics"
 )
 
 // — fake pub channel —————————————————————————————————————————————————————

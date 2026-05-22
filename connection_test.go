@@ -1,4 +1,4 @@
-package amqp_test
+package warren_test
 
 import (
 	"context"
@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	amqp "github.com/brunomvsouza/amqp"
+	amqp "github.com/brunomvsouza/warren"
 )
 
 // selfSignedCert creates a self-signed TLS certificate with the given CN.

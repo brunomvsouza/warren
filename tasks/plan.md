@@ -7,7 +7,7 @@
 
 ## Overview
 
-Implement the v1 surface of `github.com/brunomvsouza/amqp` defined in
+Implement the v1 surface of `github.com/brunomvsouza/warren` defined in
 `SPEC.md` §6, sliced vertically so every phase ends in a state that
 compiles, has passing tests, and demonstrates a usable end-to-end path.
 First public tag is `v0.1.0`; `v1.0.0` is cut only after every success

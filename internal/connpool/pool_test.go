@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/brunomvsouza/amqp/internal/connpool"
+	"github.com/brunomvsouza/warren/internal/connpool"
 )
 
 // — PinIndex ——————————————————————————————————————————————————————————————

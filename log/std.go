@@ -4,7 +4,7 @@ import (
 	"fmt"
 	stdlog "log"
 
-	"github.com/brunomvsouza/amqp/internal/redact"
+	"github.com/brunomvsouza/warren/internal/redact"
 )
 
 // stdLogger wraps a *log.Logger, routing every message through

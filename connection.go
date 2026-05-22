@@ -1,4 +1,4 @@
-package amqp
+package warren
 
 import (
 	"context"
@@ -12,12 +12,12 @@ import (
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
-	"github.com/brunomvsouza/amqp/internal/connpool"
-	"github.com/brunomvsouza/amqp/internal/reconnect"
-	"github.com/brunomvsouza/amqp/internal/redact"
-	"github.com/brunomvsouza/amqp/log"
-	"github.com/brunomvsouza/amqp/metrics"
-	"github.com/brunomvsouza/amqp/otel"
+	"github.com/brunomvsouza/warren/internal/connpool"
+	"github.com/brunomvsouza/warren/internal/reconnect"
+	"github.com/brunomvsouza/warren/internal/redact"
+	"github.com/brunomvsouza/warren/log"
+	"github.com/brunomvsouza/warren/metrics"
+	"github.com/brunomvsouza/warren/otel"
 )
 
 // — per-socket supervision ————————————————————————————————————————————————

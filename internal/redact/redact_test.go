@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/brunomvsouza/amqp/internal/redact"
+	"github.com/brunomvsouza/warren/internal/redact"
 )
 
 // taggedErr is a test-only error type used to verify errors.As traversal

@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/brunomvsouza/amqp/internal/redact"
+	"github.com/brunomvsouza/warren/internal/redact"
 )
 
 // hasCredentials matches any URI-like string that still contains user:pass@ after redaction.

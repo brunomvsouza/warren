@@ -1,4 +1,4 @@
-package amqp
+package warren
 
 import (
 	"crypto/tls"
@@ -7,9 +7,9 @@ import (
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
-	"github.com/brunomvsouza/amqp/log"
-	"github.com/brunomvsouza/amqp/metrics"
-	"github.com/brunomvsouza/amqp/otel"
+	"github.com/brunomvsouza/warren/log"
+	"github.com/brunomvsouza/warren/metrics"
+	"github.com/brunomvsouza/warren/otel"
 )
 
 // connOptions holds the resolved settings for a Connection after all Option

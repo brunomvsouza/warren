@@ -1,4 +1,4 @@
-// Package amqp is a modern, ergonomic Go client for AMQP 0-9-1 (RabbitMQ).
+// Package warren is a modern, ergonomic Go client for AMQP 0-9-1 (RabbitMQ).
 //
 // It wraps github.com/rabbitmq/amqp091-go with a generics-based, type-safe
 // API that handles the production-grade concerns every team rebuilds on top
@@ -9,4 +9,4 @@
 // consume and publish, dead-letter routing).
 //
 // See SPEC.md in the repository root for the complete public API surface.
-package amqp
+package warren

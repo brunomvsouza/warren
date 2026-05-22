@@ -1,4 +1,4 @@
-package amqp
+package warren
 
 import (
 	"fmt"
@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brunomvsouza/amqp/codec"
+	"github.com/brunomvsouza/warren/codec"
 )
 
 // Message is a typed AMQP message. M is the payload type; Body holds a pointer

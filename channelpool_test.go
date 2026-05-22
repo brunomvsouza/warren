@@ -1,7 +1,7 @@
-package amqp
+package warren
 
 // White-box tests for the channelPool (T08).
-// Package amqp (not amqp_test) to access the unexported type.
+// Package warren (not amqp_test) to access the unexported type.
 
 import (
 	"context"
