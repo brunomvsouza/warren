@@ -217,3 +217,40 @@ poderiam não ser detectados antes de chegar em produção. O valor principal do
 - `FuzzCodecJSONLax` existe e cobre o caminho permissivo.
 - Seeds adversariais adicionados ao corpus de ambos os targets.
 - `go test -fuzz=FuzzCodecJSON -fuzztime=60s ./codec` e o equivalente lax passam sem panics.
+
+---
+
+### LATER-07 — `IsTransient` retorna `true` para `ErrChannelPoolExhausted` mesmo em cancelamento voluntário
+
+**Contexto:** `errors.go:IsTransient` — a função verifica `errors.Is(err, ErrChannelPoolExhausted)` para
+classificar o erro como transiente (re-tentável). Após o fix em T12, `acquire` retorna
+`fmt.Errorf("%w: %w", ErrChannelPoolExhausted, ctx.Err())` quando o ctx dispara antes de um token
+estar disponível. Isso significa que um cancelamento explícito (`context.Canceled`) também satisfaz
+`IsTransient`, incentivando retry loops a re-tentarem contra um contexto já morto.
+
+**Impacto:** Quando `PublishRetry` for implementado (T13+), um retry automático baseado em
+`IsTransient` vai re-tentar a publicação mesmo quando o chamador cancelou o contexto
+intencionalmente (ex.: shutdown de serviço, request HTTP cancelado pelo cliente). A re-tentativa
+falha imediatamente em `waitBarrier` com `context.Canceled`, mas desperdiça uma iteração do loop
+e ofusca a causa real da falha nos logs e métricas.
+
+**Evidência:** `/ship` code-review + security-auditor — T12 review-fix (2026-05-22).
+
+**Sugestão de solução:**
+
+Em `IsTransient`, adicionar uma guarda antes de classificar `ErrChannelPoolExhausted` como
+transiente: retornar `false` se o erro também satisfaz `context.Canceled`, pois cancelamentos
+voluntários nunca são re-tentáveis:
+
+```go
+if errors.Is(err, ErrChannelPoolExhausted) {
+    return !errors.Is(err, context.Canceled)
+}
+```
+
+Alternativamente, usar um tipo de erro estruturado para `ErrChannelPoolExhausted` que carregue
+`ctxErr error` como campo, permitindo que `IsTransient` inspecione a causa sem depender de
+`errors.Is` em cadeia.
+
+**Pré-requisitos:** T13 (PublishRetry). Atacar este item antes de implementar PublishRetry para
+evitar que o loop de retry seja liberado com semântica incorreta.

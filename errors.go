@@ -20,7 +20,11 @@ var (
 	ErrChannelClosed = errors.New("amqp: channel closed")
 	// ErrConnectionBlocked is returned when the broker blocks the connection due to a memory or disk alarm.
 	ErrConnectionBlocked = errors.New("amqp: connection blocked by broker")
-	// ErrChannelPoolExhausted is returned when all pooled channels are in-flight and the context is cancelled. Transient.
+	// ErrChannelPoolExhausted is returned when ctx is cancelled before a semaphore
+	// token becomes available. It wraps ctx.Err() so callers can distinguish a
+	// voluntary cancellation (context.Canceled) from a deadline (context.DeadlineExceeded)
+	// via errors.Is. Note: IsTransient returns true for this error regardless of the
+	// underlying ctx.Err() — see LATER-07 for the planned fix when PublishRetry is added.
 	ErrChannelPoolExhausted = errors.New("amqp: channel pool exhausted")
 
 	// Publisher errors.
