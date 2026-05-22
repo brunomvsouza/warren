@@ -502,6 +502,8 @@ func TestPublisher_Publish_returnsErrConfirmTimeout(t *testing.T) {
 func TestPublisher_Publish_returnsErrUnroutable(t *testing.T) {
 	// Use a fresh pool wired directly to a tracker we control so we can call
 	// MarkReturned before the ack arrives (wireFakePool hides the tracker).
+	defer goleak.VerifyNone(t)
+
 	tracker := confirms.New()
 	confirmCh := make(chan amqp091.Confirmation, 4)
 	fake2 := newFakePubCh(false)
@@ -521,6 +523,7 @@ func TestPublisher_Publish_returnsErrUnroutable(t *testing.T) {
 		}
 		tracker.CloseAll()
 	}()
+	defer func() { _ = fake2.Close(); <-done }()
 
 	pool2 := newPublisherConnPool(1, func() (publisherEntry, error) {
 		return publisherEntry{ch: fake2, tracker: tracker, closeCh: fake2.closedCh}, nil
@@ -542,9 +545,6 @@ func TestPublisher_Publish_returnsErrUnroutable(t *testing.T) {
 	err := pub2.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrUnroutable), "expected ErrUnroutable, got %v", err)
-
-	_ = fake2.Close()
-	<-done
 }
 
 func TestPublisher_Publish_returnsErrInvalidMessage_onEncodeFailure(t *testing.T) {
