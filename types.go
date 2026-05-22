@@ -1,5 +1,7 @@
 package amqp
 
+import "time"
+
 // Headers is an AMQP field-table. Values must be one of the types supported by
 // the amqp091-go encoder: bool, byte, int16, int32, int64, float32, float64,
 // string, []byte, Decimal, time.Time, map[string]any, []any, or nil.
@@ -72,6 +74,38 @@ const (
 	// SASLExternal authenticates via TLS client certificate; requires amqps:// and a client cert.
 	SASLExternal SASLMechanism = "EXTERNAL"
 )
+
+// ReturnedProperties mirrors the 13 AMQP basic.properties fields carried in a
+// basic.return frame. It has the same semantics as the corresponding Message[M]
+// fields; see those godoc entries for value constraints.
+type ReturnedProperties struct {
+	ContentType     string
+	ContentEncoding string
+	Headers         Headers
+	DeliveryMode    DeliveryMode
+	Priority        uint8
+	CorrelationID   string
+	ReplyTo         string
+	// Expiration is the per-message TTL encoded as milliseconds in the wire
+	// frame. Zero means no per-message TTL was set.
+	Expiration time.Duration
+	MessageID  string
+	Timestamp  time.Time
+	Type       string
+	UserID     string
+	AppID      string
+}
+
+// Return carries the broker's basic.return frame for a mandatory publish that
+// could not be routed to any queue. OnReturn callbacks receive this value
+// synchronously before the corresponding Publish call unblocks.
+type Return struct {
+	ReplyCode  uint16
+	ReplyText  string
+	Exchange   string
+	RoutingKey string
+	Properties ReturnedProperties
+}
 
 // TimeoutVerdict decides the ack/nack action when a handler exceeds its
 // HandlerTimeout. The zero value is TimeoutNackNoRequeue so that a
