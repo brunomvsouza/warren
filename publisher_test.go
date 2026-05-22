@@ -321,6 +321,45 @@ func TestPublisher_Publish_returnsErrChannelPoolExhausted(t *testing.T) {
 	assert.True(t, errors.Is(err, context.DeadlineExceeded), "ctx.Err() must be unwrappable from pool exhaustion error, got %v", err)
 }
 
+func TestPublisherConnPool_acquire_wrapsContextCanceledInPoolExhausted(t *testing.T) {
+	// Verify that explicit context cancellation (not timeout) is also wrapped inside
+	// ErrChannelPoolExhausted so callers can distinguish via errors.Is.
+	fake := newFakePubCh(false)
+	pool, stopPool := wireFakePool(fake)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+
+	blockRelease := make(chan struct{})
+	released := make(chan struct{})
+
+	started := make(chan struct{})
+	go func() {
+		entry, release, err := pool.acquire(context.Background())
+		if err != nil {
+			close(started)
+			return
+		}
+		close(started)
+		<-blockRelease
+		release()
+		_ = entry
+		close(released)
+	}()
+	<-started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // explicit cancel, not a deadline
+
+	_, _, err := pool.acquire(ctx)
+
+	close(blockRelease)
+	<-released
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrChannelPoolExhausted), "expected ErrChannelPoolExhausted, got %v", err)
+	assert.True(t, errors.Is(err, context.Canceled), "ctx.Err() must be unwrappable (context.Canceled), got %v", err)
+}
+
 func TestPublisher_Publish_metricsInFlight(t *testing.T) {
 	fake := newFakePubCh(true)
 	pm := &capturePublisherMetrics{}
