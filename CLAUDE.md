@@ -93,6 +93,19 @@ The v1 surface deliberately breaks from prior iterations of the same library. De
 
 When asked to design or change public API: prefer protocol fidelity (surface real AMQP primitives) and ease of use over preserving the prior library's decisions. Challenge any spec point that contradicts those two north stars.
 
+## Deferred improvements — LATER.md
+
+`LATER.md` is the single place for improvements that were consciously deferred during a task or `/ship` review. It is **not** a backlog of bugs — only findings that are not blockers and not worth fixing in the current PR.
+
+Rules:
+- **Write to LATER.md** when a `/ship` review, security audit, or test-coverage gap identifies a non-blocking finding that should be tracked for future attention.
+- **Do not fix LATER.md items inline** in an unrelated task. If an item becomes urgent, convert it to a formal task in `tasks/plan.md` + `tasks/todo.md` first, then implement it.
+- **Each entry must follow the format** defined at the top of `LATER.md`: title, context (file:line), impact, evidence (which review/task), suggested solution, prerequisites.
+- **Number entries sequentially** (`LATER-NN`). Do not reuse numbers.
+- **Remove an entry** when its corresponding fix is committed, updating the entry's task number in the commit message.
+
+When running `/ship` and the decision is NO-GO, fix the blockers, then move non-blocker findings to LATER.md rather than leaving them as open review comments.
+
 ## Working style
 
 The project uses TDD + incremental implementation as a hard discipline (see `.cursor/rules/`). For any behavior change: write the failing test first, then the smallest implementation. For multi-file features: ship in vertical slices, each leaving the tree green. Each task in `tasks/plan.md` has explicit acceptance criteria — treat them as the test list.
