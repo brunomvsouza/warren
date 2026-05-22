@@ -63,7 +63,7 @@ func newPublisherConnPool(size int, openFn func() (publisherEntry, error)) *publ
 func (p *publisherConnPool) acquire(ctx context.Context) (publisherEntry, func(), error) {
 	select {
 	case <-ctx.Done():
-		return publisherEntry{}, nil, ErrChannelPoolExhausted
+		return publisherEntry{}, nil, fmt.Errorf("%w: %w", ErrChannelPoolExhausted, ctx.Err())
 	case <-p.tokens:
 	}
 
