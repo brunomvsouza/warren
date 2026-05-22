@@ -98,8 +98,8 @@ func TestWrap_AMQPCodeExtraction(t *testing.T) {
 // — Wrap: IsTransient / IsPermanent classifiers work on wrapped errors ————
 
 func TestWrap_classifiers(t *testing.T) {
-	transientCodes := []uint16{311, 320, 504, 541}
-	permanentCodes := []uint16{402, 403, 404, 405, 406, 501, 502, 503, 505, 506, 530, 540}
+	transientCodes := []uint16{320, 504, 541}
+	permanentCodes := []uint16{311, 402, 403, 404, 405, 406, 501, 502, 503, 505, 506, 530, 540}
 
 	for _, code := range transientCodes {
 		t.Run(fmt.Sprintf("transient_%d", code), func(t *testing.T) {

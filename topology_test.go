@@ -2,7 +2,6 @@ package amqp
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -153,23 +152,64 @@ func TestTopology_validate_duplicateExchangeNames(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidOptions)
 }
 
-// — T14: DeadLetter struct ——————————————————————————————————————————————————
+// — T14: DeadLetter validation ————————————————————————————————————————————
 
-func TestDeadLetter_fields(t *testing.T) {
-	dl := DeadLetter{
-		Source:         "orders",
-		Exchange:       "orders.dlx",
-		RoutingKey:     "dead",
-		TTL:            time.Minute,
-		MaxLength:      100,
-		MaxLengthBytes: 1024 * 1024,
-		Overflow:       OverflowRejectPublish,
+func TestTopology_validate_emptyDeadLetterSource(t *testing.T) {
+	topo := &Topology{
+		DeadLetters: []DeadLetter{{Source: ""}},
 	}
-	assert.Equal(t, "orders", dl.Source)
-	assert.Equal(t, "orders.dlx", dl.Exchange)
-	assert.Equal(t, "dead", dl.RoutingKey)
-	assert.Equal(t, time.Minute, dl.TTL)
-	assert.Equal(t, 100, dl.MaxLength)
-	assert.Equal(t, 1024*1024, dl.MaxLengthBytes)
-	assert.Equal(t, OverflowRejectPublish, dl.Overflow)
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestTopology_validate_deadLetterSourceAllowed(t *testing.T) {
+	topo := &Topology{
+		DeadLetters: []DeadLetter{{Source: "orders"}},
+	}
+	require.NoError(t, topo.validate())
+}
+
+// — T14: Queue.MaxPriority validation —————————————————————————————————————
+
+func TestTopology_validate_maxPriorityOnQuorum(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{Name: "q", Type: QueueTypeQuorum, MaxPriority: 5}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestTopology_validate_maxPriorityOnStream(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{Name: "q", Type: QueueTypeStream, MaxPriority: 5}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestTopology_validate_maxPriorityOnClassicAllowed(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{Name: "q", Type: QueueTypeClassic, MaxPriority: 5}},
+	}
+	require.NoError(t, topo.validate())
+}
+
+func TestTopology_validate_maxPriorityOnDefaultTypeAllowed(t *testing.T) {
+	// Empty Type means classic (broker default); MaxPriority is allowed.
+	topo := &Topology{
+		Queues: []Queue{{Name: "q", MaxPriority: 5}},
+	}
+	require.NoError(t, topo.validate())
+}
+
+func TestTopology_validate_maxPriorityOutOfRange(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{Name: "q", MaxPriority: 256}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
 }

@@ -187,7 +187,11 @@ func AMQPCode(err error) (uint16, bool) {
 // IsTransient reports whether err is classified as retryable.
 // True for: ErrTransient wraps; ErrChannelPoolExhausted; ErrPublishNacked;
 // ErrConnectionBlocked; ErrConfirmTimeout; ErrChannelClosed; ErrReconnecting;
-// AMQP codes 311, 320, 504, 541.
+// AMQP codes 320, 504, 541.
+//
+// Note on ErrContentTooLarge (311): NOT transient. A payload that exceeds
+// frame-max will fail on every retry unchanged — retrying it burns connections
+// without any chance of success.
 //
 // Note on ErrResourceError (506): NOT transient by default — see its godoc.
 func IsTransient(err error) bool {
@@ -204,7 +208,6 @@ func IsTransient(err error) bool {
 		ErrConfirmTimeout,
 		ErrChannelClosed,
 		ErrReconnecting,
-		ErrContentTooLarge,  // 311
 		ErrConnectionForced, // 320
 		ErrChannelError,     // 504
 		ErrInternalError,    // 541
@@ -218,7 +221,7 @@ func IsTransient(err error) bool {
 
 // IsPermanent reports whether err is classified as non-retryable.
 // True for: ErrPermanent wraps; ErrTopologyRedeclareFailed; AMQP codes
-// 402, 403, 404, 405, 406, 501, 502, 503, 505, 506, 530, 540.
+// 311, 402, 403, 404, 405, 406, 501, 502, 503, 505, 506, 530, 540.
 func IsPermanent(err error) bool {
 	if err == nil {
 		return false
@@ -230,6 +233,7 @@ func IsPermanent(err error) bool {
 		return true
 	}
 	for _, sentinel := range []error{
+		ErrContentTooLarge,    // 311 — payload never changes; retry is futile
 		ErrInvalidPath,        // 402
 		ErrAccessRefused,      // 403
 		ErrNotFound,           // 404

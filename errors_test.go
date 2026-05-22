@@ -71,8 +71,7 @@ func TestIsTransient(t *testing.T) {
 		{name: "ErrChannelClosed", err: amqp.ErrChannelClosed, want: true},
 		{name: "ErrReconnecting", err: amqp.ErrReconnecting, want: true},
 
-		// Transient AMQP reply-code sentinels (311, 320, 504, 541).
-		{name: "ErrContentTooLarge (311)", err: amqp.ErrContentTooLarge, want: true},
+		// Transient AMQP reply-code sentinels (320, 504, 541).
 		{name: "ErrConnectionForced (320)", err: amqp.ErrConnectionForced, want: true},
 		{name: "ErrChannelError (504)", err: amqp.ErrChannelError, want: true},
 		{name: "ErrInternalError (541)", err: amqp.ErrInternalError, want: true},
@@ -82,6 +81,7 @@ func TestIsTransient(t *testing.T) {
 		{name: "wrapped transient sentinel", err: fmt.Errorf("ctx: %w", amqp.ErrChannelClosed), want: true},
 
 		// Permanent sentinels — must NOT be transient.
+		{name: "ErrContentTooLarge (311) is NOT transient", err: amqp.ErrContentTooLarge, want: false},
 		{name: "ErrResourceError (506) is NOT transient", err: amqp.ErrResourceError, want: false},
 		{name: "ErrNotFound (404)", err: amqp.ErrNotFound, want: false},
 		{name: "ErrPreconditionFailed (406)", err: amqp.ErrPreconditionFailed, want: false},
@@ -105,7 +105,8 @@ func TestIsPermanent(t *testing.T) {
 		{name: "nil", err: nil, want: false},
 		{name: "plain error", err: errors.New("plain"), want: false},
 
-		// Permanent AMQP reply-code sentinels (402-406, 501-503, 505-506, 530, 540).
+		// Permanent AMQP reply-code sentinels (311, 402-406, 501-503, 505-506, 530, 540).
+		{name: "ErrContentTooLarge (311)", err: amqp.ErrContentTooLarge, want: true},
 		{name: "ErrInvalidPath (402)", err: amqp.ErrInvalidPath, want: true},
 		{name: "ErrAccessRefused (403)", err: amqp.ErrAccessRefused, want: true},
 		{name: "ErrNotFound (404)", err: amqp.ErrNotFound, want: true},
@@ -127,7 +128,6 @@ func TestIsPermanent(t *testing.T) {
 		{name: "wrapped ErrPermanent", err: fmt.Errorf("ctx: %w", amqp.ErrPermanent), want: true},
 
 		// Transient sentinels — must NOT be permanent.
-		{name: "ErrContentTooLarge (311) is NOT permanent", err: amqp.ErrContentTooLarge, want: false},
 		{name: "ErrChannelClosed", err: amqp.ErrChannelClosed, want: false},
 		{name: "ErrPublishNacked", err: amqp.ErrPublishNacked, want: false},
 		{name: "ErrReconnecting", err: amqp.ErrReconnecting, want: false},

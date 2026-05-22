@@ -176,12 +176,11 @@ func wireFakePool(fake *fakePubChannel) (*publisherConnPool, func()) {
 	goroutineDone := make(chan struct{})
 	go func() {
 		defer close(goroutineDone)
-		var rCh <-chan amqp091.Return = returnCh
 		for {
 			select {
-			case _, ok := <-rCh:
+			case _, ok := <-returnCh:
 				if !ok {
-					rCh = nil
+					returnCh = nil
 				}
 				// fakePubChannel never sends returns; drain only.
 			case c, ok := <-confirmCh:
