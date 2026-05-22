@@ -97,10 +97,15 @@ type DeadLetter struct {
 // reconnect). Calling AttachTo(conn) with a different pointer appends a new
 // snapshot; all registered snapshots fire in registration order.
 //
+// Returns ErrInvalidOptions if the topology fails validation. The recommended
+// pattern is to call Declare first (which also validates), then AttachTo on the
+// same pointer — that way validation errors surface at startup, not on reconnect.
+//
 // Topology.Declare and AttachTo are NOT concurrency-safe with each other.
-// Recommended pattern: call Declare once at startup (sync.Once), then call
-// AttachTo on the same topology to wire up reconnect.
-func (t *Topology) AttachTo(conn *Connection) {
+func (t *Topology) AttachTo(conn *Connection) error {
+	if err := t.validate(); err != nil {
+		return err
+	}
 	snapshot := t.expand()
 
 	conn.topoMu.Lock()
@@ -116,7 +121,7 @@ func (t *Topology) AttachTo(conn *Connection) {
 	conn.topoMu.Unlock()
 
 	if alreadyHooked {
-		return
+		return nil
 	}
 
 	// Register one hook per managed connection, capturing mc so the hook can
@@ -129,6 +134,7 @@ func (t *Topology) AttachTo(conn *Connection) {
 			return conn.runTopologyRedeclare(ctx, mc)
 		})
 	}
+	return nil
 }
 
 // runTopologyRedeclare iterates the registered topology snapshots in registration
@@ -352,7 +358,11 @@ func declareOnChannel(topo *Topology, ch topologyChannel) error {
 func copyArgs(src map[string]any) map[string]any {
 	dst := make(map[string]any, len(src))
 	for k, v := range src {
-		dst[k] = v
+		if nested, ok := v.(map[string]any); ok {
+			dst[k] = copyArgs(nested)
+		} else {
+			dst[k] = v
+		}
 	}
 	return dst
 }
@@ -360,6 +370,26 @@ func copyArgs(src map[string]any) map[string]any {
 // validate checks the Topology for constraint violations.
 // Returns ErrInvalidOptions with a descriptive message on the first violation found.
 func (t *Topology) validate() error {
+	validKinds := map[ExchangeKind]struct{}{
+		ExchangeDirect:  {},
+		ExchangeFanout:  {},
+		ExchangeTopic:   {},
+		ExchangeHeaders: {},
+		ExchangeDelayed: {},
+	}
+	validQueueTypes := map[QueueType]struct{}{
+		"":               {}, // broker default (classic)
+		QueueTypeClassic: {},
+		QueueTypeQuorum:  {},
+		QueueTypeStream:  {},
+	}
+	validOverflow := map[OverflowPolicy]struct{}{
+		"":                       {}, // not set
+		OverflowDropHead:         {},
+		OverflowRejectPublish:    {},
+		OverflowRejectPublishDLX: {},
+	}
+
 	// Duplicate name checks.
 	exchNames := make(map[string]struct{}, len(t.Exchanges))
 	for _, e := range t.Exchanges {
@@ -371,6 +401,12 @@ func (t *Topology) validate() error {
 		}
 		exchNames[e.Name] = struct{}{}
 
+		if e.Kind == "" {
+			return fmt.Errorf("%w: Exchange %q: Kind must not be empty", ErrInvalidOptions, e.Name)
+		}
+		if _, ok := validKinds[e.Kind]; !ok {
+			return fmt.Errorf("%w: Exchange %q: unknown Kind %q", ErrInvalidOptions, e.Name, e.Kind)
+		}
 		if e.Kind == ExchangeDelayed {
 			v, ok := e.Args["x-delayed-type"]
 			if !ok || v == "" {
@@ -379,6 +415,7 @@ func (t *Topology) validate() error {
 		}
 	}
 
+	streamQueues := make(map[string]struct{})
 	queueNames := make(map[string]struct{}, len(t.Queues))
 	for _, q := range t.Queues {
 		if q.Name == "" {
@@ -389,16 +426,20 @@ func (t *Topology) validate() error {
 		}
 		queueNames[q.Name] = struct{}{}
 
+		if _, ok := validQueueTypes[q.Type]; !ok {
+			return fmt.Errorf("%w: Queue %q: unknown Type %q", ErrInvalidOptions, q.Name, q.Type)
+		}
 		if q.DeliveryLimit > 0 && q.Type != QueueTypeQuorum {
 			return fmt.Errorf("%w: Queue %q: DeliveryLimit requires Type=QueueTypeQuorum", ErrInvalidOptions, q.Name)
+		}
+		if q.MaxPriority != 0 && (q.MaxPriority < 0 || q.MaxPriority > 255) {
+			return fmt.Errorf("%w: Queue %q: MaxPriority must be in [1, 255]", ErrInvalidOptions, q.Name)
 		}
 		if q.MaxPriority > 0 && q.Type != "" && q.Type != QueueTypeClassic {
 			return fmt.Errorf("%w: Queue %q: MaxPriority requires Type=QueueTypeClassic", ErrInvalidOptions, q.Name)
 		}
-		if q.MaxPriority > 255 {
-			return fmt.Errorf("%w: Queue %q: MaxPriority must be in [1, 255]", ErrInvalidOptions, q.Name)
-		}
 		if q.Type == QueueTypeStream {
+			streamQueues[q.Name] = struct{}{}
 			if q.SingleActiveConsumer {
 				return fmt.Errorf("%w: Queue %q: SingleActiveConsumer is not supported on stream queues", ErrInvalidOptions, q.Name)
 			}
@@ -434,6 +475,12 @@ func (t *Topology) validate() error {
 	for _, dl := range t.DeadLetters {
 		if dl.Source == "" {
 			return fmt.Errorf("%w: DeadLetter.Source must not be empty", ErrInvalidOptions)
+		}
+		if _, isStream := streamQueues[dl.Source]; isStream {
+			return fmt.Errorf("%w: DeadLetter.Source %q: dead-lettering is not supported on stream queues", ErrInvalidOptions, dl.Source)
+		}
+		if _, ok := validOverflow[dl.Overflow]; !ok {
+			return fmt.Errorf("%w: DeadLetter.Source %q: unknown Overflow policy %q", ErrInvalidOptions, dl.Source, dl.Overflow)
 		}
 	}
 

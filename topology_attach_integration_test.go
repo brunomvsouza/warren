@@ -44,7 +44,7 @@ func TestTopology_AttachTo_redeclaresAfterReconnect_integration(t *testing.T) {
 		},
 	}
 	require.NoError(t, topo.Declare(ctx, conn))
-	topo.AttachTo(conn)
+	require.NoError(t, topo.AttachTo(conn))
 
 	// Force a reconnect to exercise the barrier.
 	require.NoError(t, conn.ForceReconnect())
@@ -96,7 +96,7 @@ func TestTopology_AttachTo_onReconnectFiresAfterTopologyRedeclared_integration(t
 		},
 	}
 	require.NoError(t, topo.Declare(ctx, conn))
-	topo.AttachTo(conn)
+	require.NoError(t, topo.AttachTo(conn))
 
 	require.NoError(t, conn.ForceReconnect())
 
@@ -159,7 +159,7 @@ func TestTopology_AttachTo_degradedOnMismatch_integration(t *testing.T) {
 			{Name: "test.attach.durable", Durable: false},
 		},
 	}
-	conflicting.AttachTo(conn)
+	require.NoError(t, conflicting.AttachTo(conn))
 
 	// Force reconnect — the hook will fail with PRECONDITION_FAILED.
 	require.NoError(t, conn.ForceReconnect())
