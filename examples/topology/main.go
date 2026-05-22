@@ -19,7 +19,7 @@
 //   - Creates exchange "warren.examples.events" (topic, durable)
 //   - Creates exchange "warren.examples.notify" (fanout, durable)
 //   - Creates queues "warren.examples.orders", "warren.examples.payments",
-//     "warren.examples.alerts" (all durable, auto-delete)
+//     "warren.examples.alerts" (all durable)
 //   - Binds orders queue to events with routing key "order.#"
 //   - Binds payments queue to events with routing key "payment.#"
 //   - Binds alerts queue to notify (fanout, no routing key)
@@ -87,9 +87,9 @@ func run() error {
 			},
 		},
 		Queues: []amqp.Queue{
-			{Name: "warren.examples.orders", Durable: true, AutoDelete: true},
-			{Name: "warren.examples.payments", Durable: true, AutoDelete: true},
-			{Name: "warren.examples.alerts", Durable: true, AutoDelete: true},
+			{Name: "warren.examples.orders", Durable: true},
+			{Name: "warren.examples.payments", Durable: true},
+			{Name: "warren.examples.alerts", Durable: true},
 		},
 		Bindings: []amqp.Binding{
 			{Exchange: "warren.examples.events", Queue: "warren.examples.orders", RoutingKey: "order.#"},

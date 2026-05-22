@@ -6,7 +6,6 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -32,14 +31,46 @@ func TestDeadletterExample_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	url := amqpTestURL(t)
+
+	// Pre-clean any leftover state from previous runs.
+	cleanDeadletterTopology(t, url)
+	// Guaranteed post-cleanup regardless of test outcome.
+	t.Cleanup(func() { cleanDeadletterTopology(t, url) })
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Pre-clean: delete queues and exchanges that may linger from a previous run.
+	// Run the example as a subprocess.
+	cmd := exec.CommandContext(ctx, "go", "run", ".") //nolint:gosec
+	cmd.Dir = "."
+	cmd.Env = append(os.Environ(), "AMQP_URL="+url)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "example exited non-zero:\n%s", string(out))
+
+	output := string(out)
+	// (a) exit 0 — already asserted by require.NoError above.
+	// (c) The example must have printed x-death info from the DLQ message.
+	assert.Contains(t, output, "x-death", "expected x-death header in output")
+	assert.Contains(t, output, "deadletter example complete")
+	assert.Contains(t, output, "dead-001", "expected order ID in output")
+}
+
+// cleanDeadletterTopology deletes the queues and exchanges created by the
+// deadletter example.
+func cleanDeadletterTopology(t *testing.T, url string) {
+	t.Helper()
 	rawConn, err := amqp091.Dial(url)
-	require.NoError(t, err)
+	if err != nil {
+		return
+	}
+	defer rawConn.Close() //nolint:errcheck
+
 	ch, err := rawConn.Channel()
-	require.NoError(t, err)
+	if err != nil {
+		return
+	}
+	defer ch.Close() //nolint:errcheck
+
 	for _, name := range []string{
 		"warren.examples.dl.orders",
 		"warren.examples.dl.orders.dlq",
@@ -52,21 +83,4 @@ func TestDeadletterExample_integration(t *testing.T) {
 	} {
 		_ = ch.ExchangeDelete(name, false, false)
 	}
-	ch.Close()    //nolint:errcheck
-	rawConn.Close() //nolint:errcheck
-
-	// Run the example as a subprocess.
-	cmd := exec.CommandContext(ctx, "go", "run", ".") //nolint:gosec
-	cmd.Dir = "."
-	cmd.Env = append(os.Environ(), "AMQP_URL="+url)
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "example exited non-zero:\n%s", string(out))
-
-	output := string(out)
-	// (a) exit 0 — already asserted by require.NoError above.
-	// (c) The example must have printed x-death info from the DLQ message.
-	assert.True(t, strings.Contains(output, "x-death"),
-		"expected x-death in output:\n%s", output)
-	assert.Contains(t, output, "deadletter example complete")
-	assert.Contains(t, output, "dead-001", "expected order ID in output")
 }

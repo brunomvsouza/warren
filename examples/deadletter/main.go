@@ -20,10 +20,12 @@
 // Topology side-effects on the broker:
 //   - Creates exchange "warren.examples.dl.topic" (topic, durable)
 //   - Creates exchange "warren.examples.dl.orders.dlx" (topic, durable)
-//   - Creates queue "warren.examples.dl.orders" (quorum, durable, DeliveryLimit=3)
+//   - Creates queue "warren.examples.dl.orders" (quorum, durable, DeliveryLimit=3,
+//     x-dead-letter-exchange=warren.examples.dl.orders.dlx,
+//     x-dead-letter-routing-key=dead.#)
 //   - Creates queue "warren.examples.dl.orders.dlq" (classic, durable)
 //   - Binds orders queue to topic exchange with routing key "order.#"
-//   - Binds DLQ to DLX with routing key "#" (catch-all)
+//   - Binds DLQ to DLX with routing key "dead.#"
 //
 // The example exits 0 on success and non-zero on any error.
 package main
@@ -111,19 +113,21 @@ func run() error {
 				RoutingKey: "order.#",
 			},
 			{
-				// Catch-all binding so every dead-lettered message reaches the DLQ.
+				// Matches the x-dead-letter-routing-key ("dead.#") set by the
+				// DeadLetter entry so dead-lettered messages land in the DLQ.
 				Exchange:   "warren.examples.dl.orders.dlx",
 				Queue:      "warren.examples.dl.orders.dlq",
-				RoutingKey: "#",
+				RoutingKey: "dead.#",
 			},
 		},
 		DeadLetters: []amqp.DeadLetter{
 			{
-				Source:    "warren.examples.dl.orders",
-				Exchange:  "warren.examples.dl.orders.dlx",
-				TTL:       30 * time.Second,
-				MaxLength: 100,
-				Overflow:  amqp.OverflowRejectPublishDLX,
+				Source:     "warren.examples.dl.orders",
+				Exchange:   "warren.examples.dl.orders.dlx",
+				RoutingKey: "dead.#", // injected as x-dead-letter-routing-key on the source queue
+				TTL:        30 * time.Second,
+				MaxLength:  100,
+				Overflow:   amqp.OverflowRejectPublishDLX,
 			},
 		},
 	}
