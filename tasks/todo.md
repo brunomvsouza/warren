@@ -270,7 +270,7 @@ safety contract.
 - **Files:** `codec/codec.go`, `codec/json.go`, `codec/json_test.go`, `codec/json_fuzz_test.go`.
 - **Deps:** T02.
 
-### [ ] T10 — `message.go`: `Message[M]` struct · S
+### [x] T10 — `message.go`: `Message[M]` struct · S
 Plain struct + default application at publish time. SPEC compliance
 fix: `ContentType` (MIME) is a separate field from `ContentEncoding`
 (transfer encoding).
@@ -293,7 +293,7 @@ fix: `ContentType` (MIME) is a separate field from `ContentEncoding`
 - **Files:** `message.go`, `message_test.go`.
 - **Deps:** T02, T09.
 
-### [ ] T11 — `internal/confirms` tracker · M
+### [x] T11 — `internal/confirms` tracker · M
 Publisher confirm tracker preserved across reconnects. Rev 5 adds
 `basic.nack` from broker → `ErrPublishNacked` resolution.
 - **Acceptance:**
