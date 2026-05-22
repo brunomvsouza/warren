@@ -1,8 +1,12 @@
 package warren
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
+
+	amqp091 "github.com/rabbitmq/amqp091-go"
 )
 
 // Topology describes the AMQP exchanges, queues, bindings, and dead-letter rules
@@ -80,6 +84,198 @@ type DeadLetter struct {
 	MaxLengthBytes int
 	// Overflow controls what happens when the queue is full (x-overflow).
 	Overflow OverflowPolicy
+}
+
+// topologyChannel is the AMQP channel interface used by Topology.Declare.
+// *amqp091.Channel satisfies this interface; tests may inject fakes.
+type topologyChannel interface {
+	ExchangeDeclare(name, kind string, durable, autoDelete, internal, noWait bool, args amqp091.Table) error
+	QueueDeclare(name string, durable, autoDelete, exclusive, noWait bool, args amqp091.Table) (amqp091.Queue, error)
+	QueueBind(name, key, exchange string, noWait bool, args amqp091.Table) error
+	Close() error
+}
+
+// Declare validates the topology, expands DLX entries in-memory (Step 1),
+// then opens a temporary channel and emits exchange → queue → binding
+// declares in that order (Step 2). It is idempotent: re-declaring the same
+// shape returns nil.
+//
+// Topology.Declare is NOT concurrency-safe with itself or with AttachTo.
+// Recommended pattern: call Declare exactly once at application startup
+// (e.g. protected by sync.Once), then call AttachTo for reconnect hooks.
+func (t *Topology) Declare(ctx context.Context, conn *Connection) error {
+	if err := t.validate(); err != nil {
+		return err
+	}
+	expanded := t.expand()
+
+	ch, err := conn.openDeclareChannel(ctx)
+	if err != nil {
+		return err
+	}
+	defer ch.Close() //nolint:errcheck
+
+	return declareOnChannel(expanded, ch)
+}
+
+// expand returns a deep copy of t with all in-memory pre-pass mutations applied:
+//   - DeadLetter entries merge x-dead-letter-* args into source Queue.Args and
+//     append the DLX exchange and DLQ queue if not already present.
+//   - DeliveryLimit > 0 injects x-delivery-limit.
+//   - SingleActiveConsumer injects x-single-active-consumer.
+//   - Type != "" injects x-queue-type.
+//   - MaxPriority > 0 injects x-max-priority.
+//
+// The caller's Topology value is never mutated.
+func (t *Topology) expand() *Topology {
+	// Deep-copy all slices so mutations don't affect the original.
+	out := &Topology{
+		Exchanges:   make([]Exchange, len(t.Exchanges)),
+		Queues:      make([]Queue, len(t.Queues)),
+		Bindings:    make([]Binding, len(t.Bindings)),
+		DeadLetters: make([]DeadLetter, len(t.DeadLetters)),
+	}
+	copy(out.DeadLetters, t.DeadLetters)
+	copy(out.Bindings, t.Bindings)
+	for i, e := range t.Exchanges {
+		out.Exchanges[i] = e
+		if e.Args != nil {
+			out.Exchanges[i].Args = copyArgs(e.Args)
+		}
+	}
+	for i, q := range t.Queues {
+		out.Queues[i] = q
+		if q.Args != nil {
+			out.Queues[i].Args = copyArgs(q.Args)
+		}
+	}
+
+	// Index queues by name for O(1) arg injection.
+	queueIdx := make(map[string]int, len(out.Queues))
+	for i, q := range out.Queues {
+		queueIdx[q.Name] = i
+	}
+
+	// Index existing exchange and queue names to avoid duplicates.
+	exchNames := make(map[string]struct{}, len(out.Exchanges))
+	for _, e := range out.Exchanges {
+		exchNames[e.Name] = struct{}{}
+	}
+	queueNames := make(map[string]struct{}, len(out.Queues))
+	for _, q := range out.Queues {
+		queueNames[q.Name] = struct{}{}
+	}
+
+	// DLX expansion.
+	for _, dl := range out.DeadLetters {
+		dlxName := dl.Exchange
+		if dlxName == "" {
+			dlxName = dl.Source + ".dlx"
+		}
+		dlqName := dl.Source + ".dlq"
+
+		idx, ok := queueIdx[dl.Source]
+		if !ok {
+			continue // source queue not declared in this topology; skip
+		}
+		if out.Queues[idx].Args == nil {
+			out.Queues[idx].Args = make(map[string]any)
+		}
+		out.Queues[idx].Args["x-dead-letter-exchange"] = dlxName
+		if dl.RoutingKey != "" {
+			out.Queues[idx].Args["x-dead-letter-routing-key"] = dl.RoutingKey
+		}
+		if dl.TTL > 0 {
+			out.Queues[idx].Args["x-message-ttl"] = dl.TTL.Milliseconds()
+		}
+		if dl.MaxLength > 0 {
+			out.Queues[idx].Args["x-max-length"] = int64(dl.MaxLength)
+		}
+		if dl.MaxLengthBytes > 0 {
+			out.Queues[idx].Args["x-max-length-bytes"] = int64(dl.MaxLengthBytes)
+		}
+		if dl.Overflow != "" {
+			out.Queues[idx].Args["x-overflow"] = string(dl.Overflow)
+		}
+
+		if _, exists := exchNames[dlxName]; !exists {
+			out.Exchanges = append(out.Exchanges, Exchange{
+				Name:    dlxName,
+				Kind:    ExchangeTopic,
+				Durable: true,
+			})
+			exchNames[dlxName] = struct{}{}
+		}
+		if _, exists := queueNames[dlqName]; !exists {
+			out.Queues = append(out.Queues, Queue{
+				Name:    dlqName,
+				Durable: true,
+			})
+			queueNames[dlqName] = struct{}{}
+		}
+	}
+
+	// Inject per-queue x-* args for DeliveryLimit, SingleActiveConsumer, Type, MaxPriority.
+	for i := range out.Queues {
+		q := &out.Queues[i]
+		if q.DeliveryLimit > 0 || q.SingleActiveConsumer || q.Type != "" || q.MaxPriority > 0 {
+			if q.Args == nil {
+				q.Args = make(map[string]any)
+			}
+			if q.DeliveryLimit > 0 {
+				q.Args["x-delivery-limit"] = int64(q.DeliveryLimit)
+			}
+			if q.SingleActiveConsumer {
+				q.Args["x-single-active-consumer"] = true
+			}
+			if q.Type != "" {
+				q.Args["x-queue-type"] = string(q.Type)
+			}
+			if q.MaxPriority > 0 {
+				q.Args["x-max-priority"] = int64(q.MaxPriority)
+			}
+		}
+	}
+
+	return out
+}
+
+// declareOnChannel emits exchange → queue → binding declares onto ch.
+// Returns ErrTopologyMismatch (wrapping ErrPreconditionFailed) when the broker
+// signals a 406 PRECONDITION_FAILED conflict on any declare.
+func declareOnChannel(t *Topology, ch topologyChannel) error {
+	wrapMismatch := func(err error) error {
+		wrapped := wrapAMQPError(err)
+		if errors.Is(wrapped, ErrPreconditionFailed) {
+			return fmt.Errorf("%w: %w", ErrTopologyMismatch, wrapped)
+		}
+		return wrapped
+	}
+
+	for _, e := range t.Exchanges {
+		if err := ch.ExchangeDeclare(e.Name, string(e.Kind), e.Durable, e.AutoDelete, e.Internal, e.NoWait, amqp091.Table(e.Args)); err != nil {
+			return wrapMismatch(err)
+		}
+	}
+	for _, q := range t.Queues {
+		if _, err := ch.QueueDeclare(q.Name, q.Durable, q.AutoDelete, q.Exclusive, q.NoWait, amqp091.Table(q.Args)); err != nil {
+			return wrapMismatch(err)
+		}
+	}
+	for _, b := range t.Bindings {
+		if err := ch.QueueBind(b.Queue, b.RoutingKey, b.Exchange, b.NoWait, amqp091.Table(b.Args)); err != nil {
+			return wrapMismatch(err)
+		}
+	}
+	return nil
+}
+
+func copyArgs(src map[string]any) map[string]any {
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 // validate checks the Topology for constraint violations.

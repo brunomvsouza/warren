@@ -313,6 +313,23 @@ func (mc *managedConn) registerHook(fn func(ctx context.Context) error) {
 	mc.hooksMu.Unlock()
 }
 
+// openDeclareChannel opens a temporary AMQP channel on the first publisher
+// connection for use by Topology.Declare. The caller is responsible for
+// closing the returned channel.
+func (c *Connection) openDeclareChannel(_ context.Context) (topologyChannel, error) {
+	if len(c.pubConns) == 0 {
+		return nil, ErrNotConnected
+	}
+	mc := c.pubConns[0]
+	mc.mu.RLock()
+	raw := mc.raw
+	mc.mu.RUnlock()
+	if raw == nil {
+		return nil, ErrNotConnected
+	}
+	return raw.Channel()
+}
+
 // health opens a temporary AMQP channel and closes it to verify liveness.
 func (mc *managedConn) health(_ context.Context) error {
 	mc.barrierMu.Lock()
