@@ -10,20 +10,22 @@
 package confirms
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 )
 
-// Sentinel errors returned by Tracker.Wait.
+// Sentinel errors returned by Tracker.Wait and Register.
 var (
 	// ErrTimeout is returned when no confirm arrives within the deadline.
 	ErrTimeout = errors.New("confirms: confirm timeout")
 	// ErrNacked is returned when the broker sends basic.nack (e.g. overflow=reject-publish).
 	ErrNacked = errors.New("confirms: broker nacked publish")
-	// ErrClosed is returned when the channel is closed while a publish is in flight.
+	// ErrClosed is returned when the channel is closed while a publish is in flight,
+	// or when Register is called on a tracker that has already been closed.
 	ErrClosed = errors.New("confirms: channel closed")
 )
 
@@ -38,9 +40,9 @@ func (e *UnroutableError) Error() string {
 }
 
 type waiter struct {
-	// done is a buffered channel (capacity 1). A value in the buffer means
-	// the confirm has been resolved. The channel is never closed — only written.
-	// resolveOne uses a non-blocking send so that a duplicate resolve is silently
+	// done is a buffered channel (capacity 1). A value in the buffer means the
+	// confirm has been resolved. The channel is never closed — only written to.
+	// resolveOne uses a non-blocking send so duplicate resolves are silently
 	// ignored. Wait or CloseAll reads/drains and then deletes the entry.
 	done       chan error
 	returnCode uint16
@@ -48,26 +50,32 @@ type waiter struct {
 }
 
 // Tracker manages in-flight publisher confirmations for one AMQP channel.
-// A single Tracker must be created per channel; call CloseAll when the channel closes.
+// One Tracker must be created per channel lifetime; create a new one when
+// the channel is replaced. Calling Register on a closed Tracker returns ErrClosed.
 // Zero value is not usable; use New.
 type Tracker struct {
 	mu      sync.Mutex
 	pending map[uint64]*waiter
+	closed  bool // set by CloseAll; prevents Register on a dead channel
 }
 
 // New creates a ready-to-use Tracker.
 func New() *Tracker {
-	return &Tracker{
-		pending: make(map[uint64]*waiter),
-	}
+	return &Tracker{pending: make(map[uint64]*waiter)}
 }
 
-// Register prepares a pending slot for deliveryTag. Must be called before
-// the corresponding publish so that subsequent Ack/Nack/CloseAll can resolve it.
-func (t *Tracker) Register(deliveryTag uint64) {
+// Register prepares a pending slot for deliveryTag. Must be called before the
+// corresponding publish so that subsequent Ack/Nack/CloseAll can resolve it.
+// Returns ErrClosed if CloseAll has already been called on this Tracker —
+// this guards against accidental reuse across channel lifetimes.
+func (t *Tracker) Register(deliveryTag uint64) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.closed {
+		return ErrClosed
+	}
 	t.pending[deliveryTag] = &waiter{done: make(chan error, 1)}
+	return nil
 }
 
 // MarkReturned records that deliveryTag received a basic.return with replyCode.
@@ -106,12 +114,15 @@ func (t *Tracker) Nack(deliveryTag uint64, multiple bool) {
 	}
 }
 
-// CloseAll resolves all unresolved pending confirms with ErrClosed and removes
-// their entries. Entries already resolved by Ack/Nack are left for Wait to read
-// and clean up — their result is not overwritten.
+// CloseAll marks the Tracker as closed, resolves all unresolved pending confirms
+// with ErrClosed, and removes their entries. Entries already resolved by Ack/Nack
+// are left for Wait to read and clean up — their result is not overwritten.
+// After CloseAll, Register returns ErrClosed for any new delivery tag.
 func (t *Tracker) CloseAll() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.closed = true
+	// Deleting from a map during range is safe in Go.
 	for tag, w := range t.pending {
 		select {
 		case w.done <- ErrClosed:
@@ -123,11 +134,13 @@ func (t *Tracker) CloseAll() {
 	}
 }
 
-// Wait blocks until deliveryTag is confirmed or timeout elapses. Returns nil
-// for a clean ack, *UnroutableError for return+ack, ErrNacked for nack,
-// ErrClosed for channel-close, or ErrTimeout if the deadline is exceeded.
+// Wait blocks until deliveryTag is confirmed, ctx is cancelled, or timeout elapses.
+// Returns nil for a clean ack, *UnroutableError for return+ack, ErrNacked for nack,
+// ErrClosed for channel-close, ErrTimeout if timeout > 0 and it elapses, or
+// ctx.Err() if ctx is cancelled first.
+// If timeout ≤ 0, no confirm deadline is applied beyond ctx.
 // The pending slot is removed when Wait returns.
-func (t *Tracker) Wait(deliveryTag uint64, timeout time.Duration) error {
+func (t *Tracker) Wait(ctx context.Context, deliveryTag uint64, timeout time.Duration) error {
 	t.mu.Lock()
 	w, ok := t.pending[deliveryTag]
 	t.mu.Unlock()
@@ -135,8 +148,14 @@ func (t *Tracker) Wait(deliveryTag uint64, timeout time.Duration) error {
 		return ErrClosed
 	}
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	// A nil channel in a select case is never selected, so timerC == nil when
+	// timeout ≤ 0 effectively disables the confirm-deadline case.
+	var timerC <-chan time.Time
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timerC = timer.C
+	}
 
 	select {
 	case err := <-w.done:
@@ -144,17 +163,25 @@ func (t *Tracker) Wait(deliveryTag uint64, timeout time.Duration) error {
 		delete(t.pending, deliveryTag)
 		t.mu.Unlock()
 		return err
-	case <-timer.C:
+	case <-timerC:
 		t.mu.Lock()
 		delete(t.pending, deliveryTag)
 		t.mu.Unlock()
 		return ErrTimeout
+	case <-ctx.Done():
+		t.mu.Lock()
+		delete(t.pending, deliveryTag)
+		t.mu.Unlock()
+		return ctx.Err()
 	}
 }
 
-// resolveOne resolves a single deliveryTag with baseErr (overridden by *UnroutableError
-// when the tag was MarkReturned and baseErr is nil). Uses a non-blocking send so
-// that a duplicate resolve for the same tag is silently ignored.
+// resolveOne resolves a single deliveryTag. If the tag was MarkReturned and
+// baseErr is nil, *UnroutableError is used instead. If baseErr is non-nil
+// (e.g. ErrNacked), it takes precedence over *UnroutableError even when the
+// tag was MarkReturned — this matches RabbitMQ wire behaviour where
+// return+nack is a broker-internal error, not a routing failure.
+// Uses a non-blocking send so that duplicate resolve is silently ignored.
 // Must be called with t.mu held. Does NOT delete the entry — Wait does that.
 func (t *Tracker) resolveOne(deliveryTag uint64, baseErr error) {
 	w, ok := t.pending[deliveryTag]
@@ -167,7 +194,7 @@ func (t *Tracker) resolveOne(deliveryTag uint64, baseErr error) {
 	}
 	select {
 	case w.done <- err:
-	default: // already resolved; ignore
+	default: // already resolved; ignore duplicate
 	}
 }
 
@@ -180,7 +207,7 @@ func (t *Tracker) resolveUpTo(deliveryTag uint64, baseErr error) {
 			tags = append(tags, tag)
 		}
 	}
-	sort.Slice(tags, func(i, j int) bool { return tags[i] < tags[j] })
+	slices.Sort(tags)
 	for _, tag := range tags {
 		t.resolveOne(tag, baseErr)
 	}
