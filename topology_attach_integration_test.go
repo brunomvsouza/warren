@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	amqp091 "github.com/rabbitmq/amqp091-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -20,7 +21,16 @@ func TestTopology_AttachTo_redeclaresAfterReconnect_integration(t *testing.T) {
 	url := amqpTestURL(t)
 	ctx := context.Background()
 
-	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
+	reconnected := make(chan struct{}, 1)
+	conn, err := amqp.Dial(ctx,
+		amqp.WithAddr(url),
+		amqp.WithOnReconnect(func() {
+			select {
+			case reconnected <- struct{}{}:
+			default:
+			}
+		}),
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -39,13 +49,22 @@ func TestTopology_AttachTo_redeclaresAfterReconnect_integration(t *testing.T) {
 	// Force a reconnect to exercise the barrier.
 	require.NoError(t, conn.ForceReconnect())
 
-	// Brief wait for reconnect to complete.
-	time.Sleep(500 * time.Millisecond)
+	// Wait deterministically for the reconnect hook to fire.
+	select {
+	case <-reconnected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for WithOnReconnect callback after ForceReconnect")
+	}
 
-	// Health confirms the connection is back.
-	healthCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	require.NoError(t, conn.Health(healthCtx))
+	// Verify the queue was actually re-declared by doing a passive inspect.
+	rawConn, err := amqp091.Dial(url)
+	require.NoError(t, err)
+	defer rawConn.Close()
+	rawCh, err := rawConn.Channel()
+	require.NoError(t, err)
+	defer rawCh.Close()
+	_, err = rawCh.QueueInspect("test.attach.q1")
+	require.NoError(t, err, "queue test.attach.q1 must exist after topology redeclare")
 }
 
 func TestTopology_AttachTo_onReconnectFiresAfterTopologyRedeclared_integration(t *testing.T) {
@@ -93,6 +112,21 @@ func TestTopology_AttachTo_degradedOnMismatch_integration(t *testing.T) {
 
 	url := amqpTestURL(t)
 	ctx := context.Background()
+
+	// Clean up the durable queue after the test regardless of outcome.
+	t.Cleanup(func() {
+		rawConn, err := amqp091.Dial(url)
+		if err != nil {
+			return
+		}
+		defer rawConn.Close()
+		rawCh, err := rawConn.Channel()
+		if err != nil {
+			return
+		}
+		defer rawCh.Close()
+		_, _ = rawCh.QueueDelete("test.attach.durable", false, false, false)
+	})
 
 	degradedCh := make(chan error, 1)
 	conn, err := amqp.Dial(ctx,

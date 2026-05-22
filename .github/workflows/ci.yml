@@ -27,6 +27,11 @@ jobs:
       - name: Examples build
         run: go build ./examples/...
 
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
       - name: Test (unit, race)
         run: go test -race -cover ./...
 
