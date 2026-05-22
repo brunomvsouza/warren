@@ -107,9 +107,8 @@ func (p *publisherConnPool) release(entry publisherEntry) {
 	}
 }
 
-// drain discards idle entries. Called after reconnect so stale channels from
-// the dead socket are never reused.
-func (p *publisherConnPool) drain() {
+// drainFree closes and removes all idle entries from the free queue.
+func (p *publisherConnPool) drainFree() {
 	for {
 		select {
 		case entry := <-p.free:
@@ -120,17 +119,12 @@ func (p *publisherConnPool) drain() {
 	}
 }
 
+// drain discards idle entries. Called after reconnect so stale channels from
+// the dead socket are never reused.
+func (p *publisherConnPool) drain() { p.drainFree() }
+
 // closeAll drains and closes all idle entries. Called by Publisher.Close.
-func (p *publisherConnPool) closeAll() {
-	for {
-		select {
-		case entry := <-p.free:
-			_ = entry.ch.Close()
-		default:
-			return
-		}
-	}
-}
+func (p *publisherConnPool) closeAll() { p.drainFree() }
 
 // openPublisherEntry opens a new AMQP channel on mc, enables publisher confirms,
 // and starts the goroutine that routes ack/nack frames to the tracker.
