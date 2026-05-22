@@ -1,6 +1,11 @@
 package amqp
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	amqp091 "github.com/rabbitmq/amqp091-go"
+)
 
 var (
 	// Connection lifecycle.
@@ -256,4 +261,34 @@ func (e *codeError) Unwrap() error { return e.err }
 // internal/amqperror and the confirm tracker; not part of the public API.
 func wrapCode(code uint16, err error) error {
 	return &codeError{code: code, err: err}
+}
+
+// amqpCodeTable maps wire codes to their sentinel errors. It is the authoritative
+// source used by wrapAMQPError (root package) to avoid the import cycle that
+// would arise from importing internal/amqperror.
+var amqpCodeTable = func() map[uint16]error {
+	m := make(map[uint16]error, len(amqpCodeSentinels))
+	for _, s := range amqpCodeSentinels {
+		m[s.code] = s.err
+	}
+	return m
+}()
+
+// wrapAMQPError translates an *amqp091.Error (if present in err's chain) into a
+// wrapped sentinel chain so callers can use errors.Is / AMQPCode / IsTransient.
+// Unlike internal/amqperror.Wrap, this function lives in the root package and
+// carries no import cycle. Non-AMQP errors are returned unchanged.
+func wrapAMQPError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var amqpErr *amqp091.Error
+	if !errors.As(err, &amqpErr) {
+		return err
+	}
+	sentinel, ok := amqpCodeTable[uint16(amqpErr.Code)] //nolint:gosec // G115: amqp codes are protocol-defined
+	if !ok {
+		return err
+	}
+	return fmt.Errorf("%w: %w", sentinel, err)
 }
