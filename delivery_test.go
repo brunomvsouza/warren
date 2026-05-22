@@ -2,6 +2,7 @@ package warren
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -200,4 +201,46 @@ func TestDelivery_AckIf_ConsumerClosed(t *testing.T) {
 	fa := &fakeAcker{}
 	d := newDelivery[string](nil, "q", amqp091.Delivery{Acknowledger: fa, DeliveryTag: 1}, done)
 	assert.ErrorIs(t, d.AckIf(nil), ErrAlreadyClosed)
+}
+
+func TestDelivery_Ack_WithLiveDoneChannel(t *testing.T) {
+	done := make(chan struct{}) // open, not closed — consumer still running
+	fa := &fakeAcker{}
+	d := newDelivery[string](nil, "q", amqp091.Delivery{Acknowledger: fa, DeliveryTag: 1}, done)
+	require.NoError(t, d.Ack())
+	assert.True(t, fa.acked, "Ack must reach broker when consumer is still running")
+}
+
+func TestDelivery_Nack_WithLiveDoneChannel(t *testing.T) {
+	done := make(chan struct{}) // open, not closed
+	fa := &fakeAcker{}
+	d := newDelivery[string](nil, "q", amqp091.Delivery{Acknowledger: fa, DeliveryTag: 1}, done)
+	require.NoError(t, d.Nack(true))
+	assert.True(t, fa.nacked)
+	assert.True(t, fa.requeue)
+}
+
+func TestDelivery_Ack_UnknownBrokerError(t *testing.T) {
+	sentinel := errors.New("unexpected broker error")
+	fa := &fakeAcker{failWith: sentinel}
+	d := makeTestDelivery[string](nil, "q", amqp091.Delivery{Acknowledger: fa, DeliveryTag: 1})
+	err := d.Ack()
+	assert.ErrorIs(t, err, sentinel, "unknown broker errors must pass through mapAckErr unchanged")
+}
+
+func TestDelivery_Nack_UnknownBrokerError(t *testing.T) {
+	sentinel := errors.New("unexpected broker error")
+	fa := &fakeAcker{failWith: sentinel}
+	d := makeTestDelivery[string](nil, "q", amqp091.Delivery{Acknowledger: fa, DeliveryTag: 1})
+	err := d.Nack(false)
+	assert.ErrorIs(t, err, sentinel, "unknown broker errors must pass through mapAckErr unchanged")
+}
+
+func TestDelivery_AckIf_WrappedErrRequeue(t *testing.T) {
+	fa := &fakeAcker{}
+	d := makeTestDelivery[string](nil, "q", amqp091.Delivery{Acknowledger: fa, DeliveryTag: 1})
+	wrapped := fmt.Errorf("handler context: %w", ErrRequeue)
+	require.NoError(t, d.AckIf(wrapped))
+	assert.True(t, fa.nacked, "wrapped ErrRequeue must still trigger Nack")
+	assert.True(t, fa.requeue, "wrapped ErrRequeue must nack with requeue=true")
 }

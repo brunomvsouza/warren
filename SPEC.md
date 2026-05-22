@@ -273,7 +273,7 @@ A `Makefile` will expose these as `make build`, `make test`,
   Returning `nil` Acks; any other error Nacks **without requeue**
   (poison messages go to DLX, never loop). To request requeue, wrap
   the error: `fmt.Errorf("transient: %w", warren.ErrRequeue)`.
-  Escape hatch: `Consumer[M].ConsumeRaw(ctx, func(ctx, Delivery[M]) error)`.
+  Escape hatch: `Consumer[M].ConsumeRaw(ctx, func(ctx, *Delivery[M]) error)`.
 - **`Topology` is the only place that declares.** Publisher/Consumer
   receive names; they do not declare exchanges/queues/bindings.
 - **Sentinel errors** in `errors.go`. Wrap with
@@ -393,7 +393,7 @@ err = con.Consume(ctx, func(ctx context.Context, o OrderPlaced) error {
 ### Example: consume raw (escape hatch)
 
 ```go
-err = con.ConsumeRaw(ctx, func(ctx context.Context, d warren.Delivery[OrderPlaced]) error {
+err = con.ConsumeRaw(ctx, func(ctx context.Context, d *warren.Delivery[OrderPlaced]) error {
     if d.Redelivered() && d.DeathCount() > 3 {
         return d.Nack(false) // give up
     }
@@ -998,7 +998,7 @@ func (c *Consumer[M]) Health(ctx context.Context) error
 func (c *Consumer[M]) Close(ctx context.Context) error  // drains in-flight
 
 type Handler[M any]     func(ctx context.Context, msg M) error
-type RawHandler[M any]  func(ctx context.Context, d Delivery[M]) error
+type RawHandler[M any]  func(ctx context.Context, d *Delivery[M]) error
 
 type Delivery[M any] struct { /* unexported fields */ }
 
