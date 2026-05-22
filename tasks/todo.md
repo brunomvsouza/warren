@@ -447,17 +447,17 @@ integration with T07, persistent-failure degraded state.
 - **Files:** edits to `topology.go`, `topology_attach_integration_test.go`, `topology_degraded_integration_test.go`, `topology_snapshot_test.go`.
 - **Deps:** T15, T07.
 
-### [ ] T16b — Checkpoint examples: `examples/topology/main.go` + `examples/deadletter/main.go` · S
+### [x] T16b — Checkpoint examples: `examples/topology/main.go` + `examples/deadletter/main.go` · S
 Two examples land together (per SPEC §7 "Executable examples at
 checkpoints" + §10 Rev decision 49): one for the bare `Topology`
 flow, one for the DLX + quorum-queue flow that hardens production
 workloads.
 - **Acceptance:**
-  - [ ] `examples/topology/main.go` is `package main`, reads `AMQP_URL`, builds a `Topology` with two exchanges + three queues + four bindings, calls `Topology.Declare(ctx, conn)`, calls it again to demonstrate idempotency (no error, no broker mutation), then calls `Topology.AttachTo(conn)` and forces a reconnect via `(*Connection).ForceReconnect()`; on reconnect the redeclare callback fires and the example prints "topology re-declared" before exiting 0.
-  - [ ] `examples/deadletter/main.go` is `package main`, reads `AMQP_URL`, declares a `QueueTypeQuorum` source queue with `DeliveryLimit(3)` and a `DeadLetter{Exchange, RoutingKey, TTL, MaxLength, Overflow: OverflowRejectPublishDLX}` entry; publishes one message; runs a consumer that always errors so the message dead-letters; the example then opens an inspection consumer on the DLQ and prints the DLX-bounced payload + the `x-death` header before exiting 0.
-  - [ ] Top-of-file godoc blocks on both files follow the same shape as T13b (purpose, run command, env vars, broker side-effects).
-  - [ ] `go build ./examples/...` green on the unit lane.
-  - [ ] Integration test per example (`example_integration_test.go` in each subdir, `integration` build tag) spins up a testcontainer, runs the example as a subprocess, and asserts (a) exit 0; (b) for `topology/`: the declared queue is visible via `rabbitmqctl list_queues name arguments` after the example exits (test cleans up afterwards); (c) for `deadletter/`: a message lands in the configured DLQ and carries the expected `x-death` header; (d) `goleak.VerifyNone(t)` clean after each subprocess exits.
+  - [x] `examples/topology/main.go` is `package main`, reads `AMQP_URL`, builds a `Topology` with two exchanges + three queues + four bindings, calls `Topology.Declare(ctx, conn)`, calls it again to demonstrate idempotency (no error, no broker mutation), then calls `Topology.AttachTo(conn)` and forces a reconnect via `(*Connection).ForceReconnect()`; on reconnect the redeclare callback fires and the example prints "topology re-declared" before exiting 0.
+  - [x] `examples/deadletter/main.go` is `package main`, reads `AMQP_URL`, declares a `QueueTypeQuorum` source queue with `DeliveryLimit(3)` and a `DeadLetter{Exchange, RoutingKey, TTL, MaxLength, Overflow: OverflowRejectPublishDLX}` entry; publishes one message; runs a consumer that always errors so the message dead-letters; the example then opens an inspection consumer on the DLQ and prints the DLX-bounced payload + the `x-death` header before exiting 0.
+  - [x] Top-of-file godoc blocks on both files follow the same shape as T13b (purpose, run command, env vars, broker side-effects).
+  - [x] `go build ./examples/...` green on the unit lane.
+  - [x] Integration test per example (`example_integration_test.go` in each subdir, `integration` build tag) spins up a testcontainer, runs the example as a subprocess, and asserts (a) exit 0; (b) for `topology/`: the declared queue is visible via `rabbitmqctl list_queues name arguments` after the example exits (test cleans up afterwards); (c) for `deadletter/`: a message lands in the configured DLQ and carries the expected `x-death` header; (d) `goleak.VerifyNone(t)` clean after each subprocess exits.
 - **Verify:** `go build ./examples/...`; `go test -race -tags=integration ./examples/topology/... ./examples/deadletter/...`; manual subprocess smoke-run against a local broker.
 - **Files:** `examples/topology/main.go`, `examples/topology/example_integration_test.go`, `examples/deadletter/main.go`, `examples/deadletter/example_integration_test.go`, edits to `README.md`.
 - **Deps:** T16. (`deadletter/` also depends on T15 for DLX expansion semantics — already a prerequisite of T16.)
