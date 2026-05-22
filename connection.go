@@ -78,6 +78,12 @@ type Connection struct {
 
 	pubConns []*managedConn // publisher-role TCP connections
 	conConns []*managedConn // consumer-role TCP connections
+
+	// topology snapshot registry — keyed by *Topology pointer identity (see AttachTo)
+	topoMu     sync.RWMutex
+	topoKeys   []*Topology            // registration order (for deterministic redeclare)
+	topoSnaps  map[*Topology]*Topology // original ptr → deep-expanded snapshot
+	topoHooked bool                   // true once the redeclare hook has been registered
 }
 
 // Dial establishes a supervised pool of AMQP connections and returns the
@@ -313,14 +319,9 @@ func (mc *managedConn) registerHook(fn func(ctx context.Context) error) {
 	mc.hooksMu.Unlock()
 }
 
-// openDeclareChannel opens a temporary AMQP channel on the first publisher
-// connection for use by Topology.Declare. The caller is responsible for
-// closing the returned channel.
-func (c *Connection) openDeclareChannel(_ context.Context) (topologyChannel, error) {
-	if len(c.pubConns) == 0 {
-		return nil, ErrNotConnected
-	}
-	mc := c.pubConns[0]
+// openChannel opens a temporary AMQP channel on this managed connection.
+// The caller is responsible for closing the returned channel.
+func (mc *managedConn) openChannel() (topologyChannel, error) {
 	mc.mu.RLock()
 	raw := mc.raw
 	mc.mu.RUnlock()
@@ -328,6 +329,16 @@ func (c *Connection) openDeclareChannel(_ context.Context) (topologyChannel, err
 		return nil, ErrNotConnected
 	}
 	return raw.Channel()
+}
+
+// openDeclareChannel opens a temporary AMQP channel on the first publisher
+// connection for use by Topology.Declare. The caller is responsible for
+// closing the returned channel.
+func (c *Connection) openDeclareChannel(_ context.Context) (topologyChannel, error) {
+	if len(c.pubConns) == 0 {
+		return nil, ErrNotConnected
+	}
+	return c.pubConns[0].openChannel()
 }
 
 // health opens a temporary AMQP channel and closes it to verify liveness.
