@@ -191,5 +191,5 @@ func TestRunTopologyRedeclare_secondSnapshotFails_stopsOnFirstError(t *testing.T
 	err := conn.runTopologyRedeclare(context.Background(), mc)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrTopologyMismatch, "second snapshot failure must wrap ErrTopologyMismatch")
-	assert.Equal(t, 2, callCount, "must have attempted exactly two channels (one per topology)")
+	require.Equal(t, 2, callCount, "must have attempted exactly two channels (one per topology)")
 }
