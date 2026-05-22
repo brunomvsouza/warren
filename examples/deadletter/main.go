@@ -1,9 +1,8 @@
-// Package main demonstrates dead-letter topology expansion and the quorum-queue
-// DeliveryLimit using the Warren library.
+// Package main demonstrates dead-letter topology expansion using the Warren library.
 //
 // What this example demonstrates:
-//   - Declaring a QueueTypeQuorum source queue with DeliveryLimit and a full
-//     DeadLetter entry (Exchange, RoutingKey, TTL, MaxLength, Overflow)
+//   - Declaring a QueueTypeQuorum source queue with a full DeadLetter entry
+//     (Exchange, RoutingKey, TTL, MaxLength, Overflow)
 //   - The in-memory DLX expansion that merges x-dead-letter-* args into the
 //     source queue before the first broker declare (no re-declare needed)
 //   - Publishing a message and having a raw consumer nack it without requeue
@@ -20,7 +19,7 @@
 // Topology side-effects on the broker:
 //   - Creates exchange "warren.examples.dl.topic" (topic, durable)
 //   - Creates exchange "warren.examples.dl.orders.dlx" (topic, durable)
-//   - Creates queue "warren.examples.dl.orders" (quorum, durable, DeliveryLimit=3,
+//   - Creates queue "warren.examples.dl.orders" (quorum, durable,
 //     x-dead-letter-exchange=warren.examples.dl.orders.dlx,
 //     x-dead-letter-routing-key=dead.#)
 //   - Creates queue "warren.examples.dl.orders.dlq" (classic, durable)
@@ -94,10 +93,9 @@ func run() error {
 		},
 		Queues: []warren.Queue{
 			{
-				Name:          "warren.examples.dl.orders",
-				Durable:       true,
-				Type:          warren.QueueTypeQuorum,
-				DeliveryLimit: 3,
+				Name:    "warren.examples.dl.orders",
+				Durable: true,
+				Type:    warren.QueueTypeQuorum,
 			},
 			{
 				// DLQ — also created by the DLX pre-pass, declared here
