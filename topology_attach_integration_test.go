@@ -32,11 +32,11 @@ func TestTopology_AttachTo_redeclaresAfterReconnect_integration(t *testing.T) {
 		}),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
+	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = conn.Close(closeCtx)
-	})
+	}()
 
 	topo := &amqp.Topology{
 		Queues: []amqp.Queue{
@@ -84,11 +84,11 @@ func TestTopology_AttachTo_onReconnectFiresAfterTopologyRedeclared_integration(t
 		}),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
+	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = conn.Close(closeCtx)
-	})
+	}()
 
 	topo := &amqp.Topology{
 		Queues: []amqp.Queue{
@@ -139,11 +139,11 @@ func TestTopology_AttachTo_degradedOnMismatch_integration(t *testing.T) {
 		}),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() {
+	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = conn.Close(closeCtx)
-	})
+	}()
 
 	// Declare a durable queue.
 	topo1 := &amqp.Topology{
