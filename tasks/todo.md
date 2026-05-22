@@ -1,4 +1,4 @@
-# Task list: amqp.go v0.1.0
+# Task list: Warren v0.1.0
 
 > Live checklist. Tick boxes as work progresses. See `plan.md` for
 > phase rationale, dependency graph, and risks. See `SPEC.md` for the
@@ -829,7 +829,7 @@ Rev 5 adds `WithConnectionName`, `WithPublisherConnections`,
   - [ ] **`WithConnectionName(name string)`** — default `<binary>-<hostname>-<pid>`; sets `client_properties.connection_name`. Role and index suffixes (`-pub-0`, `-con-0`, …) appended per TCP connection.
   - [ ] **`WithPublisherConnections(n int)`** + **`WithConsumerConnections(n int)`** — already implemented in T07d; T34 covers the option wiring + default values (both 1).
   - [ ] **`WithOnResubscribe(func(queue string))`** — fires once per consumer re-subscribe (alongside the mandatory metric in T19).
-  - [ ] `WithClientProperties` default sets `product=amqp.go`, `version=<from runtime/debug>`, `platform=Go <ver>`, `connection_name=<from WithConnectionName>`.
+  - [ ] `WithClientProperties` default sets `product=warren`, `version=<from runtime/debug>`, `platform=Go <ver>`, `connection_name=<from WithConnectionName>`.
   - [ ] **`WithFrameMax` godoc sizing table** (Rev 7, per SPEC §6.1 lines 677–700 + §10 #46): the doc-comment includes the three sizing tiers — small (≤8 KiB messages: `WithFrameMax(8192)`), streaming (32 KiB–1 MiB messages: `WithFrameMax(131072)`), hard-max (`WithFrameMax(0)` = server-negotiated, currently 128 KiB on RabbitMQ 3.13/4.x) — and the explicit pointer-out that messages >100 MiB should be chunked at the application layer. The `< 4096` rejection (already asserted in T07) is cross-referenced from this godoc.
   - [ ] **`WithHeartbeat` godoc sizing table + zero-warning** (Rev 7, per SPEC §6.1 lines 652–675 + §10 #47): the doc-comment includes the partition-detection guidance (timeout ≈ 2× heartbeat) and three workload tiers — high-throughput / low-latency (`5s` = 10s detection), batch / low-priority (`30s` = 60s detection, default), battery / behind-LB (`60s` = 120s detection). `WithHeartbeat(0)` triggers a `Dial`-time warning log "heartbeats disabled — strongly discouraged: broker partitions become undetectable until the next frame is written" (asserted via a captured log buffer in the unit test).
 - **Verify:** Unit tests for each option's effect on the underlying `amqp091.Config`. Smoke integration test asserts `rabbitmqctl list_connections name client_properties` matches: `name` ends with `-pub-N` / `-con-N`, `client_properties` includes the documented keys.
