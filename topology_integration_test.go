@@ -22,11 +22,11 @@ func TestTopology_Declare_happyPath_integration(t *testing.T) {
 
 	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = conn.Close(ctx)
-	})
+		_ = conn.Close(closeCtx)
+	}()
 
 	topo := &amqp.Topology{
 		Exchanges: []amqp.Exchange{
@@ -52,11 +52,11 @@ func TestTopology_Declare_idempotent_integration(t *testing.T) {
 
 	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = conn.Close(ctx)
-	})
+		_ = conn.Close(closeCtx)
+	}()
 
 	topo := &amqp.Topology{
 		Queues: []amqp.Queue{
@@ -76,11 +76,11 @@ func TestTopology_Declare_mismatch_integration(t *testing.T) {
 
 	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = conn.Close(ctx)
-	})
+		_ = conn.Close(closeCtx)
+	}()
 
 	// Declare a durable queue first.
 	topo1 := &amqp.Topology{
@@ -92,11 +92,11 @@ func TestTopology_Declare_mismatch_integration(t *testing.T) {
 
 	conn2, err := amqp.Dial(ctx, amqp.WithAddr(url))
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = conn2.Close(ctx)
-	})
+		_ = conn2.Close(closeCtx)
+	}()
 
 	// Try to redeclare with a conflicting non-durable flag.
 	topo2 := &amqp.Topology{
@@ -118,11 +118,11 @@ func TestTopology_Declare_dlxExpansion_integration(t *testing.T) {
 
 	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = conn.Close(ctx)
-	})
+		_ = conn.Close(closeCtx)
+	}()
 
 	topo := &amqp.Topology{
 		Queues: []amqp.Queue{
@@ -147,11 +147,11 @@ func TestTopology_Declare_quorumWithDeliveryLimit_integration(t *testing.T) {
 
 	conn, err := amqp.Dial(ctx, amqp.WithAddr(url))
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = conn.Close(ctx)
-	})
+		_ = conn.Close(closeCtx)
+	}()
 
 	topo := &amqp.Topology{
 		Queues: []amqp.Queue{

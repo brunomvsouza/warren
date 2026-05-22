@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,8 +50,9 @@ type managedConn struct {
 	hooks   []func(ctx context.Context) error
 
 	// lifecycle
-	cancel context.CancelFunc
-	done   chan struct{}
+	cancel           context.CancelFunc
+	done             chan struct{}
+	forceReconnectCh chan struct{} // signals supervisor to reconnect without returning
 
 	// tracks in-flight onTopoDegraded callback goroutines; drained in close
 	wg sync.WaitGroup
@@ -158,11 +160,12 @@ func openPool(ctx context.Context, role string, count int, opts *connOptions) ([
 	for i := range count {
 		name := connpool.ConnName(opts.connectionName, role, i)
 		mc := &managedConn{
-			name: name,
-			role: role,
-			idx:  i,
-			done: make(chan struct{}),
-			opts: opts,
+			name:             name,
+			role:             role,
+			idx:              i,
+			done:             make(chan struct{}),
+			forceReconnectCh: make(chan struct{}, 1),
+			opts:             opts,
 		}
 		mc.barrierCond = sync.NewCond(&mc.barrierMu)
 
@@ -370,13 +373,14 @@ func (mc *managedConn) health(_ context.Context) error {
 	return ch.Close()
 }
 
-// forceClose closes the current raw connection to trigger a reconnect cycle.
+// forceClose signals the supervisor to drop the current connection and
+// reconnect.  Using a dedicated channel avoids calling raw.Close() directly —
+// a graceful AMQP close sends ok=false on NotifyClose, which the supervisor
+// interprets as a normal shutdown rather than a reconnect trigger.
 func (mc *managedConn) forceClose() {
-	mc.mu.RLock()
-	raw := mc.raw
-	mc.mu.RUnlock()
-	if raw != nil {
-		_ = raw.Close()
+	select {
+	case mc.forceReconnectCh <- struct{}{}:
+	default: // already a pending force-reconnect; skip
 	}
 }
 
@@ -469,6 +473,12 @@ func (mc *managedConn) supervisor(ctx context.Context) {
 				if !ok || ctx.Err() != nil {
 					return
 				}
+				goto reconnect
+
+			case <-mc.forceReconnectCh:
+				// Operator-initiated reconnect: close the raw connection (which
+				// may produce a graceful ok=false on closeCh) and reconnect.
+				_ = raw.Close()
 				goto reconnect
 			}
 		}
@@ -631,6 +641,19 @@ func applyConnDefaults(opts *connOptions) {
 	}
 	if opts.tracer == nil {
 		opts.tracer = otel.NoOpTracer{}
+	}
+	// Populate username/password from URL userinfo when WithAuth was not called,
+	// so AuthenticatedUser() reflects credentials embedded in WithAddr and
+	// dialAMQP does not send PlainAuth with an empty password.
+	if opts.username == "" && opts.saslMechanism == SASLPlain {
+		addr := opts.addr
+		if len(opts.addrs) > 0 {
+			addr = opts.addrs[0]
+		}
+		if u, err := url.Parse(addr); err == nil && u.User != nil {
+			opts.username = u.User.Username()
+			opts.password, _ = u.User.Password()
+		}
 	}
 }
 

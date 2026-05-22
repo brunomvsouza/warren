@@ -108,6 +108,29 @@ func TestComputeAuthUser_plain_emptyUsername(t *testing.T) {
 	assert.Equal(t, "", computeAuthUser(opts))
 }
 
+func TestApplyConnDefaults_extractsUsernameFromAddr(t *testing.T) {
+	opts := &connOptions{
+		saslMechanism: SASLPlain,
+		addr:          "amqp://guest:secret@localhost/",
+	}
+	applyConnDefaults(opts)
+	assert.Equal(t, "guest", computeAuthUser(opts),
+		"username must be extracted from URL userinfo when WithAuth is not called")
+	assert.Equal(t, "secret", opts.password,
+		"password must be extracted from URL userinfo together with username")
+}
+
+func TestApplyConnDefaults_doesNotOverwriteExplicitUsername(t *testing.T) {
+	opts := &connOptions{
+		saslMechanism: SASLPlain,
+		username:      "alice",
+		addr:          "amqp://bob:pass@localhost/",
+	}
+	applyConnDefaults(opts)
+	assert.Equal(t, "alice", computeAuthUser(opts),
+		"explicit WithAuth username must not be overwritten by URL userinfo")
+}
+
 func TestComputeAuthUser_external_returnsCN(t *testing.T) {
 	cert := selfSignedCertInternal(t, "svc-account")
 	opts := &connOptions{

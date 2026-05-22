@@ -39,11 +39,11 @@ func TestPublishExample_integration(t *testing.T) {
 	// miss the message.
 	raw, err := amqp091.Dial(url)
 	require.NoError(t, err, "dial for consumer")
-	t.Cleanup(func() { _ = raw.Close() })
+	defer raw.Close()
 
 	ch, err := raw.Channel()
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = ch.Close() })
+	defer ch.Close()
 
 	// The example declares the queue as auto-delete, so we just need to bind a
 	// consumer to it before the example runs.
