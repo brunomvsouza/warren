@@ -1,4 +1,4 @@
-# Spec: amqp.go
+# Spec: Warren
 
 A modern, ergonomic Go client for AMQP 0-9-1 (RabbitMQ), built on top of
 `github.com/rabbitmq/amqp091-go`.
@@ -110,7 +110,7 @@ Go developers building message-driven systems against RabbitMQ.
 | --------------- | -------------------------------------------------- |
 | Language        | Go **1.23+**                                       |
 | Module path     | `github.com/brunomvsouza/warren`                     |
-| Repo            | `github.com/brunomvsouza/amqp.go` (working dir)     |
+| Repo            | `github.com/brunomvsouza/warren` (working dir)      |
 | AMQP transport  | `github.com/rabbitmq/amqp091-go` (BSD-2-Clause)    |
 | Broker          | RabbitMQ 3.13 LTS and 4.x                          |
 | Mocks           | `go.uber.org/mock` (gomock) — in `amqpmock/`       |

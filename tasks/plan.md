@@ -1,4 +1,4 @@
-# Implementation Plan: amqp.go v0.1.0
+# Implementation Plan: Warren v0.1.0
 
 > Companion document to `SPEC.md`. The spec defines **what** to build; this
 > plan defines **how** and **in what order**. Read the spec first.
