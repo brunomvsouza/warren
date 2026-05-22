@@ -320,7 +320,7 @@ Publisher confirm tracker preserved across reconnects. Rev 5 adds
 - **Files:** `publisher.go`, `publisher_builder.go`, `publisher_test.go`, `publisher_integration_test.go`.
 - **Deps:** T07b, T07d, T08, T09, T10, T11.
 
-### [ ] T13 — Mandatory + Returns + Timeouts + PublishRetry + broker-nack + UserID + retry metric · M
+### [x] T13 — Mandatory + Returns + Timeouts + PublishRetry + broker-nack + UserID + retry metric · M
 Rev 5 adds `PublishTimeout`, `PublishBatchMaxInFlight`,
 `PublishRetry`, and `ErrPublishNacked`. `PublisherBuilder.RetryPolicy()`
 from Rev 4 is **renamed** to `PublishRetry()`. Rev 6:
@@ -382,7 +382,7 @@ can close.
 
 ## Phase 3 — Topology: declared once, separately
 
-### [ ] T14 — Topology types · S
+### [x] T14 — Topology types · S
 Rev 5 adds `Queue.DeliveryLimit` and `Queue.SingleActiveConsumer`.
 - **Acceptance:**
   - [ ] `Topology`, `Exchange`, `Queue`, `Binding`, `DeadLetter` struct types from SPEC §6.6 — each with the **`NoWait bool`** field where applicable.
@@ -405,7 +405,7 @@ Rev 5 adds `Queue.DeliveryLimit` and `Queue.SingleActiveConsumer`.
 - **Files:** `topology.go` (types only at this stage), `topology_test.go`.
 - **Deps:** T02.
 
-### [ ] T15 — `Topology.Declare` idempotent + mismatch · M
+### [x] T15 — `Topology.Declare` idempotent + mismatch · M
 SPEC compliance: `Declare` is a **two-step pipeline** — an in-memory
 expansion happens *before* any broker call, then the broker sees a
 single declare sequence in fixed order. AMQP 0-9-1 rejects
