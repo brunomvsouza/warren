@@ -206,7 +206,7 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 	require.NoError(t, err)
 
 	// canned workload — simulate activity across all three metrics
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		cm.RecordReconnect("publisher")
 		cm.RecordBlocked("publisher", time.Duration(i+1)*100*time.Millisecond)
 		cm.RecordTopologyRedeclare("publisher", 40*time.Millisecond)

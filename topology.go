@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
@@ -129,7 +130,6 @@ func (t *Topology) AttachTo(conn *Connection) error {
 	// conn.pubConns and conn.conConns are immutable after Dial, so this
 	// access is safe without a lock.
 	for _, mc := range append(conn.pubConns, conn.conConns...) {
-		mc := mc
 		mc.registerHook(func(ctx context.Context) error {
 			return conn.runTopologyRedeclare(ctx, mc)
 		})
@@ -147,9 +147,7 @@ func (c *Connection) runTopologyRedeclare(_ context.Context, mc *managedConn) er
 	keys := make([]*Topology, len(c.topoKeys))
 	copy(keys, c.topoKeys)
 	snaps := make(map[*Topology]*Topology, len(c.topoSnaps))
-	for k, v := range c.topoSnaps {
-		snaps[k] = v
-	}
+	maps.Copy(snaps, c.topoSnaps)
 	c.topoMu.RUnlock()
 
 	for _, key := range keys {
