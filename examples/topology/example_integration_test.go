@@ -6,7 +6,6 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +31,13 @@ func TestTopologyExample_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	url := amqpTestURL(t)
+
+	// Pre-clean any leftover state from previous runs so the example's
+	// idempotent declare path is also exercised from a fresh slate.
+	cleanTopology(t, url)
+	// Guaranteed post-cleanup regardless of test outcome.
+	t.Cleanup(func() { cleanTopology(t, url) })
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -47,8 +53,9 @@ func TestTopologyExample_integration(t *testing.T) {
 	assert.Contains(t, output, "idempotent", "expected idempotent log line")
 	assert.Contains(t, output, "topology re-declared (after reconnect)", "expected reconnect redeclare log line")
 
-	// Verify that the declared queue is visible on the broker by opening a raw
-	// connection and inspecting it.
+	// Verify that the declared queue is visible on the broker. The queues are
+	// purely durable (no AutoDelete), so they persist after the example closes
+	// its connection.
 	rawConn, err := amqp091.Dial(url)
 	require.NoError(t, err)
 	defer rawConn.Close() //nolint:errcheck
@@ -61,38 +68,34 @@ func TestTopologyExample_integration(t *testing.T) {
 	q, err := ch.QueueDeclarePassive(
 		"warren.examples.orders",
 		true,  // durable
-		true,  // auto-delete
+		false, // auto-delete
 		false, // exclusive
 		false, // no-wait
 		nil,
 	)
 	require.NoError(t, err, "queue warren.examples.orders should exist after example exits")
 	assert.Equal(t, "warren.examples.orders", q.Name)
+}
 
-	// Clean up: delete the auto-delete queues and durable exchanges.
+// cleanTopology deletes the queues and exchanges created by the topology example.
+func cleanTopology(t *testing.T, url string) {
+	t.Helper()
+	rawConn, err := amqp091.Dial(url)
+	if err != nil {
+		return
+	}
+	defer rawConn.Close() //nolint:errcheck
+
+	ch, err := rawConn.Channel()
+	if err != nil {
+		return
+	}
+	defer ch.Close() //nolint:errcheck
+
 	for _, name := range []string{"warren.examples.orders", "warren.examples.payments", "warren.examples.alerts"} {
 		_, _ = ch.QueueDelete(name, false, false, false)
 	}
 	for _, name := range []string{"warren.examples.events", "warren.examples.notify"} {
 		_ = ch.ExchangeDelete(name, false, false)
 	}
-}
-
-// TestTopologyExample_integration_outputContainsReconnect verifies that the
-// example stdout confirms the reconnect redeclare happened.
-func TestTopologyExample_integration_outputContainsReconnect(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	url := amqpTestURL(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "go", "run", ".") //nolint:gosec
-	cmd.Dir = "."
-	cmd.Env = append(os.Environ(), "AMQP_URL="+url)
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "example exited non-zero:\n%s", string(out))
-
-	assert.True(t, strings.Contains(string(out), "topology re-declared (after reconnect)"),
-		"expected reconnect log line in output:\n%s", string(out))
 }
