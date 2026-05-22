@@ -2,6 +2,7 @@ package amqp
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/brunomvsouza/amqp/codec"
 	"github.com/brunomvsouza/amqp/metrics"
@@ -67,6 +68,9 @@ func (b *PublisherBuilder[M]) Tracer(t otel.Tracer) *PublisherBuilder[M] {
 // Build constructs and returns a Publisher[M]. Returns an error if
 // the builder state is invalid.
 func (b *PublisherBuilder[M]) Build() (*Publisher[M], error) {
+	if b.conn == nil {
+		return nil, fmt.Errorf("%w: conn must not be nil", ErrInvalidOptions)
+	}
 	b.applyBuilderDefaults()
 
 	numConns := b.conn.NumPubConns()

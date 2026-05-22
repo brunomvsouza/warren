@@ -157,6 +157,8 @@ func (mc *managedConn) openPublisherEntry(poolSize int) (publisherEntry, error) 
 		buf = 8
 	}
 	go func() {
+		// amqp091-go fans out basic.ack/nack multiple=true into individual
+		// Confirmations per delivery tag, so Multiple is always false here.
 		for c := range ch.NotifyPublish(make(chan amqp091.Confirmation, buf)) {
 			if c.Ack {
 				tracker.Ack(c.DeliveryTag, false)
@@ -266,10 +268,11 @@ func (p *Publisher[M]) Publish(ctx context.Context, msg Message[M]) error {
 	deliveryTag := entry.ch.GetNextPublishSeqNo()
 	if err := entry.tracker.Register(deliveryTag); err != nil {
 		p.pm.RecordPublish(exchange, "error", time.Since(start))
-		return ErrChannelClosed
+		return p.mapConfirmError(err)
 	}
 
 	if err := entry.ch.PublishWithContext(ctx, exchange, p.routingKey, false, false, pub); err != nil {
+		entry.tracker.Cancel(deliveryTag)
 		p.pm.RecordPublish(exchange, "error", time.Since(start))
 		return wrapAMQPError(err)
 	}
