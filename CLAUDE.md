@@ -15,7 +15,7 @@ When the user references "Txx", look it up in `tasks/plan.md` for scope and acce
 ```
 make build              # go build ./...
 make test               # go test -race -cover ./...
-make test-integration   # build tag 'integration' (requires Docker)
+make test-integration   # build tag 'integration' (requires AMQP_TEST_URL set)
 make test-conformance   # build tag 'conformance' (requires Docker)
 make test-all           # unit + integration + conformance
 make lint               # golangci-lint run ./...
@@ -23,6 +23,19 @@ make mocks              # go generate ./... (gomock)
 make examples-build     # go build ./examples/... (unit lane; no broker required)
 make examples-smoke     # go test -race -tags=integration ./examples/... (requires Docker)
 ```
+
+### Testes de integração locais
+
+Use `docker-compose.integration.yml` para subir um RabbitMQ idêntico ao CI:
+
+```
+make integration-up                                           # sobe o broker (aguarda healthy)
+AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ make test-integration
+AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ make examples-smoke
+make integration-down                                         # para e remove o broker
+```
+
+O `AMQP_TEST_URL` deve ser exportado ou prefixado no comando; sem ele os testes de integração pulam com `t.Skip`.
 
 `examples-build` and `examples-smoke` enforce SPEC §7 "Executable
 examples at checkpoints" + §10 Rev decision 49: every checkpoint
