@@ -109,6 +109,83 @@ serialização existir para validar o round-trip de ponta a ponta.
 
 ---
 
+### LATER-04 — Token do semáforo de pool não retornado em caso de panic em `openFn`
+
+**Contexto:** `publisher.go:acquire` — o token de semáforo é devolvido ao canal `p.tokens` apenas
+no caminho de erro explícito (linha `p.tokens <- struct{}{}`). Se `openFn` disparar um panic, o
+`defer` de retorno do token não existe e o token é perdido permanentemente, reduzindo o tamanho
+efetivo do pool a cada panic.
+
+**Impacto:** Panics repetidos em `openFn` (ex: nil pointer em `openPublisherEntry` durante uma
+janela de race em `raw`) esgotariam silenciosamente o pool, fazendo todos os `Publish` bloquearem
+até deadline. `openFn` é código interno controlado, portanto o risco é baixo, mas a falha é
+não-óbvia.
+
+**Evidência:** `/ship` security-audit T12 — LOW finding.
+
+**Sugestão de solução:** Usar `defer` + flag booleana em `acquire` para retornar o token
+incondicionalmente em caso de panic:
+```go
+tokenReturned := false
+defer func() {
+    if !tokenReturned {
+        p.tokens <- struct{}{}
+    }
+}()
+entry, err := p.getOrOpen()
+if err != nil {
+    return publisherEntry{}, nil, err
+}
+tokenReturned = true
+return entry, func() { p.release(entry) }, nil
+```
+
+**Pré-requisitos:** Nenhum. Pode ser feito a qualquer momento após T12.
+
+---
+
+### LATER-05 — `wrapAMQPError` propaga o campo `Reason` do broker verbatim nos erros
+
+**Contexto:** `errors.go:wrapAMQPError` — o wrapping `fmt.Errorf("%w: %w", sentinel, err)` inclui
+a string `.Error()` do `*amqp091.Error`, que contém o campo `Reason` do broker com detalhes de
+topologia interna (nome de fila, vhost, tipo de recurso). Ex: `"Exception (405) Reason:
+\"RESOURCE_LOCKED - exclusive access to queue 'jobs' in vhost '/'\""`.
+
+**Impacto:** Em deployments multi-tenant ou com separação de contextos, nomes de filas e vhosts
+de outras tenants podem vazar em logs de aplicação, responses HTTP ou sistemas de observabilidade
+externos.
+
+**Evidência:** `/ship` security-audit T12 — MEDIUM finding.
+
+**Sugestão de solução:** Criar `redact.AMQPError(err)` que formata apenas o código numérico
+(`"Exception (%d)"`) sem o Reason, ou aplicar redação no `Reason` antes de incluí-lo no erro
+retornado. O passo de dois wraps (`%w: %w`) deve ser mantido para `errors.Is`/`AMQPCode`
+continuarem funcionando.
+
+**Pré-requisitos:** `internal/redact` (já existe). Pode ser feito a qualquer momento após T12.
+
+---
+
+### LATER-06 — Upper bound ausente em `WithChannelPoolSize` / buffer de confirms
+
+**Contexto:** `publisher.go:openPublisherEntry` — o buffer do canal de confirms é
+`max(poolSize, 8)`. `poolSize` vem de `opts.channelPoolSize` que é validado como `≥ 1` mas não
+tem teto. Um valor extremo (ex: 1_000_000) causa uma alocação massiva de `chan amqp091.Confirmation`
+em cada `openPublisherEntry`.
+
+**Impacto:** Misconfiguration local causa OOM imediato em vez de erro de validação descritivo na
+inicialização. Em infraestrutura compartilhada ou gerenciada, pode ser explorado para DoS.
+
+**Evidência:** `/ship` security-audit T12 — LOW finding.
+
+**Sugestão de solução:**
+1. Adicionar validação de upper bound (ex: 4096) em `validateConnOptions`.
+2. Cap o buffer de confirms em `openPublisherEntry`: `if buf > 4096 { buf = 4096 }`.
+
+**Pré-requisitos:** T12. Pode ser adicionado ao mesmo PR ou em hotfix posterior.
+
+---
+
 ### LATER-03 — Fuzz target do codec cobre apenas `NewJSON()` strict com `any` como destino
 
 **Contexto:** `codec/json_fuzz_test.go:16-21` — `FuzzCodecJSON` usa `var v any` como destino de

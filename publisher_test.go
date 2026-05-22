@@ -442,3 +442,185 @@ func TestPublisherBuilder_withoutMetrics_wins(t *testing.T) {
 	_, isNoop := b.pm.(metrics.NoOpPublisherMetrics)
 	assert.True(t, isNoop, "WithoutMetrics should override Metrics")
 }
+
+func TestPublisherBuilder_Build_returnsErrInvalidOptions_onNilConn(t *testing.T) {
+	_, err := PublisherFor[testPayload](nil).Build()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrInvalidOptions), "expected ErrInvalidOptions, got %v", err)
+}
+
+func TestPublisherBuilder_Exchange_lastWins(t *testing.T) {
+	b := PublisherFor[testPayload](nil).Exchange("a").Exchange("b")
+	assert.Equal(t, "b", b.exchange)
+}
+
+func TestPublisherBuilder_RoutingKey_lastWins(t *testing.T) {
+	b := PublisherFor[testPayload](nil).RoutingKey("rk1").RoutingKey("rk2")
+	assert.Equal(t, "rk2", b.routingKey)
+}
+
+func TestPublisher_Publish_returnsErrAlreadyClosed(t *testing.T) {
+	fake := newFakePubCh(true)
+	pub, _, stopPool := newTestPub[testPayload](fake, metrics.NoOpPublisherMetrics{})
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+
+	require.NoError(t, pub.Close(context.Background()))
+
+	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrAlreadyClosed))
+}
+
+func TestPublisher_Close_returnsErrAlreadyClosed_onSecondCall(t *testing.T) {
+	fake := newFakePubCh(true)
+	pub, _, stopPool := newTestPub[testPayload](fake, metrics.NoOpPublisherMetrics{})
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+
+	require.NoError(t, pub.Close(context.Background()))
+	err := pub.Close(context.Background())
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrAlreadyClosed))
+}
+
+func TestPublisher_Publish_returnsErrConfirmTimeout(t *testing.T) {
+	fake := newFakePubCh(false /* manual — no confirm ever sent */)
+	pub, _, stopPool := newTestPub[testPayload](fake, metrics.NoOpPublisherMetrics{})
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	// Set a very short timeout directly on the struct so the test is deterministic.
+	pub.confirmTimeout = 10 * time.Millisecond
+
+	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrConfirmTimeout), "expected ErrConfirmTimeout, got %v", err)
+}
+
+func TestPublisher_Publish_returnsErrUnroutable(t *testing.T) {
+	// Use a fresh pool wired directly to a tracker we control so we can call
+	// MarkReturned before the ack arrives (wireFakePool hides the tracker).
+	tracker := confirms.New()
+	confirmCh := make(chan amqp091.Confirmation, 4)
+	fake2 := newFakePubCh(false)
+	fake2.mu.Lock()
+	fake2.confirmCh = confirmCh
+	fake2.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for c := range confirmCh {
+			if c.Ack {
+				tracker.Ack(c.DeliveryTag, false)
+			} else {
+				tracker.Nack(c.DeliveryTag, false)
+			}
+		}
+		tracker.CloseAll()
+	}()
+
+	pool2 := newPublisherConnPool(1, func() (publisherEntry, error) {
+		return publisherEntry{ch: fake2, tracker: tracker, closeCh: fake2.closedCh}, nil
+	})
+
+	pub2 := &Publisher[testPayload]{
+		pools: []*publisherConnPool{pool2}, mcs: []*managedConn{{}},
+		codec: codec.NewJSON(), pm: metrics.NoOpPublisherMetrics{}, exchange: "x",
+		confirmTimeout: 2 * time.Second,
+	}
+
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		// Mark tag 1 as returned, then send ack.
+		tracker.MarkReturned(1, 312)
+		confirmCh <- amqp091.Confirmation{DeliveryTag: 1, Ack: true}
+	}()
+
+	err := pub2.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrUnroutable), "expected ErrUnroutable, got %v", err)
+
+	_ = fake2.Close()
+	<-done
+}
+
+func TestPublisher_Publish_returnsErrInvalidMessage_onEncodeFailure(t *testing.T) {
+	// Channels cannot be JSON-encoded. Encode fails before pool acquisition,
+	// so a pool is not needed for this test.
+	type badPayload struct {
+		Ch chan int `json:"ch"`
+	}
+	pub := &Publisher[badPayload]{
+		pools: []*publisherConnPool{}, mcs: []*managedConn{},
+		codec: codec.NewJSON(), pm: metrics.NoOpPublisherMetrics{}, exchange: "x",
+	}
+
+	err := pub.Publish(context.Background(), Message[badPayload]{Body: &badPayload{Ch: make(chan int)}})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrInvalidMessage), "expected ErrInvalidMessage, got %v", err)
+}
+
+func TestPublisher_Publish_returnsErrOnPublishWithContextFailure(t *testing.T) {
+	fake := newFakePubCh(false)
+	fake.publishErr = errors.New("network gone")
+	pub, _, stopPool := newTestPub[testPayload](fake, metrics.NoOpPublisherMetrics{})
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
+	require.Error(t, err)
+	// The tracker slot must be cancelled — publish again to verify pool is usable.
+	fake.publishErr = nil
+	fake.autoAck = true
+	err2 := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
+	assert.NoError(t, err2, "pool must be usable after a PublishWithContext failure")
+}
+
+func TestPublisherConnPool_drain_discardsFreeEntries(t *testing.T) {
+	fake := newFakePubCh(true)
+	pool, stopPool := wireFakePool(fake)
+	defer stopPool()
+
+	// Acquire, release back to free queue, then drain.
+	entry, release, err := pool.acquire(context.Background())
+	require.NoError(t, err)
+	release()
+	_ = entry
+
+	pool.drain()
+	assert.Equal(t, 0, len(pool.free), "drain must empty the free queue")
+}
+
+func TestPublisher_selectPool_choosesLeastInFlight(t *testing.T) {
+	fake1 := newFakePubCh(true)
+	fake2 := newFakePubCh(true)
+	pool1, stop1 := wireFakePool(fake1)
+	pool2, stop2 := wireFakePool(fake2)
+	defer stop1()
+	defer stop2()
+
+	pub := &Publisher[testPayload]{
+		pools: []*publisherConnPool{pool1, pool2},
+		mcs:   []*managedConn{{}, {}},
+	}
+
+	// pool1 has 2 in-flight, pool2 has 0 — selectPool should pick pool2.
+	pool1.inflight.Store(2)
+	pool2.inflight.Store(0)
+
+	chosen, _ := pub.selectPool()
+	assert.Same(t, pool2, chosen, "selectPool should return the pool with fewer in-flight")
+}
+
+func TestAmqpCodeTable_coversAllExpectedCodes(t *testing.T) {
+	expected := []uint16{311, 320, 402, 403, 404, 405, 406, 501, 502, 503, 504, 505, 506, 530, 540, 541}
+	for _, code := range expected {
+		_, ok := amqpCodeTable[code]
+		assert.True(t, ok, "amqpCodeTable missing code %d", code)
+	}
+	assert.Len(t, amqpCodeTable, len(expected), "amqpCodeTable has unexpected entries")
+}
