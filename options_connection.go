@@ -2,6 +2,7 @@ package warren
 
 import (
 	"crypto/tls"
+	"maps"
 	"net"
 	"time"
 
@@ -183,9 +184,7 @@ func WithClientProperties(props map[string]any) Option {
 		if o.clientProperties == nil {
 			o.clientProperties = make(amqp091.Table, len(props))
 		}
-		for k, v := range props {
-			o.clientProperties[k] = v
-		}
+		maps.Copy(o.clientProperties, props)
 	}
 }
 

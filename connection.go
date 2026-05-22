@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -765,9 +766,7 @@ func dialAMQP(_ context.Context, opts *connOptions, name string) (*amqp091.Conne
 		"connection_name": name,
 		"product":         "amqp.go",
 	}
-	for k, v := range opts.clientProperties {
-		props[k] = v
-	}
+	maps.Copy(props, opts.clientProperties)
 	cfg.Properties = props
 
 	addr := opts.addr

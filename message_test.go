@@ -168,7 +168,7 @@ func TestMessage_validateHeaders_rejectsExcessiveNesting(t *testing.T) {
 	// Build a Headers nested maxHeaderDepth+2 levels deep to exceed the limit.
 	deepest := Headers{"leaf": "value"}
 	current := deepest
-	for i := 0; i < maxHeaderDepth+1; i++ {
+	for range maxHeaderDepth + 1 {
 		current = Headers{"nested": current}
 	}
 	m := Message[struct{}]{Headers: current}

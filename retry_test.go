@@ -45,7 +45,7 @@ func TestRetryPolicy_jitterWithinBounds(t *testing.T) {
 		Max:    10 * time.Second,
 		Factor: 2.0,
 	}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		d := p.NextBackoff(2)
 		assert.GreaterOrEqual(t, d, p.Min, "jitter must not go below Min")
 		assert.LessOrEqual(t, d, p.Max, "jitter must not exceed Max")
