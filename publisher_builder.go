@@ -3,6 +3,7 @@ package amqp
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/brunomvsouza/amqp/codec"
 	"github.com/brunomvsouza/amqp/metrics"
@@ -22,6 +23,16 @@ type PublisherBuilder[M any] struct {
 	c      codec.Codec
 	pm     metrics.PublisherMetrics
 	tracer otel.Tracer
+
+	mandatory           bool
+	onReturn            func(Return)
+	confirmTimeout      time.Duration
+	confirmTimeoutSet   bool // distinguishes explicit zero from unset
+	publishTimeout      time.Duration
+	publishBatchMaxSize int
+	retryPolicy         RetryPolicy
+	retryPolicySet      bool
+	stampUserID         bool
 }
 
 // PublisherFor returns a builder for a Publisher[M] tied to conn.
@@ -65,6 +76,71 @@ func (b *PublisherBuilder[M]) Tracer(t otel.Tracer) *PublisherBuilder[M] {
 	return b
 }
 
+// Mandatory sets the AMQP mandatory flag on every publish. A mandatory
+// publish that cannot be routed to any queue triggers a basic.return frame
+// and Publish returns ErrUnroutable (OnReturn fires first if set).
+func (b *PublisherBuilder[M]) Mandatory() *PublisherBuilder[M] {
+	b.mandatory = true
+	return b
+}
+
+// OnReturn registers a callback that fires synchronously before Publish
+// unblocks when a mandatory publish is returned by the broker (basic.return).
+// The callback receives the full Return including properties and reply code.
+// Last-wins: calling OnReturn twice keeps only the second callback.
+func (b *PublisherBuilder[M]) OnReturn(cb func(Return)) *PublisherBuilder[M] {
+	b.onReturn = cb
+	return b
+}
+
+// ConfirmTimeout sets the deadline for receiving a publisher confirm (basic.ack
+// or basic.nack) after a publish. Default: 30 s. Zero disables the confirm
+// deadline (discouraged; the publisher may block indefinitely if the broker
+// never confirms).
+func (b *PublisherBuilder[M]) ConfirmTimeout(d time.Duration) *PublisherBuilder[M] {
+	b.confirmTimeout = d
+	b.confirmTimeoutSet = true
+	return b
+}
+
+// PublishTimeout sets an end-to-end deadline that bounds pool acquisition +
+// write + confirm + blocked-connection wait + reconnect barrier. Zero (default)
+// means the caller context is the only deadline. When both PublishTimeout and
+// the caller context have deadlines, the shorter one wins.
+func (b *PublisherBuilder[M]) PublishTimeout(d time.Duration) *PublisherBuilder[M] {
+	b.publishTimeout = d
+	return b
+}
+
+// PublishBatchMaxSize sets the per-call cap for PublishBatch (T22). Default:
+// 1024. This is NOT a sliding in-flight window — it is a per-call limit.
+// Validated at PublishBatch-time only.
+func (b *PublisherBuilder[M]) PublishBatchMaxSize(n int) *PublisherBuilder[M] {
+	b.publishBatchMaxSize = n
+	return b
+}
+
+// PublishRetry configures automatic retry of publishes that fail with a
+// transient error (IsTransient(err) == true). Permanent errors are never
+// retried. Each retry attempt increments the mandatory metric
+// publisher_retry_total{exchange, reason}.
+//
+// Retries can produce duplicates. Consumers MUST be idempotent (dedupe by
+// MessageID). See SPEC §6.2.1.
+func (b *PublisherBuilder[M]) PublishRetry(p RetryPolicy) *PublisherBuilder[M] {
+	b.retryPolicy = p
+	b.retryPolicySet = true
+	return b
+}
+
+// StampUserID auto-sets Message[M].UserID to conn.AuthenticatedUser() on every
+// Publish call. Use this to avoid manually populating UserID when the broker
+// validates the stamp. Last-wins against a previous StampUserID() call.
+func (b *PublisherBuilder[M]) StampUserID() *PublisherBuilder[M] {
+	b.stampUserID = true
+	return b
+}
+
 // Build constructs and returns a Publisher[M]. Returns an error if
 // the builder state is invalid.
 func (b *PublisherBuilder[M]) Build() (*Publisher[M], error) {
@@ -73,40 +149,54 @@ func (b *PublisherBuilder[M]) Build() (*Publisher[M], error) {
 	}
 	b.applyBuilderDefaults()
 
+	var rp *RetryPolicy
+	if b.retryPolicySet {
+		p := b.retryPolicy
+		rp = &p
+	}
+
+	// Build the Publisher first so pool closures can reference pub.callOnReturn.
+	pub := &Publisher[M]{
+		conn:                b.conn,
+		exchange:            b.exchange,
+		routingKey:          b.routingKey,
+		codec:               b.c,
+		pm:                  b.pm,
+		tracer:              b.tracer,
+		confirmTimeout:      b.confirmTimeout,
+		mandatory:           b.mandatory,
+		onReturn:            b.onReturn,
+		publishTimeout:      b.publishTimeout,
+		publishBatchMaxSize: b.publishBatchMaxSize,
+		retryPolicy:         rp,
+		stampUserID:         b.stampUserID,
+		authUser:            b.conn.AuthenticatedUser(),
+	}
+
 	numConns := b.conn.NumPubConns()
-	pools := make([]*publisherConnPool, numConns)
-	mcs := make([]*managedConn, numConns)
+	pub.pools = make([]*publisherConnPool, numConns)
+	pub.mcs = make([]*managedConn, numConns)
 	poolSize := b.conn.opts.channelPoolSize
 
 	for i := range numConns {
 		mc := b.conn.PubConnAt(i)
-		mcs[i] = mc
+		pub.mcs[i] = mc
 
 		// Capture loop variable for closure.
 		connIdx := i
-		pools[i] = newPublisherConnPool(poolSize, func() (publisherEntry, error) {
-			return b.conn.PubConnAt(connIdx).openPublisherEntry(poolSize)
+		pub.pools[i] = newPublisherConnPool(poolSize, func() (publisherEntry, error) {
+			return b.conn.PubConnAt(connIdx).openPublisherEntry(poolSize, pub.callOnReturn)
 		})
 
 		// Register drain hook so stale channels are discarded after reconnect.
-		pool := pools[i]
+		pool := pub.pools[i]
 		mc.registerHook(func(_ context.Context) error {
 			pool.drain()
 			return nil
 		})
 	}
 
-	return &Publisher[M]{
-		conn:           b.conn,
-		pools:          pools,
-		mcs:            mcs,
-		exchange:       b.exchange,
-		routingKey:     b.routingKey,
-		codec:          b.c,
-		pm:             b.pm,
-		tracer:         b.tracer,
-		confirmTimeout: defaultConfirmTimeout,
-	}, nil
+	return pub, nil
 }
 
 // applyBuilderDefaults fills any unset options with sensible defaults.
@@ -119,5 +209,11 @@ func (b *PublisherBuilder[M]) applyBuilderDefaults() {
 	}
 	if b.tracer == nil {
 		b.tracer = otel.NoOpTracer{}
+	}
+	if !b.confirmTimeoutSet {
+		b.confirmTimeout = defaultConfirmTimeout
+	}
+	if b.publishBatchMaxSize <= 0 {
+		b.publishBatchMaxSize = 1024
 	}
 }

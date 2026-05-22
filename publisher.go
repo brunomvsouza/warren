@@ -22,6 +22,7 @@ type pubChannel interface {
 	PublishWithContext(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp091.Publishing) error
 	Confirm(noWait bool) error
 	NotifyPublish(confirm chan amqp091.Confirmation) chan amqp091.Confirmation
+	NotifyReturn(c chan amqp091.Return) chan amqp091.Return
 	NotifyClose(c chan *amqp091.Error) chan *amqp091.Error
 	GetNextPublishSeqNo() uint64
 	Close() error
@@ -30,10 +31,19 @@ type pubChannel interface {
 // publisherEntry bundles a publisher channel with its per-lifetime confirm tracker.
 // One entry is created per channel open; the tracker survives pool recycles until
 // the channel closes.
+//
+// NOTE: publisherEntry is copied by value when the pool returns it from acquire.
+// Any field that must be shared between Publish (which holds the copy) and the
+// background goroutine (which holds the original) MUST be a pointer type so
+// that both sides refer to the same memory. activeTag is such a field.
 type publisherEntry struct {
 	ch      pubChannel
 	tracker *confirms.Tracker
 	closeCh chan *amqp091.Error
+	// activeTag holds the delivery tag of the in-flight publish (0 if none).
+	// Stored as a pointer so that the copy returned by pool.acquire and the
+	// original entry in the goroutine share the same atomic.
+	activeTag *atomic.Uint64
 }
 
 // publisherConnPool is a per-publisher-TCP-connection pool of AMQP channels.
@@ -127,8 +137,11 @@ func (p *publisherConnPool) drain() { p.drainFree() }
 func (p *publisherConnPool) closeAll() { p.drainFree() }
 
 // openPublisherEntry opens a new AMQP channel on mc, enables publisher confirms,
-// and starts the goroutine that routes ack/nack frames to the tracker.
-func (mc *managedConn) openPublisherEntry(poolSize int) (publisherEntry, error) {
+// and starts a single goroutine that routes both basic.return and basic.ack/nack
+// frames to the tracker. Using one goroutine for both frame types ensures that
+// MarkReturned is always called before the corresponding Ack, which is required
+// for correct ErrUnroutable resolution.
+func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Return)) (publisherEntry, error) {
 	mc.mu.RLock()
 	raw := mc.raw
 	mc.mu.RUnlock()
@@ -150,19 +163,49 @@ func (mc *managedConn) openPublisherEntry(poolSize int) (publisherEntry, error) 
 	if buf < 8 {
 		buf = 8
 	}
+
+	entry := publisherEntry{
+		ch:        ch,
+		tracker:   tracker,
+		closeCh:   closeCh,
+		activeTag: new(atomic.Uint64),
+	}
+
+	confirmCh := ch.NotifyPublish(make(chan amqp091.Confirmation, buf))
+	returnCh := ch.NotifyReturn(make(chan amqp091.Return, buf))
+
 	go func() {
-		// amqp091-go fans out basic.ack/nack multiple=true into individual
-		// Confirmations per delivery tag, so Multiple is always false here.
-		for c := range ch.NotifyPublish(make(chan amqp091.Confirmation, buf)) {
-			if c.Ack {
-				tracker.Ack(c.DeliveryTag, false)
-			} else {
-				tracker.Nack(c.DeliveryTag, false)
+		for {
+			select {
+			case ret, ok := <-returnCh:
+				if !ok {
+					returnCh = nil
+					continue
+				}
+				tag := entry.activeTag.Load() //nolint:gocritic // entry.activeTag is always non-nil here
+				if tag != 0 {
+					if onReturn != nil {
+						onReturn(ret)
+					}
+					tracker.MarkReturned(tag, ret.ReplyCode)
+				}
+			case c, ok := <-confirmCh:
+				if !ok {
+					tracker.CloseAll()
+					return
+				}
+				// amqp091-go fans out basic.ack/nack multiple=true into individual
+				// Confirmations per delivery tag, so Multiple is always false here.
+				if c.Ack {
+					tracker.Ack(c.DeliveryTag, false)
+				} else {
+					tracker.Nack(c.DeliveryTag, false)
+				}
 			}
 		}
-		tracker.CloseAll()
 	}()
-	return publisherEntry{ch: ch, tracker: tracker, closeCh: closeCh}, nil
+
+	return entry, nil
 }
 
 // defaultConfirmTimeout is the internal default when no ConfirmTimeout builder
@@ -182,10 +225,57 @@ type Publisher[M any] struct {
 	pm             metrics.PublisherMetrics
 	tracer         otel.Tracer
 	confirmTimeout time.Duration
+	mandatory      bool
+	onReturn       func(Return)
+	publishTimeout time.Duration
+	// publishBatchMaxSize is validated at PublishBatch-time only (T22).
+	publishBatchMaxSize int
+	retryPolicy         *RetryPolicy
+	stampUserID         bool
+	// authUser is the identity from conn.AuthenticatedUser(); used for UserID
+	// validation and StampUserID without holding the conn reference per-publish.
+	authUser string
 
 	mu     sync.Mutex
 	closed bool
 	wg     sync.WaitGroup
+}
+
+// callOnReturn is called by the entry's return listener goroutine when a
+// basic.return frame arrives. It converts the raw frame and invokes the
+// user-supplied OnReturn callback (if any).
+func (p *Publisher[M]) callOnReturn(r amqp091.Return) {
+	if p.onReturn == nil {
+		return
+	}
+	var exp time.Duration
+	if ms := r.Expiration; ms != "" {
+		var ms64 int64
+		if _, err := fmt.Sscanf(ms, "%d", &ms64); err == nil {
+			exp = time.Duration(ms64) * time.Millisecond
+		}
+	}
+	p.onReturn(Return{
+		ReplyCode:  r.ReplyCode,
+		ReplyText:  r.ReplyText,
+		Exchange:   r.Exchange,
+		RoutingKey: r.RoutingKey,
+		Properties: ReturnedProperties{
+			ContentType:     r.ContentType,
+			ContentEncoding: r.ContentEncoding,
+			Headers:         Headers(r.Headers),
+			DeliveryMode:    DeliveryMode(r.DeliveryMode), //nolint:gosec // G115: wire value
+			Priority:        r.Priority,
+			CorrelationID:   r.CorrelationId,
+			ReplyTo:         r.ReplyTo,
+			Expiration:      exp,
+			MessageID:       r.MessageId,
+			Timestamp:       r.Timestamp,
+			Type:            r.Type,
+			UserID:          r.UserId,
+			AppID:           r.AppId,
+		},
+	})
 }
 
 // Health returns nil if the publisher's underlying connection is live.
@@ -225,6 +315,12 @@ func (p *Publisher[M]) Publish(ctx context.Context, msg Message[M]) error {
 	p.mu.Unlock()
 	defer p.wg.Done()
 
+	if p.publishTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, p.publishTimeout)
+		defer cancel()
+	}
+
 	if err := msg.applyDefaults(p.codec); err != nil {
 		return err
 	}
@@ -232,11 +328,48 @@ func (p *Publisher[M]) Publish(ctx context.Context, msg Message[M]) error {
 		return err
 	}
 
+	// StampUserID: auto-set UserID from the authenticated connection identity.
+	if p.stampUserID && msg.UserID == "" {
+		msg.UserID = p.authUser
+	}
+
+	// Client-side UserID validation: if caller set a UserID that doesn't match
+	// the connection identity, reject locally without writing a publish frame.
+	// This prevents the 406-channel-close footgun from a mismatched stamp.
+	if msg.UserID != "" && p.authUser != "" && msg.UserID != p.authUser {
+		return fmt.Errorf("%w: UserID %q does not match authenticated user %q", ErrInvalidMessage, msg.UserID, p.authUser)
+	}
+
 	body, err := p.codec.Encode(msg.Body)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
 
+	var attempt int
+	for {
+		err := p.publishOnce(ctx, msg, body)
+		if err == nil {
+			return nil
+		}
+		if p.retryPolicy == nil || !IsTransient(err) {
+			return err
+		}
+		if p.retryPolicy.Retries > 0 && attempt >= p.retryPolicy.Retries {
+			return err
+		}
+		attempt++
+		p.pm.RecordRetry(p.exchange, retryReason(err))
+		d := p.retryPolicy.NextBackoff(attempt)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(d):
+		}
+	}
+}
+
+// publishOnce performs a single publish attempt (no retry logic).
+func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []byte) error {
 	exchange := p.exchange
 	start := time.Now()
 
@@ -260,12 +393,17 @@ func (p *Publisher[M]) Publish(ctx context.Context, msg Message[M]) error {
 	pub := buildPublishing(msg, body)
 
 	deliveryTag := entry.ch.GetNextPublishSeqNo()
+	if entry.activeTag != nil {
+		entry.activeTag.Store(deliveryTag)
+		defer entry.activeTag.Store(0)
+	}
+
 	if err := entry.tracker.Register(deliveryTag); err != nil {
 		p.pm.RecordPublish(exchange, "error", time.Since(start))
 		return p.mapConfirmError(err)
 	}
 
-	if err := entry.ch.PublishWithContext(ctx, exchange, p.routingKey, false, false, pub); err != nil {
+	if err := entry.ch.PublishWithContext(ctx, exchange, p.routingKey, p.mandatory, false, pub); err != nil {
 		entry.tracker.Cancel(deliveryTag)
 		p.pm.RecordPublish(exchange, "error", time.Since(start))
 		return wrapAMQPError(err)
@@ -307,10 +445,29 @@ func (p *Publisher[M]) mapConfirmError(err error) error {
 	default:
 		var ue *confirms.UnroutableError
 		if errors.As(err, &ue) {
-			// T13 will integrate OnReturn callback here.
-			return fmt.Errorf("%w (reply code %d)", ErrUnroutable, ue.ReplyCode)
+			return wrapCode(ue.ReplyCode, ErrUnroutable)
 		}
 		return err
+	}
+}
+
+// retryReason maps an error to the publisher_retry_total reason label.
+func retryReason(err error) string {
+	switch {
+	case errors.Is(err, ErrPublishNacked):
+		return "nacked"
+	case errors.Is(err, ErrConfirmTimeout):
+		return "confirm_timeout"
+	case errors.Is(err, ErrChannelClosed):
+		return "channel_closed"
+	case errors.Is(err, ErrChannelPoolExhausted):
+		return "pool_exhausted"
+	case errors.Is(err, ErrConnectionBlocked):
+		return "blocked"
+	case errors.Is(err, ErrReconnecting):
+		return "reconnecting"
+	default:
+		return "network"
 	}
 }
 

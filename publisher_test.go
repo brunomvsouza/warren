@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,13 +23,14 @@ import (
 // fakePubChannel is a test double for pubChannel. It is safe for use by AT MOST
 // ONE goroutine at a time (matches the pool's exclusive-acquisition contract).
 type fakePubChannel struct {
-	mu         sync.Mutex
-	seq        uint64
-	confirmCh  chan amqp091.Confirmation
-	closedCh   chan *amqp091.Error
-	publishes  []amqp091.Publishing
-	autoAck    bool
-	publishErr error
+	mu          sync.Mutex
+	seq         uint64
+	confirmCh   chan amqp091.Confirmation
+	closedCh    chan *amqp091.Error
+	publishes   []amqp091.Publishing
+	mandatories []bool // tracks the mandatory flag passed per publish
+	autoAck     bool
+	publishErr  error
 }
 
 func newFakePubCh(autoAck bool) *fakePubChannel {
@@ -56,6 +58,8 @@ func (f *fakePubChannel) NotifyPublish(ch chan amqp091.Confirmation) chan amqp09
 	return ch
 }
 
+func (f *fakePubChannel) NotifyReturn(ch chan amqp091.Return) chan amqp091.Return { return ch }
+
 func (f *fakePubChannel) NotifyClose(ch chan *amqp091.Error) chan *amqp091.Error {
 	return f.closedCh
 }
@@ -71,7 +75,7 @@ func (f *fakePubChannel) Close() error {
 	return nil
 }
 
-func (f *fakePubChannel) PublishWithContext(_ context.Context, _, _ string, _, _ bool, msg amqp091.Publishing) error {
+func (f *fakePubChannel) PublishWithContext(_ context.Context, _, _ string, mandatory, _ bool, msg amqp091.Publishing) error {
 	f.mu.Lock()
 	if f.publishErr != nil {
 		err := f.publishErr
@@ -79,6 +83,7 @@ func (f *fakePubChannel) PublishWithContext(_ context.Context, _, _ string, _, _
 		return err
 	}
 	f.publishes = append(f.publishes, msg)
+	f.mandatories = append(f.mandatories, mandatory)
 	tag := f.seq - 1 // last tag returned by GetNextPublishSeqNo
 	ch := f.confirmCh
 	isAutoAck := f.autoAck
@@ -106,6 +111,15 @@ func (f *fakePubChannel) lastPublish() (amqp091.Publishing, bool) {
 		return amqp091.Publishing{}, false
 	}
 	return f.publishes[len(f.publishes)-1], true
+}
+
+func (f *fakePubChannel) lastMandatory() (bool, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.mandatories) == 0 {
+		return false, false
+	}
+	return f.mandatories[len(f.mandatories)-1], true
 }
 
 // — capture metrics ——————————————————————————————————————————————————————
@@ -144,34 +158,48 @@ func (m *capturePublisherMetrics) RecordRetry(exchange, reason string) {
 // — helpers ——————————————————————————————————————————————————————————————
 
 // wireFakePool creates a publisherConnPool of size 1 backed by fake and wires
-// the confirm tracker goroutine. stop() closes the goroutine and waits for it
-// to exit before returning; it must be called before goleak.VerifyNone.
+// the merged confirm+return goroutine. stop() closes the goroutine and waits
+// for it to exit before returning; it must be called before goleak.VerifyNone.
 //
 // NOTE: pool size is fixed at 1 so that tests never have concurrent goroutines
 // calling methods on the same fake channel (which would break the seq counter).
 func wireFakePool(fake *fakePubChannel) (*publisherConnPool, func()) {
 	tracker := confirms.New()
 	confirmCh := make(chan amqp091.Confirmation, 16)
+	returnCh := make(chan amqp091.Return, 8)
 
 	fake.mu.Lock()
 	fake.confirmCh = confirmCh
 	fake.mu.Unlock()
 
+	at := new(atomic.Uint64)
 	goroutineDone := make(chan struct{})
 	go func() {
 		defer close(goroutineDone)
-		for c := range confirmCh {
-			if c.Ack {
-				tracker.Ack(c.DeliveryTag, false)
-			} else {
-				tracker.Nack(c.DeliveryTag, false)
+		var rCh <-chan amqp091.Return = returnCh
+		for {
+			select {
+			case _, ok := <-rCh:
+				if !ok {
+					rCh = nil
+				}
+				// fakePubChannel never sends returns; drain only.
+			case c, ok := <-confirmCh:
+				if !ok {
+					tracker.CloseAll()
+					return
+				}
+				if c.Ack {
+					tracker.Ack(c.DeliveryTag, false)
+				} else {
+					tracker.Nack(c.DeliveryTag, false)
+				}
 			}
 		}
-		tracker.CloseAll()
 	}()
 
 	pool := newPublisherConnPool(1, func() (publisherEntry, error) {
-		return publisherEntry{ch: fake, tracker: tracker, closeCh: fake.closedCh}, nil
+		return publisherEntry{ch: fake, tracker: tracker, closeCh: fake.closedCh, activeTag: at}, nil
 	})
 
 	stop := func() {
