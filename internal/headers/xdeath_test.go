@@ -140,3 +140,40 @@ func TestParseXDeath_WrongEntryType(t *testing.T) {
 	result := headers.ParseXDeath(tbl, "myqueue")
 	assert.Equal(t, 2, result.Count)
 }
+
+func TestParseXDeath_KeyAbsentNonNilTable(t *testing.T) {
+	// Non-nil table that contains other AMQP properties but no x-death key.
+	// This is the normal shape on a first-delivery message.
+	tbl := amqp091.Table{"content-type": "application/json"}
+	result := headers.ParseXDeath(tbl, "myqueue")
+	assert.Equal(t, 0, result.Count)
+	assert.Empty(t, result.Reasons)
+}
+
+func TestParseXDeath_NegativeCountClamped(t *testing.T) {
+	// A misbehaving or compromised broker may send a negative count.
+	// It must be clamped to zero so DeathCount never goes negative.
+	tbl := amqp091.Table{
+		"x-death": []any{
+			makeEntry("myqueue", "rejected", -999),
+		},
+	}
+	result := headers.ParseXDeath(tbl, "myqueue")
+	assert.Equal(t, 0, result.Count)
+	assert.Equal(t, 0, result.CountByReason("rejected"))
+}
+
+func TestParseXDeath_DuplicateReasonAccumulates(t *testing.T) {
+	// Multiple entries with the same (queue, reason) pair accumulate their counts.
+	// The broker appends a new entry on each DLX hop rather than updating existing ones.
+	tbl := amqp091.Table{
+		"x-death": []any{
+			makeEntry("myqueue", "rejected", 2),
+			makeEntry("myqueue", "rejected", 3),
+		},
+	}
+	result := headers.ParseXDeath(tbl, "myqueue")
+	assert.Equal(t, 5, result.Count)
+	assert.Equal(t, 5, result.CountByReason("rejected"))
+	assert.Equal(t, []string{"rejected"}, result.Reasons, "duplicate reason must appear only once")
+}

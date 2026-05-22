@@ -28,7 +28,9 @@ func FuzzXDeathParser(f *testing.F) {
 			},
 		}
 		result := headers.ParseXDeath(tbl, "myqueue")
-		_ = result.Count
+		if result.Count < 0 {
+			t.Fatalf("ParseXDeath returned negative Count %d for count=%d", result.Count, count)
+		}
 		_ = result.Reasons
 		_ = result.CountByReason(reason)
 

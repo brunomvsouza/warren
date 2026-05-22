@@ -473,13 +473,13 @@ workloads.
 
 ## Phase 4 — Consumer: error-driven semantics + escape hatch
 
-### [ ] T17 — `delivery.go`: concrete `Delivery[M]` · S
+### [x] T17 — `delivery.go`: concrete `Delivery[M]` · S
 - **Acceptance:**
-  - [ ] `Delivery[M]` struct with all methods listed in SPEC §6.3 (`Body`, `Headers`, `Redelivered`, `DeliveryTag`, `DeathCount`, **`DeathCountByReason`**, **`DeathReasons`**, `MessageID`, `CorrelationID`, `Timestamp`, `Ack`, `Nack`, `AckIf`).
-  - [ ] `DeathCount()` parses the AMQP `x-death` header — which is a **field-array (`[]any`) of field-tables (`amqp091.Table` / `Headers`)**, one entry per dead-letter event. The parser sums the `count` (int64 in the wire) across all entries whose `queue` field matches the delivery's current queue **AND whose `reason` is one of `rejected` or `delivery-limit`** (Rev 6: filter out `expired` and `maxlen` which reflect broker policy rather than handler-driven rejection); returns 0 if the header is absent or shaped unexpectedly. A `FuzzXDeathParser` target exercises malformed inputs.
-  - [ ] `DeathCountByReason(reason string) int` and `DeathReasons() []string` (unique reasons in declaration order) expose the full parsed shape for custom policies (e.g. users who DO want to count `expired` for their workload).
-  - [ ] `AckIf(err error) error` implements the error-mapping semantics (nil → Ack; `errors.Is(err, ErrRequeue)` → `Nack(true)`; any other err → `Nack(false)`).
-  - [ ] `Ack` / `Nack` / `AckIf` return `ErrChannelClosed` when the underlying channel is closed and `ErrAlreadyClosed` when the consumer was closed; otherwise `nil` on success — documented behaviour.
+  - [x] `Delivery[M]` struct with all methods listed in SPEC §6.3 (`Body`, `Headers`, `Redelivered`, `DeliveryTag`, `DeathCount`, **`DeathCountByReason`**, **`DeathReasons`**, `MessageID`, `CorrelationID`, `Timestamp`, `Ack`, `Nack`, `AckIf`).
+  - [x] `DeathCount()` parses the AMQP `x-death` header — which is a **field-array (`[]any`) of field-tables (`amqp091.Table` / `Headers`)**, one entry per dead-letter event. The parser sums the `count` (int64 in the wire) across all entries whose `queue` field matches the delivery's current queue **AND whose `reason` is one of `rejected` or `delivery-limit`** (Rev 6: filter out `expired` and `maxlen` which reflect broker policy rather than handler-driven rejection); returns 0 if the header is absent or shaped unexpectedly. A `FuzzXDeathParser` target exercises malformed inputs.
+  - [x] `DeathCountByReason(reason string) int` and `DeathReasons() []string` (unique reasons in declaration order) expose the full parsed shape for custom policies (e.g. users who DO want to count `expired` for their workload).
+  - [x] `AckIf(err error) error` implements the error-mapping semantics (nil → Ack; `errors.Is(err, ErrRequeue)` → `Nack(true)`; any other err → `Nack(false)`).
+  - [x] `Ack` / `Nack` / `AckIf` return `ErrChannelClosed` when the underlying channel is closed and `ErrAlreadyClosed` when the consumer was closed; otherwise `nil` on success — documented behaviour.
 - **Verify:** Unit tests with hand-built `amqp091.Delivery` values + table-driven AckIf cases + closed-channel error path test + `x-death` parser test fixtures (absent, empty, single entry, multiple entries, mixed reasons `rejected`+`expired`+`delivery-limit`, wrong shape) + a `FuzzXDeathParser` fuzz target (per `plan.md` §"Fuzz targets"). Reason-discrimination test: a delivery with `x-death=[{reason: expired, count: 100}, {reason: rejected, count: 2}]` reports `DeathCount() == 2` (not 102).
 - **Files:** `delivery.go`, `internal/headers/xdeath.go`, `delivery_test.go`, `internal/headers/xdeath_test.go`, `internal/headers/xdeath_fuzz_test.go`.
 - **Deps:** T02, T09.

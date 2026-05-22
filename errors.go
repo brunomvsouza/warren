@@ -12,7 +12,9 @@ var (
 
 	// ErrNotConnected is returned when Publish or Consume is called before Dial.
 	ErrNotConnected = errors.New("warren: not connected")
-	// ErrAlreadyClosed is returned when Close is called on an already-closed connection.
+	// ErrAlreadyClosed is returned when an operation is attempted on a resource that
+	// has already been closed — either a Connection closed twice, or Ack/Nack/AckIf
+	// called on a Delivery whose owning Consumer was shut down via Close(ctx).
 	ErrAlreadyClosed = errors.New("warren: already closed")
 	// ErrShutdown is returned when an operation is attempted while the connection is shutting down.
 	ErrShutdown = errors.New("warren: client is shutting down")

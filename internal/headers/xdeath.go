@@ -49,6 +49,9 @@ func ParseXDeath(tbl amqp091.Table, queue string) XDeathResult {
 		}
 		reason, _ := entry["reason"].(string)
 		count, _ := entry["count"].(int64)
+		if count < 0 {
+			count = 0
+		}
 
 		if _, seen := result.byReason[reason]; !seen {
 			result.Reasons = append(result.Reasons, reason)
