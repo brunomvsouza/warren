@@ -1,10 +1,14 @@
 # Warren
 
+> [!WARNING]
+> **This project is in active, early development.** 
+> While the goal is to provide a highly reliable operational layer, stability is **not yet guaranteed**. Although we aim to maintain a stable public API as defined in [`SPEC.md`](SPEC.md), occasional breaking changes may still occur prior to `v1.0.0`. Use in production environments at your own risk.
+
 **A production-grade, generics-typed Go client for RabbitMQ (AMQP 0-9-1).**
 
-Warren wraps [`github.com/rabbitmq/amqp091-go`](https://github.com/rabbitmq/amqp091-go) with a type-safe API and the operational layer every team rebuilds on the low-level driver: supervised reconnect with publisher confirms, centralized topology declaration, pluggable codecs, channel pooling across role-split TCP connections, and built-in observability (logging, Prometheus metrics, OpenTelemetry).
+Warren wraps [`github.com/rabbitmq/amqp091-go`](https://github.com/rabbitmq/amqp091-go) with a type-safe API and a **hardened operational layer** built for high-scale reliability. It embeds the "SRE batteries" every production team needs: supervised reconnect with publisher confirms, centralized topology declaration, pluggable codecs, channel pooling across role-split TCP connections, **intelligent error classification (transient vs. permanent)**, **safety guardrails (credential redaction, fail-fast validation, payload caps)**, and native observability (logging, Prometheus, OpenTelemetry).
 
-> **Status:** Active development toward [`v0.1.0`](SPEC.md). The public API is defined in [`SPEC.md`](SPEC.md); implementation follows [`tasks/plan.md`](tasks/plan.md). **Connection**, **Publisher**, **Topology**, and **Consumer** are usable today; RPC, batch APIs, and additional codecs are in progress.
+> **Current Status:** Active development toward [`v0.1.0`](SPEC.md). Implementation follows [`tasks/plan.md`](tasks/plan.md). **Connection**, **Publisher**, **Topology**, and **Consumer** are usable today; RPC, batch APIs, and additional codecs are in progress.
 
 [![CI](https://github.com/brunomvsouza/warren/actions/workflows/ci.yml/badge.svg)](https://github.com/brunomvsouza/warren/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/brunomvsouza/warren)](https://goreportcard.com/report/github.com/brunomvsouza/warren)
@@ -25,6 +29,8 @@ Raw `amqp091-go` is correct and minimal. Production RabbitMQ clients need more:
 | Poison messages | Easy to create infinite requeue loops | Default handler error → `Nack(requeue=false)`; requeue is opt-in via `ErrRequeue` |
 | Credentials in logs | Easy to leak | `internal/redact` strips `userinfo` from every URI in logs, metrics, spans, and errors |
 | Broker errors | Opaque `*amqp091.Error` | Reply-code sentinels + `AMQPCode(err)` + `IsTransient` / `IsPermanent` |
+| Safety guardrails | None | Fail-fast `UserID` validation, payload size caps, and `frame_max` enforcement |
+| Infra failures | Hard to detect | Degraded state machine with `OnTopoDegraded` and `ForceReconnect` operator escape hatch |
 
 **Design north stars** (from the spec): AMQP 0-9-1 protocol fidelity without misleading sugar, and a short, safe path for the common case (typed publish/consume over JSON).
 
@@ -108,6 +114,8 @@ func main() {
 
 A single `warren.Connection` owns a **pool of TCP connections** split by role (default: 2 publisher + 2 consumer sockets). Each socket has its own reconnect supervisor. Publishers borrow channels from a per-connection pool; consumers pin to one consumer connection (stable hash of consumer tag).
 
+### High-level Flow
+
 ```mermaid
 flowchart TB
   subgraph app [Your application]
@@ -138,7 +146,162 @@ flowchart TB
   R -->|redeclare topology + resubscribe| B
 ```
 
+### Class Diagram
+
+```mermaid
+classDiagram
+    direction TB
+
+    %% --- Ciclo de Vida da Conexão ---
+    class Connection {
+        +Dial(ctx, opts) Connection*
+        +Close(ctx) error
+        +Health(ctx) error
+        +ForceReconnect() error
+        -pubConns []*managedConn
+        -conConns []*managedConn
+        -topoSnaps map[*Topology]*Topology
+    }
+
+    class managedConn {
+        -name string
+        -role string
+        -raw *amqp091.Connection
+        -hooks []func(ctx) error
+        +supervisor(ctx)
+        +runBarrier(ctx)
+        +waitBarrier(ctx) error
+    }
+
+    class Loop {
+        <<internal: reconnect>>
+        +New(ctx, connect, backoff, maxRetries) Loop*
+        +OnReconnect(fn)
+        +Done() <-chan struct{}
+    }
+
+    %% --- Fluxo de Publicação ---
+    class Publisher~M~ {
+        +Publish(ctx, msg) error
+        +Close(ctx) error
+        -conn *Connection
+        -pools []*publisherConnPool
+        -codec Codec
+        -retryPolicy *RetryPolicy
+    }
+
+    class publisherConnPool {
+        -tokens chan struct{}
+        -free chan publisherEntry
+        -inflight atomic.Int64
+        +acquire(ctx) (publisherEntry, release, error)
+    }
+
+    class publisherEntry {
+        -ch amqp091.Channel
+        -tracker *Tracker
+        -activeTag *atomic.Uint64
+    }
+
+    class Tracker {
+        <<internal: confirms>>
+        +Register(tag) error
+        +Ack(tag, multiple)
+        +Nack(tag, multiple)
+        +Wait(ctx, tag, timeout) error
+    }
+
+    %% --- Fluxo de Consumo ---
+    class Consumer~M~ {
+        +Consume(ctx, handler) error
+        +ConsumeRaw(ctx, rawHandler) error
+        +Close(ctx) error
+        -mc *managedConn
+        -codec Codec
+    }
+
+    class Delivery~M~ {
+        +Body() *M
+        +Ack() error
+        +Nack(requeue) error
+        +AckIf(err) error
+        +DeathCount() int
+        -raw amqp091.Delivery
+    }
+
+    %% --- Topologia ---
+    class Topology {
+        +Exchanges []Exchange
+        +Queues []Queue
+        +Bindings []Binding
+        +DeadLetters []DeadLetter
+        +Declare(ctx, conn) error
+        +AttachTo(conn) error
+    }
+
+    class Exchange {
+        +Name string
+        +Kind ExchangeKind
+        +Durable bool
+    }
+
+    class Queue {
+        +Name string
+        +Type QueueType
+        +Durable bool
+    }
+
+    %% --- Interfaces e Primitivos ---
+    class Codec {
+        <<interface>>
+        +Encode(v any) ([]byte, error)
+        +Decode(data []byte, v any) error
+        +ContentType() string
+    }
+
+    class Message~M~ {
+        +Body *M
+        +MessageID string
+        +Headers Headers
+        +DeliveryMode DeliveryMode
+        +Timestamp time.Time
+        +Expiration time.Duration
+    }
+
+    %% --- Relacionamentos ---
+    Connection "1" *-- "many" managedConn : gerencia (pub/con pools)
+    managedConn "1" *-- "1" Loop : supervisionado por
+    Publisher "1" o-- "1" Connection : utiliza para sinalização
+    Publisher "1" *-- "many" publisherConnPool : possui (um por socket TCP)
+    publisherConnPool "1" *-- "many" publisherEntry : gerencia (canais AMQP)
+    publisherEntry "1" *-- "1" Tracker : rastreia confirmações
+    Consumer "1" o-- "1" managedConn : fixado a uma conexão de consumo
+    Consumer "1" ..> Codec : utiliza para decode
+    Publisher "1" ..> Codec : utiliza para encode
+    Connection "1" o-- "many" Topology : redeclara em caso de falha
+    Topology "1" *-- "many" Exchange
+    Topology "1" *-- "many" Queue
+    Topology "1" *-- "many" Binding
+    Topology "1" *-- "many" DeadLetter
+    Publisher ..> Message : publica
+    Consumer ..> Delivery : entrega
+```
+
 On reconnect, Warren runs a **synchronous barrier** before resuming traffic on that socket: reopen channels → redeclare attached topology → re-issue `basic.consume` on consumer channels → fire `WithOnReconnect`. `Publish` blocks on `ErrReconnecting` until the barrier clears (or the context is cancelled).
+
+---
+
+## Reliability & SRE
+
+Warren is built with "production-first" principles, embedding several reliability patterns directly into the core:
+
+- **Synchronous Reconnect Barrier:** Guaranteed restoration of all topology (exchanges, queues, bindings) before traffic resumes, preventing message loss or misrouting on fresh connections.
+- **Intelligent Error Classification:** Native `IsTransient(err)` and `IsPermanent(err)` helpers allow your application to implement robust retry logic based on actual AMQP reply codes.
+- **Safety Guardrails:** 
+    - **Fail-Fast Validation:** Validates `UserID` and message headers client-side to prevent "channel-close" errors that crash publisher sockets.
+    - **Payload Size Caps:** Rejects oversized messages before they hit the broker, protecting your infrastructure from OOM.
+    - **Credential Redaction:** Every log line, metric label, and trace span is automatically passed through `internal/redact` to strip secrets.
+- **Degraded State Awareness:** If the topology fails to redeclare persistently, the connection enters a `degraded` state, triggering `OnTopoDegraded` callbacks and metrics, and providing a `ForceReconnect` escape hatch for operators.
 
 ---
 
