@@ -3,6 +3,7 @@ package warren
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -111,30 +112,23 @@ func TestConsumerBuilder_EmptyQueue_Error(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidOptions)
 }
 
-// — handler error mapping unit tests ——————————————————————————————————
+// — Consume unit tests (fake channel injection) ———————————————————————
 
-func TestConsumer_ErrorMapping_Nil_Acks(t *testing.T) {
-	fakeD := &fakeRawDelivery{}
-	mapHandlerResult(fakeD, nil)
-	assert.True(t, fakeD.acked)
-	assert.False(t, fakeD.nacked)
+func TestConsumer_ConsumeRaw_AlreadyStarted_ReturnsError(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
+	require.NoError(t, err)
+
+	// Simulate "already started" by setting the guard directly.
+	consumer.started.Store(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err = consumer.Consume(ctx, func(_ context.Context, _ string) error { return nil })
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
 }
-
-func TestConsumer_ErrorMapping_ErrRequeue_NackRequeue(t *testing.T) {
-	fakeD := &fakeRawDelivery{}
-	mapHandlerResult(fakeD, ErrRequeue)
-	assert.True(t, fakeD.nacked)
-	assert.True(t, fakeD.requeue)
-}
-
-func TestConsumer_ErrorMapping_OtherError_NackNoRequeue(t *testing.T) {
-	fakeD := &fakeRawDelivery{}
-	mapHandlerResult(fakeD, errors.New("bad"))
-	assert.True(t, fakeD.nacked)
-	assert.False(t, fakeD.requeue)
-}
-
-// — Consume unit test (fake channel) ——————————————————————————————————
 
 func TestConsumer_Consume_HandlerCalledWithDecodedPayload(t *testing.T) {
 	conn := newFakeConsumerConn(t)
@@ -166,6 +160,120 @@ func TestConsumer_Consume_HandlerCalledWithDecodedPayload(t *testing.T) {
 	assert.Equal(t, "hello", received)
 }
 
+func TestConsumer_Consume_HandlerNilReturn_Acks(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	acked := make(chan struct{}, 1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = consumer.Consume(ctx, func(_ context.Context, _ string) error { return nil })
+	}()
+
+	deliveryCh <- amqp091.Delivery{
+		Body: []byte(`"hello"`),
+		Acknowledger: &fakeAcknowledger{
+			ackFn: func(_ uint64, _ bool) error {
+				close(acked)
+				cancel()
+				return nil
+			},
+		},
+	}
+
+	select {
+	case <-acked:
+	case <-time.After(time.Second):
+		t.Fatal("expected Ack to be called")
+	}
+	<-done
+}
+
+func TestConsumer_Consume_HandlerErrorReturn_NackNoRequeue(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	nackedRequeue := make(chan bool, 1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = consumer.Consume(ctx, func(_ context.Context, _ string) error {
+			return errors.New("handler failed")
+		})
+	}()
+
+	deliveryCh <- amqp091.Delivery{
+		Body: []byte(`"hello"`),
+		Acknowledger: &fakeAcknowledger{
+			nackFn: func(_ uint64, _, requeue bool) error {
+				nackedRequeue <- requeue
+				cancel()
+				return nil
+			},
+		},
+	}
+
+	select {
+	case requeue := <-nackedRequeue:
+		assert.False(t, requeue, "generic error must nack without requeue")
+	case <-time.After(time.Second):
+		t.Fatal("expected Nack to be called")
+	}
+	<-done
+}
+
+func TestConsumer_Consume_HandlerErrRequeue_NackRequeue(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	nackedRequeue := make(chan bool, 1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = consumer.Consume(ctx, func(_ context.Context, _ string) error {
+			return ErrRequeue
+		})
+	}()
+
+	deliveryCh <- amqp091.Delivery{
+		Body: []byte(`"hello"`),
+		Acknowledger: &fakeAcknowledger{
+			nackFn: func(_ uint64, _, requeue bool) error {
+				nackedRequeue <- requeue
+				cancel()
+				return nil
+			},
+		},
+	}
+
+	select {
+	case requeue := <-nackedRequeue:
+		assert.True(t, requeue, "ErrRequeue must nack with requeue=true")
+	case <-time.After(time.Second):
+		t.Fatal("expected Nack to be called")
+	}
+	<-done
+}
+
 func TestConsumer_Consume_DecodeFailure_NackNoRequeue(t *testing.T) {
 	conn := newFakeConsumerConn(t)
 	cm := &countingConsumerMetrics{}
@@ -191,7 +299,7 @@ func TestConsumer_Consume_DecodeFailure_NackNoRequeue(t *testing.T) {
 		Body:        []byte(`not valid json`),
 		ContentType: "application/json",
 		Acknowledger: &fakeAcknowledger{
-			nackFn: func(tag uint64, multiple, requeue bool) error {
+			nackFn: func(_ uint64, _, _ bool) error {
 				ackErr <- nil
 				cancel()
 				return nil
@@ -242,7 +350,7 @@ func TestConsumer_Consume_HandlerTimeout_DefaultVerdict_NackNoRequeue(t *testing
 		Body:        []byte(`"hello"`),
 		ContentType: "application/json",
 		Acknowledger: &fakeAcknowledger{
-			nackFn: func(tag uint64, multiple, requeue bool) error {
+			nackFn: func(_ uint64, _, requeue bool) error {
 				nackedRequeue <- requeue
 				cancel()
 				return nil
@@ -325,21 +433,7 @@ func newFakeConsumerConn(t *testing.T) *Connection {
 	return conn
 }
 
-// fakeRawDelivery is a minimal ackable for handler-mapping tests.
-type fakeRawDelivery struct {
-	acked   bool
-	nacked  bool
-	requeue bool
-}
-
-func (f *fakeRawDelivery) Ack(multiple bool) error { f.acked = true; return nil }
-func (f *fakeRawDelivery) Nack(multiple, requeue bool) error {
-	f.nacked = true
-	f.requeue = requeue
-	return nil
-}
-
-// fakeAcknowledger implements amqp091.Acknowledger so fake deliveries carry it.
+// fakeAcknowledger implements amqp091.Acknowledger.
 type fakeAcknowledger struct {
 	ackFn  func(tag uint64, multiple bool) error
 	nackFn func(tag uint64, multiple, requeue bool) error
@@ -368,7 +462,7 @@ type countingConsumerMetrics struct {
 	handlerTimeouts int
 }
 
-func (c *countingConsumerMetrics) RecordHandler(queue, outcome string, _ time.Duration) {
+func (c *countingConsumerMetrics) RecordHandler(_, outcome string, _ time.Duration) {
 	if outcome == "decode_error" {
 		c.decodeErrors++
 	}
@@ -390,6 +484,6 @@ func (l *captureLogger) Error(_ string)            {}
 func (l *captureLogger) Debugf(_ string, _ ...any) {}
 func (l *captureLogger) Infof(_ string, _ ...any)  {}
 func (l *captureLogger) Warningf(format string, args ...any) {
-	l.onWarning(format)
+	l.onWarning(fmt.Sprintf(format, args...))
 }
 func (l *captureLogger) Errorf(_ string, _ ...any) {}
