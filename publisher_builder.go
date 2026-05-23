@@ -24,15 +24,17 @@ type PublisherBuilder[M any] struct {
 	pm     metrics.PublisherMetrics
 	tracer otel.Tracer
 
-	mandatory           bool
-	onReturn            func(Return)
-	confirmTimeout      time.Duration
-	confirmTimeoutSet   bool // distinguishes explicit zero from unset
-	publishTimeout      time.Duration
-	publishBatchMaxSize int
-	retryPolicy         RetryPolicy
-	retryPolicySet      bool
-	stampUserID         bool
+	mandatory              bool
+	onReturn               func(Return)
+	confirmTimeout         time.Duration
+	confirmTimeoutSet      bool // distinguishes explicit zero from unset
+	publishTimeout         time.Duration
+	publishBatchMaxSize    int
+	maxMessageSizeBytes    int  // 0 = disabled; default applied in applyBuilderDefaults
+	maxMessageSizeBytesSet bool // distinguishes explicit zero from unset
+	retryPolicy            RetryPolicy
+	retryPolicySet         bool
+	stampUserID            bool
 }
 
 // PublisherFor returns a builder for a Publisher[M] tied to conn.
@@ -122,6 +124,26 @@ func (b *PublisherBuilder[M]) PublishBatchMaxSize(n int) *PublisherBuilder[M] {
 	return b
 }
 
+// MaxMessageSizeBytes caps the encoded body size each Publish accepts. Publishes
+// whose serialised body exceeds n bytes are rejected locally with
+// ErrMessageTooLarge — protecting the publisher from OOM and the broker from
+// frame fragmentation pressure (the broker-side equivalent, reply code 311
+// CONTENT_TOO_LARGE, only fires after the payload has been allocated and
+// partially sent).
+//
+// Default: 16 MiB (16 * 1024 * 1024). Pass 0 to disable the guardrail
+// (discouraged for production paths). Negative values fail Build with
+// ErrInvalidOptions.
+//
+// The cap is enforced against the encoded body, not the in-memory Message[M],
+// so it matches what travels on the wire. ErrMessageTooLarge is classified
+// permanent (IsPermanent == true): the same payload will never fit on retry.
+func (b *PublisherBuilder[M]) MaxMessageSizeBytes(n int) *PublisherBuilder[M] {
+	b.maxMessageSizeBytes = n
+	b.maxMessageSizeBytesSet = true
+	return b
+}
+
 // PublishRetry configures automatic retry of publishes that fail with a
 // transient error (IsTransient(err) == true). Permanent errors are never
 // retried. Each retry attempt increments the mandatory metric
@@ -151,6 +173,9 @@ func (b *PublisherBuilder[M]) StampUserID() *PublisherBuilder[M] {
 // Build constructs and returns a Publisher[M]. Returns an error if
 // the builder state is invalid.
 func (b *PublisherBuilder[M]) Build() (*Publisher[M], error) {
+	if b.maxMessageSizeBytesSet && b.maxMessageSizeBytes < 0 {
+		return nil, fmt.Errorf("%w: MaxMessageSizeBytes must be >= 0 (0 disables; default is 16 MiB)", ErrInvalidOptions)
+	}
 	if b.conn == nil {
 		return nil, fmt.Errorf("%w: conn must not be nil", ErrInvalidOptions)
 	}
@@ -175,6 +200,7 @@ func (b *PublisherBuilder[M]) Build() (*Publisher[M], error) {
 		onReturn:            b.onReturn,
 		publishTimeout:      b.publishTimeout,
 		publishBatchMaxSize: b.publishBatchMaxSize,
+		maxMessageSizeBytes: b.maxMessageSizeBytes,
 		retryPolicy:         rp,
 		stampUserID:         b.stampUserID,
 		authUser:            b.conn.AuthenticatedUser(),
@@ -223,4 +249,12 @@ func (b *PublisherBuilder[M]) applyBuilderDefaults() {
 	if b.publishBatchMaxSize <= 0 {
 		b.publishBatchMaxSize = 1024
 	}
+	if !b.maxMessageSizeBytesSet {
+		b.maxMessageSizeBytes = defaultMaxMessageSizeBytes
+	}
 }
+
+// defaultMaxMessageSizeBytes is the per-publish payload guardrail (16 MiB).
+// Matches typical frame-max tuning (128 KiB frames × ~128 frames) and is the
+// SRE-recommended default; raise via MaxMessageSizeBytes for streaming workloads.
+const defaultMaxMessageSizeBytes = 16 * 1024 * 1024

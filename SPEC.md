@@ -758,6 +758,7 @@ func (b *PublisherBuilder[M]) OnReturn(func(Return)) *PublisherBuilder[M]
 func (b *PublisherBuilder[M]) ConfirmTimeout(time.Duration) *PublisherBuilder[M]                  // broker confirm window only
 func (b *PublisherBuilder[M]) PublishTimeout(time.Duration) *PublisherBuilder[M]                  // end-to-end cap (pool acquire + write + confirm)
 func (b *PublisherBuilder[M]) PublishBatchMaxSize(n int) *PublisherBuilder[M]                    // max messages per PublishBatch call; default 1024 (per-call cap, not a sliding in-flight window)
+func (b *PublisherBuilder[M]) MaxMessageSizeBytes(n int) *PublisherBuilder[M]                    // per-publish payload guardrail; default 16 MiB; 0 disables
 func (b *PublisherBuilder[M]) PublishRetry(p RetryPolicy) *PublisherBuilder[M]                    // automatic retry of ErrTransient publishes
 func (b *PublisherBuilder[M]) Metrics(metrics.PublisherMetrics) *PublisherBuilder[M]
 func (b *PublisherBuilder[M]) WithoutMetrics() *PublisherBuilder[M]
@@ -869,6 +870,20 @@ Semantics:
   cap, not a sliding in-flight window across calls — `Publisher[M]`
   does not currently throttle multiple concurrent `PublishBatch`
   invocations against one another.
+- **Per-message payload guardrail (`MaxMessageSizeBytes`).** Each
+  `Publisher[M]` rejects encoded bodies larger than
+  `MaxMessageSizeBytes` (**default 16 MiB**) with
+  `ErrMessageTooLarge` (permanent) *before* opening a channel.
+  This protects the publisher from OOM on accidentally-massive
+  payloads and the broker from frame fragmentation pressure — the
+  broker-side equivalent (reply code 311 `CONTENT_TOO_LARGE`) only
+  fires after the payload has been allocated and partially sent,
+  closing the channel and forcing reconnect. The metric outcome
+  label is `too_large`. Pass `MaxMessageSizeBytes(0)` to disable
+  the guard (discouraged). The cap applies per-message inside
+  `PublishBatch` as well: a single oversized message in a batch
+  fails that index with `ErrMessageTooLarge` without aborting the
+  channel.
 - **Channel pool exhaustion.** If all channels in the publisher's
   connection pool are in-flight when a `Publish` arrives, the call
   waits with respect to `ctx`. On `ctx` cancellation it returns
@@ -1679,7 +1694,8 @@ var (
     ErrUnroutable    = errors.New("warren: mandatory publish was returned")
     ErrPublishNacked = errors.New("warren: broker nacked publish")         // basic.nack from broker (e.g. overflow=reject-publish, disk alarm mid-publish)
     ErrPartialBatch  = errors.New("warren: batch publish partially failed")
-    ErrBatchTooLarge = errors.New("warren: PublishBatch exceeds max in-flight budget")
+    ErrBatchTooLarge   = errors.New("warren: PublishBatch exceeds max in-flight budget")
+    ErrMessageTooLarge = errors.New("warren: message body exceeds MaxMessageSizeBytes") // local guard; permanent
 
     // Consumer
     ErrRequeue           = errors.New("warren: nack with requeue")
@@ -2623,6 +2639,19 @@ the Rev 5 surface still left invisible to a non-specialist user.
 
 These 24 Rev 6 decisions are closed. Any reopening needs a fresh
 spec amendment.
+
+50. **Local payload guardrail (`MaxMessageSizeBytes`) with 16 MiB
+    default.** SRE on-call review (2026-05-22): without a local cap,
+    an accidental 100 MiB payload allocates frame buffers in the
+    publisher, fragments into AMQP frames, partially streams to the
+    broker, and is then rejected with `CONTENT_TOO_LARGE` (311)
+    — closing the channel and forcing a reconnect. The new
+    `PublisherBuilder.MaxMessageSizeBytes(n)` rejects the publish
+    locally with `ErrMessageTooLarge` (permanent) before any
+    channel is acquired. Default 16 MiB (matches typical 128 KiB
+    frame-max × ~128 frames); `n=0` disables the guard explicitly;
+    `n<0` fails `Build` with `ErrInvalidOptions`. Mandatory metric:
+    `publisher_publish_seconds{exchange, outcome="too_large"}`.
 
 49. **Executable examples land at checkpoints, not only at release.**
     Phase 2/3/4/5/7 checkpoints in `tasks/plan.md` each carry an
