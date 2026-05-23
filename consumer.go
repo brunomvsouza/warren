@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
@@ -23,12 +24,20 @@ type Handler[M any] func(ctx context.Context, msg M) error
 // The Delivery carries the decoded body plus all AMQP envelope fields.
 type RawHandler[M any] func(ctx context.Context, d *Delivery[M]) error
 
+// deliverySub pairs a delivery channel with a signal that closes when the
+// underlying AMQP channel physically closes (not when the consumer ctx is cancelled).
+// dispatch goroutines watch done to cancel in-flight handler contexts.
+type deliverySub struct {
+	ch   chan amqp091.Delivery
+	done <-chan struct{} // nil when using the test-injection hook
+}
+
 // Consumer receives AMQP messages from a single queue, decodes each payload
 // to M via the configured codec, and dispatches to a Handler[M] or RawHandler[M].
 //
-// Use ConsumerFor[M](conn) to build a consumer.
+// Use ConsumerFor[M](conn) to build a consumer. Each consumer may only be
+// started once; create a new consumer via Build() to restart.
 type Consumer[M any] struct {
-	conn  *Connection
 	queue string
 	tag   string
 
@@ -48,13 +57,15 @@ type Consumer[M any] struct {
 	mc *managedConn
 
 	// deliveryCh is a test-injection hook: when non-nil, openDeliveryCh returns it
-	// directly without opening a real amqp091 channel.  Tests set this field before
-	// calling Consume / ConsumeRaw.
+	// directly without opening a real amqp091 channel.
 	deliveryCh chan amqp091.Delivery
 
 	// closedCh is closed when Close is called; signals Delivery.Ack/Nack to refuse.
 	closedCh  chan struct{}
 	closeOnce sync.Once
+
+	// started guards against calling Consume/ConsumeRaw more than once.
+	started atomic.Bool
 }
 
 func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
@@ -63,7 +74,6 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 	mc := b.conn.ConConnAt(idx)
 
 	return &Consumer[M]{
-		conn:           b.conn,
 		queue:          b.queue,
 		tag:            tag,
 		concurrency:    b.concurrency,
@@ -95,9 +105,8 @@ func connIndexForTag(tag string, n int) int {
 }
 
 // Consume starts consuming from the configured queue, decoding each message
-// and dispatching to h. It blocks until ctx is cancelled or the delivery
-// channel closes. Each delivery is processed in its own goroutine (up to
-// Concurrency goroutines at a time).
+// and dispatching to h. It blocks until ctx is cancelled.
+// May only be called once per consumer; create a new consumer to restart.
 func (c *Consumer[M]) Consume(ctx context.Context, h Handler[M]) error {
 	return c.ConsumeRaw(ctx, func(innerCtx context.Context, d *Delivery[M]) error {
 		return h(innerCtx, *d.Body())
@@ -105,9 +114,14 @@ func (c *Consumer[M]) Consume(ctx context.Context, h Handler[M]) error {
 }
 
 // ConsumeRaw starts consuming, passing the full Delivery envelope to h.
+// May only be called once per consumer; create a new consumer to restart.
 func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error {
-	// resubCh carries replacement delivery channels produced by the reconnect hook.
-	resubCh := make(chan chan amqp091.Delivery, 1)
+	if !c.started.CompareAndSwap(false, true) {
+		return fmt.Errorf("%w: consumer already started; create a new consumer via Build() to restart", ErrInvalidOptions)
+	}
+
+	// resubCh carries replacement subscriptions produced by the reconnect hook.
+	resubCh := make(chan deliverySub, 1)
 
 	c.mc.registerHook(func(hookCtx context.Context) error {
 		jitter := time.Duration(50+rand.IntN(201)) * time.Millisecond //nolint:gosec // non-crypto jitter
@@ -116,12 +130,12 @@ func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error {
 			return hookCtx.Err()
 		case <-time.After(jitter):
 		}
-		newCh, err := c.openDeliveryCh(hookCtx)
+		sub, err := c.openDeliveryCh(hookCtx)
 		if err != nil {
 			return err
 		}
 		select {
-		case resubCh <- newCh:
+		case resubCh <- sub:
 			c.cm.RecordResubscribed(c.queue)
 		case <-hookCtx.Done():
 			return hookCtx.Err()
@@ -143,12 +157,12 @@ func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error {
 			wg.Wait()
 			return nil
 
-		case newCh := <-resubCh:
-			cur = newCh
+		case sub := <-resubCh:
+			cur = sub
 
-		case d, ok := <-cur:
+		case d, ok := <-cur.ch:
 			if !ok {
-				// broker closed the channel; wait for re-subscribe or ctx cancel
+				// AMQP channel closed; wait for re-subscribe or ctx cancel.
 				select {
 				case <-ctx.Done():
 					wg.Wait()
@@ -159,39 +173,43 @@ func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error {
 			}
 			sem <- struct{}{}
 			wg.Add(1)
-			go func(raw amqp091.Delivery) {
+			// Capture the current channel's done signal so in-flight handlers
+			// from this channel are cancelled if this channel closes mid-handler.
+			chanDone := cur.done
+			go func(raw amqp091.Delivery, chanDone <-chan struct{}) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				c.dispatch(ctx, raw, h)
-			}(d)
+				c.dispatch(ctx, chanDone, raw, h)
+			}(d, chanDone)
 		}
 	}
 }
 
-// openDeliveryCh returns the delivery channel for this consumer.  In unit tests
-// c.deliveryCh is pre-set; in production it opens a real amqp091 channel.
-func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (chan amqp091.Delivery, error) {
+// openDeliveryCh opens a subscription. Unit tests pre-set c.deliveryCh to inject
+// deliveries without a live broker; production opens a real AMQP channel.
+func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 	if c.deliveryCh != nil {
-		return c.deliveryCh, nil
+		// done is nil: channel-close detection is not exercised in unit tests.
+		return deliverySub{ch: c.deliveryCh, done: nil}, nil
 	}
 
 	topoCh, err := c.mc.openChannel()
 	if err != nil {
-		return nil, fmt.Errorf("warren: consumer open channel: %w", err)
+		return deliverySub{}, fmt.Errorf("warren: consumer open channel: %w", err)
 	}
 
 	ch, ok := topoCh.(*amqp091.Channel)
 	if !ok {
 		_ = topoCh.Close()
-		return nil, fmt.Errorf("warren: consumer: unexpected channel type %T", topoCh)
+		return deliverySub{}, fmt.Errorf("warren: consumer: unexpected channel type %T", topoCh)
 	}
 
-	// global=false means per-channel QoS in amqp091 semantics (confusingly inverted).
-	// ChannelQoS() flag → global=false (per-channel).  Default (no ChannelQoS) → global=true (per-consumer, which RabbitMQ maps to per-channel anyway).
-	global := !c.channelQoS
-	if err := ch.Qos(int(c.prefetch), 0, global); err != nil { //nolint:gosec // G115: prefetch is uint16 by protocol
+	// global=true → shared prefetch for all consumers on this channel (per-channel QoS).
+	// global=false → each consumer on the channel gets its own prefetch credit.
+	// ChannelQoS() sets global=true (per-channel, which is RabbitMQ's recommended default).
+	if err := ch.Qos(int(c.prefetch), 0, c.channelQoS); err != nil { //nolint:gosec // G115: prefetch is uint16 by protocol
 		_ = ch.Close()
-		return nil, fmt.Errorf("warren: consumer Qos: %w", wrapAMQPError(err))
+		return deliverySub{}, fmt.Errorf("warren: consumer Qos: %w", wrapAMQPError(err))
 	}
 
 	args := amqp091.Table{}
@@ -202,11 +220,16 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (chan amqp091.Delivery
 	deliveries, err := ch.Consume(c.queue, c.tag, false, false, false, false, args)
 	if err != nil {
 		_ = ch.Close()
-		return nil, fmt.Errorf("warren: consumer subscribe: %w", wrapAMQPError(err))
+		return deliverySub{}, fmt.Errorf("warren: consumer subscribe: %w", wrapAMQPError(err))
 	}
 
 	out := make(chan amqp091.Delivery, int(c.prefetch)) //nolint:gosec // G115: prefetch bounded
 	closeCh := ch.NotifyClose(make(chan *amqp091.Error, 1))
+
+	// channelDone is closed when the AMQP channel physically closes, not when
+	// the consumer ctx is cancelled. dispatch goroutines watch this to cancel
+	// in-flight handler contexts with cause ErrChannelClosed.
+	channelDone := make(chan struct{})
 
 	go func() {
 		defer close(out)
@@ -214,6 +237,8 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (chan amqp091.Delivery
 			select {
 			case d, ok := <-deliveries:
 				if !ok {
+					// basic.cancel or broker closed delivery stream.
+					close(channelDone)
 					return
 				}
 				select {
@@ -222,18 +247,22 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (chan amqp091.Delivery
 					return
 				}
 			case <-closeCh:
+				// AMQP channel close frame received.
+				close(channelDone)
 				return
 			case <-ctx.Done():
+				// Consumer stopped; do NOT close channelDone — this is not a
+				// channel failure, just consumer lifecycle end.
 				return
 			}
 		}
 	}()
 
-	return out, nil
+	return deliverySub{ch: out, done: channelDone}, nil
 }
 
 // dispatch decodes and handles a single delivery.
-func (c *Consumer[M]) dispatch(ctx context.Context, raw amqp091.Delivery, h RawHandler[M]) {
+func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, raw amqp091.Delivery, h RawHandler[M]) {
 	var body M
 	if err := safeDecodeConsumer(c.codec, raw.Body, &body); err != nil {
 		c.cm.RecordHandler(c.queue, "decode_error", 0)
@@ -243,27 +272,73 @@ func (c *Consumer[M]) dispatch(ctx context.Context, raw amqp091.Delivery, h RawH
 
 	d := newDelivery[M](&body, c.queue, raw, c.closedCh)
 
-	hCtx := ctx
-	var cancel context.CancelFunc
+	// hCtxBase is the WithCancelCause context used to distinguish the reason
+	// ctx was cancelled (ErrChannelClosed vs timeout vs outer cancel).
+	hCtxBase, cancelCause := context.WithCancelCause(ctx)
+	defer cancelCause(nil)
+
+	// Watch for AMQP channel close and cancel the handler context with cause.
+	// The goroutine exits when chanDone fires or hCtxBase is done (whichever is first).
+	if chanDone != nil {
+		go func() {
+			select {
+			case <-chanDone:
+				cancelCause(ErrChannelClosed)
+			case <-hCtxBase.Done():
+			}
+		}()
+	}
+
+	hCtx := context.Context(hCtxBase)
 	if c.handlerTimeout > 0 {
-		hCtx, cancel = context.WithTimeout(ctx, c.handlerTimeout)
-		defer cancel()
+		var timeoutCancel context.CancelFunc
+		hCtx, timeoutCancel = context.WithTimeout(hCtxBase, c.handlerTimeout)
+		defer timeoutCancel()
 	}
 
 	start := time.Now()
+
+	if c.handlerTimeout == 0 {
+		// Fast path: call handler inline; avoids per-message goroutine + channel.
+		handlerErr := h(hCtx, d)
+		elapsed := time.Since(start)
+		if errors.Is(context.Cause(hCtxBase), ErrChannelClosed) && handlerErr != nil {
+			// Handler was interrupted by a channel close mid-execution.
+			c.cm.RecordHandlerAbortedChannelClosed(c.queue)
+			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
+			return // no ack — broker will redeliver
+		}
+		c.cm.RecordHandler(c.queue, handlerOutcome(handlerErr), elapsed)
+		_ = d.AckIf(handlerErr)
+		return
+	}
+
+	// Timeout path: run handler in a goroutine so we can enforce the deadline.
 	handlerDone := make(chan error, 1)
 	go func() { handlerDone <- h(hCtx, d) }()
 
 	select {
 	case handlerErr := <-handlerDone:
 		elapsed := time.Since(start)
+		// Check if a channel close raced with a successful handler return.
+		if errors.Is(context.Cause(hCtxBase), ErrChannelClosed) && handlerErr != nil {
+			c.cm.RecordHandlerAbortedChannelClosed(c.queue)
+			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
+			return
+		}
 		c.cm.RecordHandler(c.queue, handlerOutcome(handlerErr), elapsed)
 		_ = d.AckIf(handlerErr)
 
 	case <-hCtx.Done():
-		if c.handlerTimeout > 0 && errors.Is(hCtx.Err(), context.DeadlineExceeded) {
+		elapsed := time.Since(start)
+		switch {
+		case errors.Is(context.Cause(hCtxBase), ErrChannelClosed):
+			// Channel closed mid-handler.
+			c.cm.RecordHandlerAbortedChannelClosed(c.queue)
+			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
+		case errors.Is(hCtx.Err(), context.DeadlineExceeded):
+			// HandlerTimeout fired.
 			c.cm.RecordHandlerTimeout(c.queue)
-			elapsed := time.Since(start)
 			switch c.timeoutVerdict {
 			case TimeoutNackRequeue:
 				c.cm.RecordHandler(c.queue, "timeout_nack_requeue", elapsed)
@@ -272,6 +347,8 @@ func (c *Consumer[M]) dispatch(ctx context.Context, raw amqp091.Delivery, h RawH
 				c.cm.RecordHandler(c.queue, "timeout_nack_no_requeue", elapsed)
 				_ = raw.Nack(false, false)
 			}
+		default:
+			// Outer ctx cancelled; no ack — broker will redeliver.
 		}
 		<-handlerDone
 	}
@@ -295,18 +372,6 @@ func safeDecodeConsumer(c codec.Codec, payload []byte, out any) (err error) {
 		}
 	}()
 	return c.Decode(payload, out)
-}
-
-// mapHandlerResult applies handler error mapping; used by unit tests.
-func mapHandlerResult(d interface {
-	Ack(multiple bool) error
-	Nack(multiple, requeue bool) error
-}, err error) {
-	if err == nil {
-		_ = d.Ack(false)
-		return
-	}
-	_ = d.Nack(false, errors.Is(err, ErrRequeue))
 }
 
 // Health reports whether the consumer's pinned connection is healthy.
