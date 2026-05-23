@@ -329,3 +329,307 @@ diretamente e não usa esta função. Com isso, a função está em 0% de cobert
 a usa, manter e adicionar cobertura.
 
 **Pré-requisitos:** T18 (Consumer re-subscribe hooks).
+
+---
+
+### LATER-12 — `Consumer.Pause`/`Resume` para drain manual sem matar o pod
+
+**Contexto:** `consumer.go` (T18) — hoje a única forma de parar de consumir é (a) `Close(ctx)`
+permanente ou (b) reagir ao `basic.cancel` do broker via `OnCancel`. Não há API explícita para o
+operador drenar um consumer durante manutenção (deploy, schema migration, troubleshooting) sem
+encerrar o processo ou tirar o pod do load-balancer.
+
+**Impacto:** SREs precisam de truques (kill consumer + spin up replacement, ou pausar via
+`rabbitmqctl set_policy` em tempo de execução) para drenar uma fila durante operações de
+manutenção. Operações simples de "para de consumir desta fila por 5 min" demandam orquestração
+externa. Em incidentes, falta de pausa fina leva a kills de pod inteiro com perda de in-flight.
+
+**Evidência:** SRE on-call review (2026-05-22), gap F.
+
+**Sugestão de solução:**
+Adicionar `(*Consumer[M]).Pause(ctx) error` que envia `basic.cancel` local (mantendo o canal e
+permitindo in-flight handlers terminarem dentro do `ctx`) e `(*Consumer[M]).Resume(ctx) error`
+que reissui `basic.consume` na mesma topologia. Métricas:
+`consumer_paused_total{queue}` / `consumer_resumed_total{queue}` e gauge
+`consumer_paused{queue}` (1/0). Status exposto via `(*Consumer[M]).Paused() bool` para health
+probes derivarem prontidão.
+
+Cuidados:
+- Pausa não pode interferir com a barreira de reconnect (T07/T16): se reconectar durante pausa,
+  o re-subscribe não deve disparar enquanto `paused==true`.
+- Documentar que pausa é local ao processo; outros consumers na mesma queue continuam ativos
+  (use SAC + Pause para draining estrito do leader).
+
+**Pré-requisitos:** T18 (Consumer base) e T19 (ConsumerMetrics) — depende de re-subscribe loop
+existir para reaproveitar o caminho de reissue.
+
+**Acceptance criteria quando implementado:**
+- `Pause` retorna após o broker confirmar `basic.cancel-ok` ou após `ctx.Done()`.
+- Após `Pause`, deliveries deixam de chegar; in-flight handlers terminam normalmente.
+- `Resume` é idempotente; chamar em consumer já ativo é no-op + log warning.
+- Forced reconnect durante pausa NÃO reissui `basic.consume`; gauge permanece `1`.
+- Teste de integração: pausa, publica 100 msg, sleep 1s (broker enfileira), `Resume`, recebe
+  todas as 100; `goleak.VerifyNone` clean.
+
+---
+
+### LATER-13 — Consumer liveness probe (`Healthy()` com last-delivery timestamp)
+
+**Contexto:** `connection.go:Health` cobre apenas a saúde do TCP (broker responde, canal aberto).
+Não há sinal disponível para o operador responder "este consumer ainda está consumindo desta
+queue ou ele está stuck/quiet?". K8s liveness/readiness probes precisam dessa distinção para
+reciclar pods de consumers parados sem matar pods de consumers ociosos por falta de mensagens.
+
+**Impacto:** Probes baseadas só em `Connection.Health()` falham positivos (consumer "vivo" mas
+handler em deadlock), enquanto probes naive baseadas em "tem delivery nos últimos N segundos"
+falham negativos em queues low-volume. Sem API estruturada, cada time inventa heurística
+própria e a comparabilidade entre serviços é zero.
+
+**Evidência:** SRE on-call review (2026-05-22), gap G.
+
+**Sugestão de solução:**
+```go
+type ConsumerHealth struct {
+    Active            bool      // basic.consume em vigor
+    Paused            bool      // ver LATER-12
+    LastDeliveryAt    time.Time // zero se ainda não recebeu nenhuma
+    LastHandlerEndAt  time.Time
+    InFlightHandlers  int
+}
+func (c *Consumer[M]) Health() ConsumerHealth
+```
+Operador combina os campos em probes apropriadas (ex: "Paused==false && (now-LastDeliveryAt <
+30s || InFlightHandlers > 0)"). Não embute decisão de "vivo/morto" — a lib expõe fatos.
+
+Bonus: helper `consumer.HealthCheck(maxIdle time.Duration) http.HandlerFunc` em subpackage
+`amqphttp/` separado (opt-in).
+
+**Pré-requisitos:** T18 (Consumer). Independente de LATER-12 mas se conjugam bem.
+
+**Acceptance criteria quando implementado:**
+- `Health()` é thread-safe e barato (≤ 5 µs em hot path; sem mutex contention).
+- Teste cobre: consumer recém-`Build`, primeira delivery, handler em curso, handler concluído,
+  consumer pausado, consumer reconectando.
+
+---
+
+### LATER-14 — Queue-depth sampler / lag observability
+
+**Contexto:** Nenhuma observabilidade nativa de profundidade de fila. Operadores dependem de
+scraping externo (`rabbitmq_exporter`, `rabbitmqctl list_queues`) que vive fora da app e
+frequentemente atrasa em relação ao estado real. "Queue depth > X" é uma das alertas SRE
+mais comuns e mais frequentemente quebra na 3ª da manhã por feed atrasado.
+
+**Impacto:** Sem métrica in-process, o consumer não sabe a profundidade da fila que está
+servindo; back-pressure adaptativa (prefetch dinâmico, scale-out hint) fica fora de alcance.
+Operadores precisam manter um exporter em paralelo só para essa métrica básica.
+
+**Evidência:** SRE on-call review (2026-05-22), gap H (e gap L é o output desta).
+
+**Sugestão de solução:**
+- Nova opção: `Consumer[M].WithQueueDepthSampler(interval time.Duration)` que, num goroutine
+  separado, faz `queue.declare-passive` (não-destrutivo) ou GET na management API a cada
+  `interval` e exporta `queue_depth{queue}` gauge.
+- Defaults conservadores: `interval=30s`, opt-in (default desabilitado para não desperdiçar
+  ops em consumers que não precisam).
+- Para múltiplos consumers da mesma queue, single-flight para não duplicar overhead no broker.
+
+Cuidados:
+- `queue.declare-passive` em uma queue de stream pode ter custo elevado; documentar.
+- Não acoplar dependência ao client de management API; usar protocolo AMQP-only.
+
+**Pré-requisitos:** T18 + T19. Não tem urgência para v0.1.
+
+**Acceptance criteria quando implementado:**
+- `queue_depth{queue}` Prometheus gauge é exportado quando `WithQueueDepthSampler` está ativo.
+- Sampler para automaticamente quando `Consumer.Close` é chamado.
+- Falha de `declare-passive` (queue removida) emite `queue_depth_sampler_errors_total{queue,
+  reason}` e cessa polling até `Resume` ou re-Subscribe.
+
+---
+
+### LATER-15 — `MaxInFlightBytes` (cap de memória por consumer)
+
+**Contexto:** `consumer_builder.go` (T18) — `Concurrency(n)` limita goroutines mas não memória.
+Em queues com mensagens grandes (ex: 5 MiB cada) × `Concurrency=64`, o pico de memória do
+processo pode passar de 320 MiB só em handlers in-flight, antes do GC tocar. SRE pediu o
+guardrail correspondente ao `MaxMessageSizeBytes` do publisher (LATER-12 deste cycle já
+implementado), mas no lado consumer.
+
+**Impacto:** OOM kill em pods com `Concurrency` alto + mensagens grandes. Acontece em
+produção quando producer escala message size sem coordenar com consumer (caso real de
+schema migration).
+
+**Evidência:** SRE on-call review (2026-05-22), gap I.
+
+**Sugestão de solução:**
+- `ConsumerBuilder.MaxInFlightBytes(n int64)` cap de bytes total de bodies em handlers ativos
+  (somatório). Quando atingido, novas deliveries não são entregues ao handler até libertar
+  bytes (handler retorna → cap libera).
+- Implementação: semáforo de bytes (channel ou atomic) decremented após `Decode` (na verdade
+  após o handler retornar — quando a memória deve ser liberada).
+- Métrica: `consumer_inflight_bytes{queue}` gauge.
+- Interação com `Concurrency`: ambos aplicáveis; bytes é o "soft" cap, goroutines o "hard".
+
+Cuidados:
+- Considerar contar o body decodificado (estimado por `unsafe.Sizeof` reflexão) ou apenas o
+  raw `Delivery.Body` length. Raw é determinístico, decoded é mais realista mas caro de
+  medir.
+
+**Pré-requisitos:** T18 + T19. Considerar conjugar com T20 (`MaxRedeliveries`) que já mexe em
+hot path.
+
+**Acceptance criteria quando implementado:**
+- Carga sintética: 64 goroutines × 5 MiB body, `MaxInFlightBytes(64 * 1024 * 1024)` mantém
+  o consumo ≤ 64 MiB de in-flight; bench `BenchmarkConsumerLargeBody` valida.
+- Quando o cap está saturado, novas deliveries enfileiram localmente (qos prefetch) ou
+  bloqueiam (escolha de design); documentar trade-off.
+
+---
+
+### LATER-16 — Dedupe-by-MessageID middleware first-class (não só exemplo)
+
+**Contexto:** `examples/idempotent_consume/` (T38b) — hoje a recomendação de dedupe está
+apenas como exemplo executável. Toda equipe que precisar de idempotência reimplementa o
+cache LRU + check + commit, com chances altas de bugs sutis (TTL errado, race entre check e
+processamento, double-commit em retries).
+
+**Impacto:** Bugs de dedupe em produção são silenciosos e caros — duplicatas processadas
+viram cobranças duplas, emails duplos, etc. Sem helper first-class, cada equipe paga o custo
+de aprender o padrão completo (dedupe ANTES do handler, commit DEPOIS do handler retornar
+sucesso, TTL ≥ tempo máximo de redelivery, persistente se restart-tolerance for requisito).
+
+**Evidência:** SRE on-call review (2026-05-22), gap J.
+
+**Sugestão de solução:**
+```go
+type DedupeStore interface {
+    Seen(ctx context.Context, key string) (bool, error)
+    Mark(ctx context.Context, key string, ttl time.Duration) error
+}
+func (b *ConsumerBuilder[M]) WithDedupe(s DedupeStore, opts ...DedupeOption) *ConsumerBuilder[M]
+```
+Defaults: chave = `MessageID` (auto-populado com UUIDv7), TTL = 24h, store in-memory LRU
+(opt-in para Redis/etc via implementação da interface).
+
+A lib gerencia: pré-handler check (cache HIT → Ack + métrica), pós-handler mark on success,
+no-op em failure (re-deliver replays handler).
+
+Métricas: `consumer_dedupe_hits_total{queue}`, `consumer_dedupe_store_errors_total{queue,
+reason}` (store cair não deve quebrar consumo — fail-open com warning).
+
+Cuidados:
+- Documentar trade-off "store cair = duplicates passa" vs "store cair = paralisa consumer".
+  Fail-open é o default seguro mas precisa estar explícito.
+- Cache LRU in-memory NÃO sobrevive restart; documentar como inadequada para guarantees
+  cross-restart.
+
+**Pré-requisitos:** T18 + T38b (exemplo serve como referência canônica para a implementação).
+
+**Acceptance criteria quando implementado:**
+- `WithDedupe(NewLRUDedupeStore(10_000))` deduplica 100% das mensagens com `MessageID`
+  repetido dentro do TTL.
+- Falha do store retorna `dedupe_store_error` na métrica mas não bloqueia consumo (fail-open).
+- Substituir o exemplo `examples/idempotent_consume/` por uma versão usando `WithDedupe`
+  diretamente.
+
+---
+
+### LATER-17 — `WithPublishRateLimit` (token-bucket local no Publisher)
+
+**Contexto:** `publisher.go` — único back-pressure proativo hoje é pool exhaustion
+(`ErrChannelPoolExhausted`), que é reativo (já tentou e falhou). Em apps com loops descontrolados
+(bug em background job, retry recursivo mal-feito), o publisher pode metralhar o broker até
+disparar `connection_blocked_total` — momento em que o broker já está sob pressão.
+
+**Impacto:** Bug em código de aplicação causa incidente em infraestrutura compartilhada. Rate
+limiting client-side é a defesa-em-profundidade clássica e está faltando.
+
+**Evidência:** SRE on-call review (2026-05-22), gap K.
+
+**Sugestão de solução:**
+- `PublisherBuilder.WithPublishRateLimit(perSec int)` token-bucket via `golang.org/x/time/rate`
+  ou implementação minimalista (evitar dependência se possível).
+- `Publish` aguarda token; em ctx-cancel retorna `ErrRateLimited` (novo sentinel transient).
+- Métrica: `publisher_rate_limited_total{exchange}`.
+
+Cuidados:
+- Default = 0 (desabilitado). Não acoplar com `PublishBatch` (que tem semântica all-at-once).
+- Documentar que rate limit é client-local; para enforcement broker-side use policies do
+  RabbitMQ.
+
+**Pré-requisitos:** T13 (já implementado). Standalone.
+
+**Acceptance criteria quando implementado:**
+- `WithPublishRateLimit(100)` permite 100 publishes/s; carga acima é serializada com latência
+  observável (benchmark).
+- `Publish` com ctx expirado durante wait retorna `ErrRateLimited` wrapping `ctx.Err()`.
+
+---
+
+### LATER-18 — `dlq_depth` gauge (acoplado a LATER-14)
+
+**Contexto:** Hoje a lib emite eventos quando DLX'a uma mensagem (`consumer_handler_seconds`
+com outcome=`nack_no_requeue` etc), mas não há gauge de "quantas mensagens estão acumuladas
+na DLQ agora". Crescimento monotônico de DLQ é o sinal mais frequente de incidente
+backend silencioso (handler degradado, dependência semi-quebrada).
+
+**Impacto:** Operador descobre crescimento de DLQ tarde demais — geralmente quando alguém
+abre o management UI por outro motivo. Alertas baseadas em "mensagens DLX'd nos últimos 5
+min" são noisy (sazonalidade), enquanto "tamanho atual da DLQ" é sinal claro.
+
+**Evidência:** SRE on-call review (2026-05-22), gap L.
+
+**Sugestão de solução:** Estender o sampler de LATER-14 para também sampler queues DLX
+configuradas via `Topology.DeadLetters`. Auto-discovery: para cada `Queue.DeadLetter.Queue`
+declarado, exportar `dlq_depth{source_queue, dlq_queue}` gauge.
+
+**Pré-requisitos:** LATER-14 (infraestrutura de sampler). Implementar como extensão natural.
+
+**Acceptance criteria quando implementado:**
+- `dlq_depth` gauge exportado para cada DLQ derivada de `DeadLetter` entries.
+- Sampler único cobre source queue + DLQ (não duplica goroutines).
+- Documentar como configurar alerta Prometheus de exemplo: `dlq_depth > 1000 for 5m`.
+
+---
+
+### LATER-19 — Observability de schema drift quando `NewJSON` (lax-default) ignora campos
+
+**Contexto:** `codec/json.go` — após Rev 8 (Postel's Law), `NewJSON()` aceita campos
+desconhecidos silenciosamente. Isso é o comportamento correto para sobrevivência em deploys,
+mas torna invisíveis legítimos casos de schema drift que o operador deveria saber sobre (ex:
+"v2 do producer subiu mas nunca migramos o consumer; estamos perdendo a feature nova").
+
+**Impacto:** Equipes podem permanecer no schema antigo indefinidamente sem perceber, porque
+nada quebra. Drift que deveria ser visível (e levaria a uma decisão consciente: migrar ou
+remover o campo) fica enterrado.
+
+**Evidência:** SRE on-call review (2026-05-22), follow-up do item A (Postel) — gap A.1 da
+análise original. Reconhecido como desejável mas adiado para manter o commit de Rev 8 focado
+em flip de default.
+
+**Sugestão de solução:**
+Adicionar opção opcional para hook ao detectar unknown fields no `Decode`:
+```go
+codec.NewJSON(codec.WithUnknownFieldObserver(func(path string) {
+    metrics.SchemaDriftHit(path)
+}))
+```
+Implementação requer duas passadas (parse para `map[string]any` + comparar com struct fields)
+ou usar reflection cuidadosa no resultado do `json.Decoder` — não-trivial.
+
+Métrica natural: `codec_unknown_fields_total{codec, field_path}` (cardinalidade controlada;
+usar `field_path` truncado se necessário).
+
+Cuidados:
+- Overhead do hook deve ser opt-in (default sem hook = zero custo, mantendo a performance
+  do path Postel).
+- Para field paths nested (ex: `order.items[3].metadata.extra`), decidir granularidade.
+
+**Pré-requisitos:** Rev 8 (já implementado). Standalone.
+
+**Acceptance criteria quando implementado:**
+- `WithUnknownFieldObserver` callback dispara uma vez por campo desconhecido por `Decode`.
+- Sem hook: zero overhead comparado a antes (bench mostra dentro de ±2%).
+- Documentado como o caminho recomendado para detectar drift em produção sem voltar para
+  `NewJSONStrict`.
