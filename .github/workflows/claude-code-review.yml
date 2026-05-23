@@ -4,16 +4,21 @@ on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
     # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+    paths:
+      - "**/*.go"
+      - "**/*.mod"
+      - "**/*.sum"
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.sh"
+      - "**/Makefile"
+      - "**/LICENCE"
 
 jobs:
   claude-review:
     # Optional: Filter by PR author
-    # if: |
+    if: |
+      github.event.pull_request.user.login == 'brunomvsouza'
     #   github.event.pull_request.user.login == 'external-contributor' ||
     #   github.event.pull_request.user.login == 'new-developer' ||
     #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
@@ -27,7 +32,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
