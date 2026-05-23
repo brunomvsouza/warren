@@ -20,7 +20,7 @@ listed in `SPEC.md` §6 ("Note on AMQP 0-9-1 vs RabbitMQ").
 
 **Revision history:** (Rev 8 → Rev 7 → Rev 6 → Rev 5 ordering preserved at the top — newest specialist pass first; Rev 5 sits below Rev 6 because it was the prior milestone the Rev 6 pass superseded.)
 - Rev 8 — post SRE on-call review (2026-05-22). 54 tasks (unchanged).
-  Two surface changes from the SRE review (items A + E in the
+  Three surface changes from the SRE review (items A + E + M in the
   analysis).
   - **Item A (codec):** **`codec.NewJSON()` is now lax by default
     (Postel's Law)**; `codec.NewJSONStrict()` is the opt-in
@@ -46,6 +46,34 @@ listed in `SPEC.md` §6 ("Note on AMQP 0-9-1 vs RabbitMQ").
     todo.md. Code lives in `publisher_builder.go` (option) +
     `publisher.go` (Publish-time check) + `errors.go` (new sentinel
     classified `IsPermanent==true`).
+  - **Item M (tracing continuity post-mortem):** the contract that
+    T27/T28 must satisfy when implemented is hardened. Three load-
+    bearing invariants:
+    1. **Publisher injects `traceparent`/`tracestate` before any
+       frame is written** so the propagated context travels as part
+       of `basic.publish` and survives any DLX bounce automatically
+       (broker preserves headers + properties on dead-letter).
+    2. **The library never strips, rewrites, or normalises message
+       headers on the consume path.** A symbol-absence test
+       enforces this; any future code that mutates headers must
+       update SPEC §6.9 + §6.6 first.
+    3. **Spans terminate with an outcome attribute and an OTel
+       status matching the verdict.** Consumer:
+       `messaging.rabbitmq.outcome` ∈ `ack|nack_requeue|
+       nack_no_requeue|max_redeliveries|timeout|
+       handler_aborted_channel_closed`; failures call
+       `Span.RecordError`, set `Status=Error`, and set `error.type`
+       to the sentinel name (e.g. `"ErrMaxRedeliveries"`).
+       Publisher mirrors the contract for the publish failure
+       matrix. Poisoned messages render red in trace UIs and
+       support assertive alerts like "spike of
+       `error.type="ErrMaxRedeliveries"`" without query gymnastics.
+
+    SPEC §6.3 + §6.6 + §6.9 + §10 #51 updated. T27/T28 acceptance
+    in todo.md amended with the full outcome matrix, error-type
+    matrix, panic-cleanup test, and a new DLX-path integration test
+    that asserts trace-id continuity across producer → consumer →
+    DLQ consumer.
 
   No new tasks; no dependency-graph change.
 - Rev 7 — post cross-check tightening pass (no structural changes). A
