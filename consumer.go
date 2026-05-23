@@ -29,7 +29,7 @@ type RawHandler[M any] func(ctx context.Context, d *Delivery[M]) error
 // dispatch goroutines watch done to cancel in-flight handler contexts.
 type deliverySub struct {
 	ch   chan amqp091.Delivery
-	done <-chan struct{} // nil when using the test-injection hook
+	done <-chan struct{} // nil when channel-close detection is not needed
 }
 
 // Consumer receives AMQP messages from a single queue, decodes each payload
@@ -56,9 +56,13 @@ type Consumer[M any] struct {
 	// mc is the consumer-role managed connection this consumer is pinned to.
 	mc *managedConn
 
-	// deliveryCh is a test-injection hook: when non-nil, openDeliveryCh returns it
-	// directly without opening a real amqp091 channel.
+	// deliveryCh is a basic test-injection hook: when non-nil, openDeliveryCh
+	// returns it with done=nil (channel-close detection is not exercised).
 	deliveryCh chan amqp091.Delivery
+
+	// deliverySubOverride is a full test-injection hook: when non-nil, openDeliveryCh
+	// returns it directly, including the done channel for channel-close detection tests.
+	deliverySubOverride *deliverySub
 
 	// closedCh is closed when Close is called; signals Delivery.Ack/Nack to refuse.
 	closedCh  chan struct{}
@@ -107,6 +111,8 @@ func connIndexForTag(tag string, n int) int {
 // Consume starts consuming from the configured queue, decoding each message
 // and dispatching to h. It blocks until ctx is cancelled.
 // May only be called once per consumer; create a new consumer to restart.
+// Cancelling ctx waits for all in-flight handlers to return; set HandlerTimeout
+// to bound shutdown latency when handlers may block indefinitely.
 func (c *Consumer[M]) Consume(ctx context.Context, h Handler[M]) error {
 	return c.ConsumeRaw(ctx, func(innerCtx context.Context, d *Delivery[M]) error {
 		return h(innerCtx, *d.Body())
@@ -115,6 +121,8 @@ func (c *Consumer[M]) Consume(ctx context.Context, h Handler[M]) error {
 
 // ConsumeRaw starts consuming, passing the full Delivery envelope to h.
 // May only be called once per consumer; create a new consumer to restart.
+// Cancelling ctx waits for all in-flight handlers to return; set HandlerTimeout
+// to bound shutdown latency when handlers may block indefinitely.
 func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error {
 	if !c.started.CompareAndSwap(false, true) {
 		return fmt.Errorf("%w: consumer already started; create a new consumer via Build() to restart", ErrInvalidOptions)
@@ -185,11 +193,14 @@ func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error {
 	}
 }
 
-// openDeliveryCh opens a subscription. Unit tests pre-set c.deliveryCh to inject
-// deliveries without a live broker; production opens a real AMQP channel.
+// openDeliveryCh opens a subscription. Unit tests pre-set deliverySubOverride or
+// deliveryCh to inject deliveries without a live broker; production opens a real AMQP channel.
 func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
+	if c.deliverySubOverride != nil {
+		return *c.deliverySubOverride, nil
+	}
 	if c.deliveryCh != nil {
-		// done is nil: channel-close detection is not exercised in unit tests.
+		// done is nil: channel-close detection is not exercised in basic unit tests.
 		return deliverySub{ch: c.deliveryCh, done: nil}, nil
 	}
 
@@ -212,9 +223,9 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 		return deliverySub{}, fmt.Errorf("warren: consumer Qos: %w", wrapAMQPError(err))
 	}
 
-	args := amqp091.Table{}
+	var args amqp091.Table
 	if c.prioritySet {
-		args["x-priority"] = c.priority
+		args = amqp091.Table{"x-priority": c.priority}
 	}
 
 	deliveries, err := ch.Consume(c.queue, c.tag, false, false, false, false, args)
@@ -230,6 +241,8 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 	// the consumer ctx is cancelled. dispatch goroutines watch this to cancel
 	// in-flight handler contexts with cause ErrChannelClosed.
 	channelDone := make(chan struct{})
+	var onceDone sync.Once
+	closeChannelDone := func() { onceDone.Do(func() { close(channelDone) }) }
 
 	go func() {
 		defer close(out)
@@ -238,7 +251,7 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 			case d, ok := <-deliveries:
 				if !ok {
 					// basic.cancel or broker closed delivery stream.
-					close(channelDone)
+					closeChannelDone()
 					return
 				}
 				select {
@@ -248,7 +261,7 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 				}
 			case <-closeCh:
 				// AMQP channel close frame received.
-				close(channelDone)
+				closeChannelDone()
 				return
 			case <-ctx.Done():
 				// Consumer stopped; do NOT close channelDone — this is not a
@@ -262,6 +275,9 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 }
 
 // dispatch decodes and handles a single delivery.
+//
+// chanDone is nil when channel-close detection is not available (test injection path);
+// a nil receive case in a Go select is never ready, so the chanDone case is safely disabled.
 func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, raw amqp091.Delivery, h RawHandler[M]) {
 	var body M
 	if err := safeDecodeConsumer(c.codec, raw.Body, &body); err != nil {
@@ -272,24 +288,12 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 
 	d := newDelivery[M](&body, c.queue, raw, c.closedCh)
 
-	// hCtxBase is the WithCancelCause context used to distinguish the reason
-	// ctx was cancelled (ErrChannelClosed vs timeout vs outer cancel).
+	// hCtxBase is the WithCancelCause context used to propagate ErrChannelClosed
+	// to the handler goroutine when the AMQP channel closes mid-handler (timeout path).
 	hCtxBase, cancelCause := context.WithCancelCause(ctx)
 	defer cancelCause(nil)
 
-	// Watch for AMQP channel close and cancel the handler context with cause.
-	// The goroutine exits when chanDone fires or hCtxBase is done (whichever is first).
-	if chanDone != nil {
-		go func() {
-			select {
-			case <-chanDone:
-				cancelCause(ErrChannelClosed)
-			case <-hCtxBase.Done():
-			}
-		}()
-	}
-
-	hCtx := context.Context(hCtxBase)
+	hCtx := hCtxBase
 	if c.handlerTimeout > 0 {
 		var timeoutCancel context.CancelFunc
 		hCtx, timeoutCancel = context.WithTimeout(hCtxBase, c.handlerTimeout)
@@ -302,8 +306,16 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		// Fast path: call handler inline; avoids per-message goroutine + channel.
 		handlerErr := h(hCtx, d)
 		elapsed := time.Since(start)
-		if errors.Is(context.Cause(hCtxBase), ErrChannelClosed) && handlerErr != nil {
-			// Handler was interrupted by a channel close mid-execution.
+		// Non-blocking check: did the AMQP channel close while the handler ran?
+		channelClosed := false
+		if chanDone != nil {
+			select {
+			case <-chanDone:
+				channelClosed = true
+			default:
+			}
+		}
+		if channelClosed && handlerErr != nil {
 			c.cm.RecordHandlerAbortedChannelClosed(c.queue)
 			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
 			return // no ack — broker will redeliver
@@ -314,14 +326,23 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 	}
 
 	// Timeout path: run handler in a goroutine so we can enforce the deadline.
+	// A nil chanDone is never selected in the select below (Go semantics).
 	handlerDone := make(chan error, 1)
 	go func() { handlerDone <- h(hCtx, d) }()
 
 	select {
 	case handlerErr := <-handlerDone:
 		elapsed := time.Since(start)
-		// Check if a channel close raced with a successful handler return.
-		if errors.Is(context.Cause(hCtxBase), ErrChannelClosed) && handlerErr != nil {
+		// Non-blocking check for a channel close that raced with handler completion.
+		channelClosed := false
+		if chanDone != nil {
+			select {
+			case <-chanDone:
+				channelClosed = true
+			default:
+			}
+		}
+		if channelClosed && handlerErr != nil {
 			c.cm.RecordHandlerAbortedChannelClosed(c.queue)
 			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
 			return
@@ -329,13 +350,16 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		c.cm.RecordHandler(c.queue, handlerOutcome(handlerErr), elapsed)
 		_ = d.AckIf(handlerErr)
 
+	case <-chanDone: // nil channel: never selected when chanDone is nil
+		elapsed := time.Since(start)
+		cancelCause(ErrChannelClosed) // cancel handler ctx before draining
+		c.cm.RecordHandlerAbortedChannelClosed(c.queue)
+		c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
+		<-handlerDone
+
 	case <-hCtx.Done():
 		elapsed := time.Since(start)
 		switch {
-		case errors.Is(context.Cause(hCtxBase), ErrChannelClosed):
-			// Channel closed mid-handler.
-			c.cm.RecordHandlerAbortedChannelClosed(c.queue)
-			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
 		case errors.Is(hCtx.Err(), context.DeadlineExceeded):
 			// HandlerTimeout fired.
 			c.cm.RecordHandlerTimeout(c.queue)
@@ -350,6 +374,7 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		default:
 			// Outer ctx cancelled; no ack — broker will redeliver.
 		}
+		cancelCause(nil) // signal handler goroutine before draining
 		<-handlerDone
 	}
 }

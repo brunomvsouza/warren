@@ -152,7 +152,9 @@ func (b *ConsumerBuilder[M]) Build() (*Consumer[M], error) {
 	if b.queue == "" {
 		return nil, fmt.Errorf("%w: queue must not be empty", ErrInvalidOptions)
 	}
-	b.applyDefaults()
+	// Work on a copy so repeated Build() calls see the original builder state.
+	cfg := *b
+	cfg.applyDefaults()
 
 	tag := b.tag
 	if tag == "" {
@@ -163,14 +165,14 @@ func (b *ConsumerBuilder[M]) Build() (*Consumer[M], error) {
 		tag = "ctag-" + id.String()
 	}
 
-	if b.prefetch < uint16(b.concurrency) { //nolint:gosec // G115: concurrency bounded by uint
+	if cfg.prefetch < uint16(cfg.concurrency) { //nolint:gosec // G115: concurrency bounded by uint
 		b.conn.opts.logger.Warningf(
 			"warren: consumer prefetch=%d is below concurrency=%d; handlers will stall waiting for deliveries",
-			b.prefetch, b.concurrency,
+			cfg.prefetch, cfg.concurrency,
 		)
 	}
 
-	return newConsumer[M](b, tag), nil
+	return newConsumer[M](&cfg, tag), nil
 }
 
 func (b *ConsumerBuilder[M]) applyDefaults() {
