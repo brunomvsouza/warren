@@ -148,7 +148,7 @@ On reconnect, Warren runs a **synchronous barrier** before resuming traffic on t
 - **Connection** — `Dial`, multi-address failover, TLS, PLAIN and EXTERNAL (mTLS) SASL, role-split TCP pool, heartbeat and frame sizing, `Health` / `Close` / `ForceReconnect`
 - **Publisher** — `PublisherFor[M]`, publisher confirms, mandatory + returns, `PublishRetry`, confirm/publish timeouts, concurrent-safe `Publish`
 - **Topology** — declarative exchanges, queues, bindings, dead-letter expansion; `Declare` + `AttachTo` for reconnect redeclare; degraded state on persistent redeclare failure
-- **Codec** — strict JSON (`DisallowUnknownFields` by default)
+- **Codec** — lax JSON by default (Postel's Law — unknown fields are tolerated so producer-first deploys do not poison v1 DLQs); opt-in `codec.NewJSONStrict()` for compliance pipelines
 - **Errors** — AMQP reply-code sentinels, `AMQPCode`, transient/permanent classifiers
 - **Observability** — pluggable `log.Logger`, Prometheus metrics (default), OpenTelemetry tracer + W3C propagation helpers
 - **Examples** — [`examples/publish`](examples/publish/main.go), [`examples/topology`](examples/topology/main.go), [`examples/deadletter`](examples/deadletter/main.go)

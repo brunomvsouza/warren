@@ -256,17 +256,19 @@ TCP connection** (not a global pool across all publisher conns).
 ## Phase 2 — Producer: synchronous-with-confirm publish
 
 ### [x] T09 — `codec/` package + JSON · S
-Codec interface and the first implementation. Rev 5 makes JSON
-**strict by default** (`DisallowUnknownFields`) and adds the panic
-safety contract.
+Codec interface and the first implementation. **Rev 8** makes JSON
+**lax by default** (Postel's Law — conservative on send, liberal on
+receive) and keeps the panic safety contract. The Rev 5 strict-default
+was reverted because at billions/day, producer-first deploys must not
+poison v1 consumers' DLQs.
 - **Acceptance:**
   - [ ] `Codec` interface: `Encode(any) ([]byte, error)`, `Decode([]byte, any) error`, `ContentType() string`.
-  - [ ] **`codec.NewJSON()` is strict by default** — `Decode` uses `json.NewDecoder(...).DisallowUnknownFields()`. An unknown field surfaces as `ErrInvalidMessage` wrapping the `json` error.
-  - [ ] **`codec.NewJSONLax()`** opt-in variant that tolerates unknown fields, for back-compat scenarios. Documented in godoc with explicit warning that schema drift becomes silent.
+  - [ ] **`codec.NewJSON()` is lax by default (Postel's Law)** — `Decode` accepts unknown fields on the wire and ignores them; producer-first deploys do not poison v1 DLQs.
+  - [ ] **`codec.NewJSONStrict()`** opt-in variant that calls `json.Decoder.DisallowUnknownFields()`; an unknown field surfaces as `ErrInvalidMessage` wrapping the `json` error. Documented in godoc as the choice for regulated/compliance pipelines where consumer-side drift MUST be a hard error.
   - [ ] Both variants share the same `ContentType` = `application/json`.
   - [ ] **Panic safety contract** (consumed by Publisher / Consumer): Publisher/Consumer wrap every `Encode`/`Decode` call in `defer recover` and convert a recovered value into `ErrInvalidMessage` (wrapping `fmt.Errorf("codec panic: %v", r)`). A unit test in `publisher_test.go` / `consumer_test.go` injects a panicking fake codec and asserts the path returns `ErrInvalidMessage` without the goroutine crashing.
-  - [ ] Round-trip property tests for strict + lax + one fuzz target (`FuzzCodecJSON`).
-- **Verify:** `go test ./codec/...` + `go test -fuzz=FuzzCodecJSON -fuzztime=30s ./codec` (locally). Strict-default regression test: `NewJSON()` rejects `{"a":1,"b":2}` decoded into `struct{A int}` with `ErrInvalidMessage`; `NewJSONLax()` accepts it.
+  - [ ] Round-trip property tests for lax + strict + one fuzz target (`FuzzCodecJSON`).
+- **Verify:** `go test ./codec/...` + `go test -fuzz=FuzzCodecJSON -fuzztime=30s ./codec` (locally). Lax-default regression test: `NewJSON()` accepts `{"id":1,"extra":true}` decoded into `struct{ID int}` without error. Strict opt-in regression: `NewJSONStrict()` rejects the same payload with `ErrInvalidMessage`.
 - **Files:** `codec/codec.go`, `codec/json.go`, `codec/json_test.go`, `codec/json_fuzz_test.go`.
 - **Deps:** T02.
 
@@ -1051,4 +1053,4 @@ SPEC §8 + §9 reliability bar: credential leakage is a defect.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.
 - Bench gates (T44b): ≥ 30k msg/s single-conn, ≥ 100k msg/s with `WithPublisherConnections(4)+WithChannelPoolSize(16)`, `PublishBatch` ≥ 5× `Publish`.
 - Operational decisions: deps pinned exact in `go.mod`; testcontainer images pinned minor-patch; conformance against a live broker (no stub); pre-commit hooks opt-in via `make hooks`; no goreleaser (pure library); OTel Messaging semconv pinned to v1.27.0+; `golangci-lint` includes `errorlint`; `amqptest` plugin enablement supports three explicit modes (pre-baked image / mounted `.ez` / `t.Skip`).
-- Reliability invariants (mandatory): credential redaction (T07c, T45b), consumer re-subscribe (T18, T19), handler-ctx cancel on channel close (T18, T19), broker-nack → `ErrPublishNacked` (T11, T13), JSON strict default (T09), quorum-queue `x-delivery-limit` (T14, T15, T20), **synchronous reconnect barrier + degraded state** (T07, T16, T45), **at-least-once with documented dedupe pattern** (T13, T38b, SPEC §6.2.1), **HandlerTimeout verdict consistency** (T18, T18b), **client-side UserID validation** (T13), **Replier missing-DLX validation** (T30), **SASL EXTERNAL fail-closed** (T34b), **basic.cancel surfacing** (T36), **default conn counts 2/2 with consumer-tag UUID** (T07d, T18).
+- Reliability invariants (mandatory): credential redaction (T07c, T45b), consumer re-subscribe (T18, T19), handler-ctx cancel on channel close (T18, T19), broker-nack → `ErrPublishNacked` (T11, T13), JSON lax default per Postel's Law + opt-in `NewJSONStrict` (T09, Rev 8), quorum-queue `x-delivery-limit` (T14, T15, T20), **synchronous reconnect barrier + degraded state** (T07, T16, T45), **at-least-once with documented dedupe pattern** (T13, T38b, SPEC §6.2.1), **HandlerTimeout verdict consistency** (T18, T18b), **client-side UserID validation** (T13), **Replier missing-DLX validation** (T30), **SASL EXTERNAL fail-closed** (T34b), **basic.cancel surfacing** (T36), **default conn counts 2/2 with consumer-tag UUID** (T07d, T18).

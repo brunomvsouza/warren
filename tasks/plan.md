@@ -18,7 +18,23 @@ The library does not aim to be portable to other AMQP 0-9-1 brokers
 (Qpid, ActiveMQ). RabbitMQ extensions surfaced as first-class API are
 listed in `SPEC.md` §6 ("Note on AMQP 0-9-1 vs RabbitMQ").
 
-**Revision history:** (Rev 7 → Rev 6 → Rev 5 ordering preserved at the top — newest specialist pass first; Rev 5 sits below Rev 6 because it was the prior milestone the Rev 6 pass superseded.)
+**Revision history:** (Rev 8 → Rev 7 → Rev 6 → Rev 5 ordering preserved at the top — newest specialist pass first; Rev 5 sits below Rev 6 because it was the prior milestone the Rev 6 pass superseded.)
+- Rev 8 — post SRE on-call review (2026-05-22). 54 tasks (unchanged).
+  Single decision inverted: **`codec.NewJSON()` is now lax by default
+  (Postel's Law)**; `codec.NewJSONStrict()` is the opt-in
+  `DisallowUnknownFields` variant. The Rev 5 strict-default was
+  optimised for "surface schema drift as `ErrInvalidMessage`", but on-call
+  evidence from operating Rabbit at billions/day shows the realistic
+  failure mode is a v2 producer deploying a new field while v1
+  consumers are still rolling — strict-default makes every
+  producer-first deploy a DLQ-poisoning fire drill. SPEC §6.9 + §8
+  Always + §9 success criteria + §10 #23 updated. T09 acceptance,
+  architecture decision #13, and the previously-removed `NewJSONLax`
+  symbol (now collapsed into `NewJSON`) all updated. Code change:
+  `codec/json.go` + `codec/json_test.go` flip default; existing
+  callers using `codec.NewJSON()` automatically get the safer
+  producer-first-deploy behaviour. No new tasks; no dependency-graph
+  change.
 - Rev 7 — post cross-check tightening pass (no structural changes). A
   decision-by-decision audit of SPEC §10 (32 decisions: 8 originals +
   24 Rev 6 specialist) against the 54 plan tasks found **zero structural
@@ -313,7 +329,9 @@ listed in `SPEC.md` §6 ("Note on AMQP 0-9-1 vs RabbitMQ").
   - **JSON strict default + codec panic safety (Important).** T09
     flips `codec.NewJSON()` to strict; adds `codec.NewJSONLax()`.
     Publisher/Consumer wrap every codec call in `recover` →
-    `ErrInvalidMessage`.
+    `ErrInvalidMessage`. *(Superseded by Rev 8: the strict default
+    was inverted to lax per Postel's Law after SRE review evidence
+    on producer-first deploys.)*
   - **BatchHandler / Replier ordering (Important).** T23 documents
     auto-Ack/Nack with `multiple=true` for batch verdicts. T30
     documents at-least-once Replier ordering (publish reply, await
@@ -353,8 +371,10 @@ rationale lives in SPEC §10; this is the quick-reference.
     consumer-side counter B is the classic-queue fallback.
 12. SASL EXTERNAL is supported alongside PLAIN. Credentials are
     redacted from logs/metrics/spans/errors.
-13. JSON codec is **strict by default** (`DisallowUnknownFields`);
-    codec calls are wrapped in `recover` → `ErrInvalidMessage`.
+13. JSON codec is **lax by default** (Postel's Law — `Decode` tolerates
+    unknown fields so producer-first deploys do not poison v1 DLQs);
+    `codec.NewJSONStrict()` is the opt-in `DisallowUnknownFields` mode.
+    Codec calls are wrapped in `recover` → `ErrInvalidMessage`.
 14. Consumers automatically re-issue `basic.consume` after reconnect;
     handler `ctx` cancels with cause `ErrChannelClosed` on mid-handler
     channel close.
@@ -489,7 +509,7 @@ Goal: a `Publisher[OrderPlaced]` that publishes one message at a time,
 synchronously, with broker confirms; mandatory + returns + broker
 nacks wired; emits Prometheus metrics and OTel spans; concurrency-safe.
 
-- **T09** `codec/` package: `Codec` interface + `codec.NewJSON()` (**strict by default** — `DisallowUnknownFields`) + `codec.NewJSONLax()` opt-in + round-trip tests + fuzz target; Publisher/Consumer wrap codec calls in `defer recover` → `ErrInvalidMessage`
+- **T09** `codec/` package: `Codec` interface + `codec.NewJSON()` (**lax by default** — Postel's Law, accepts unknown fields on `Decode` so producer-first deploys do not poison v1 DLQs) + `codec.NewJSONStrict()` opt-in (`DisallowUnknownFields` for compliance pipelines) + round-trip tests + fuzz target; Publisher/Consumer wrap codec calls in `defer recover` → `ErrInvalidMessage`
 - **T10** `message.go`: `Message[M]` struct with `ContentType` + `ContentEncoding` separated; default-apply logic (UUID v7, timestamp, persistent, ContentType ← codec.ContentType); Headers field-table typing validation; field godoc covering `Priority` range/clamp, `Expiration` wire format, `Headers` typing per SPEC §6.5
 - **T11** `internal/confirms`: publisher-confirm tracker handling ack, nack (→ `ErrPublishNacked`), return-then-ack (→ `ErrUnroutable` **wrapped with the originating `basic.return` reply code 312/313** so `AMQPCode(err)` returns it), and channel-close (→ `ErrChannelClosed`); per-channel tracker; `multiple=true` semantics
 - **T12** `publisher.go` + `publisher_builder.go`: `PublisherFor[M]` builder (no `Immediate()` — RabbitMQ rejects it) + `Publish` (sync-confirm, concurrency-safe, channel acquired from publisher pool) + `Close(ctx)` drain

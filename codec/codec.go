@@ -1,5 +1,10 @@
 // Package codec provides message encoding and decoding for AMQP publishers and consumers.
-// The default JSON codec is strict (DisallowUnknownFields); use NewJSONLax for back-compat scenarios.
+//
+// The default JSON codec (NewJSON) follows Postel's Law: conservative on send,
+// liberal on receive — Encode emits exactly the declared fields, Decode tolerates
+// unknown fields on the wire so producer-first deploys do not poison v1
+// consumers' DLQs. NewJSONStrict opts into DisallowUnknownFields when consumer-side
+// schema drift must be a hard error.
 package codec
 
 import "errors"

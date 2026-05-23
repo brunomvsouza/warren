@@ -80,7 +80,7 @@ internal/redact                              ← AMQP URI userinfo redaction (ch
 internal/amqperror   (planned T07b)          ← *amqp091.Error → reply-code sentinel wraps
 internal/confirms    (planned T11)           ← publisher-confirm tracker
 internal/headers     (planned)               ← x-death parser, otel propagation headers
-codec/               (planned T09/T24-T26)   ← JSON (strict default), Protobuf, CloudEvents
+codec/               (planned T09/T24-T26)   ← JSON (lax default per Postel's Law; NewJSONStrict opt-in), Protobuf, CloudEvents
 connection.go, channelpool.go (planned)     ← multi-TCP pool, role-split
 topology.go          (planned T14-T16)
 publisher.go, consumer.go, rpc.go, delay.go  (planned)

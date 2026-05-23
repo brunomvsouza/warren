@@ -66,8 +66,8 @@ func TestConsumerBuilder_LastWins_HandlerTimeoutVerdict(t *testing.T) {
 
 func TestConsumerBuilder_LastWins_Codec(t *testing.T) {
 	conn := newFakeConsumerConn(t)
-	lax := codec.NewJSONLax()
-	strict := codec.NewJSON()
+	lax := codec.NewJSON() // default — Postel's Law (lax)
+	strict := codec.NewJSONStrict()
 	c, err := ConsumerFor[string](conn).Queue("q").
 		Codec(strict).Codec(lax).
 		Build()

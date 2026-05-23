@@ -52,7 +52,9 @@ func (b *PublisherBuilder[M]) RoutingKey(rk string) *PublisherBuilder[M] {
 	return b
 }
 
-// Codec sets the message codec. Default: JSON (strict).
+// Codec sets the message codec. Default: JSON (lax by default — accepts unknown
+// fields per Postel's Law so producer-first deploys do not poison v1 consumers'
+// DLQs). Use codec.NewJSONStrict for consumer-side schema enforcement.
 func (b *PublisherBuilder[M]) Codec(c codec.Codec) *PublisherBuilder[M] {
 	b.c = c
 	return b

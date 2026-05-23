@@ -497,7 +497,7 @@ func TestPublisherFor_applyBuilderDefaults(t *testing.T) {
 
 func TestPublisherBuilder_lastWins_codec(t *testing.T) {
 	first := codec.NewJSON()
-	second := codec.NewJSONLax()
+	second := codec.NewJSONStrict()
 	b := PublisherFor[testPayload](nil).Codec(first).Codec(second)
 	assert.Equal(t, second, b.c, "last Codec call should win")
 }
