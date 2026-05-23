@@ -4,7 +4,7 @@
 
 Warren wraps [`github.com/rabbitmq/amqp091-go`](https://github.com/rabbitmq/amqp091-go) with a type-safe API and the operational layer every team rebuilds on the low-level driver: supervised reconnect with publisher confirms, centralized topology declaration, pluggable codecs, channel pooling across role-split TCP connections, and built-in observability (logging, Prometheus metrics, OpenTelemetry).
 
-> **Status:** Active development toward [`v0.1.0`](SPEC.md). The public API is defined in [`SPEC.md`](SPEC.md); implementation follows [`tasks/plan.md`](tasks/plan.md). **Connection**, **Publisher**, and **Topology** are usable today; **Consumer**, RPC, batch APIs, and additional codecs are in progress.
+> **Status:** Active development toward [`v0.1.0`](SPEC.md). The public API is defined in [`SPEC.md`](SPEC.md); implementation follows [`tasks/plan.md`](tasks/plan.md). **Connection**, **Publisher**, **Topology**, and **Consumer** are usable today; RPC, batch APIs, and additional codecs are in progress.
 
 [![CI](https://github.com/brunomvsouza/warren/actions/workflows/ci.yml/badge.svg)](https://github.com/brunomvsouza/warren/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/brunomvsouza/warren)](https://goreportcard.com/report/github.com/brunomvsouza/warren)
@@ -41,6 +41,8 @@ Requires **Go 1.23+** and a **RabbitMQ 3.13 LTS or 4.x** broker.
 go get github.com/brunomvsouza/warren@main
 ```
 
+### Publish and Consume
+
 ```go
 package main
 
@@ -61,12 +63,14 @@ type Order struct {
 func main() {
 	ctx := context.Background()
 
+	// 1. Dial with role-split connection pool (default: 2 pub, 2 con)
 	conn, err := warren.Dial(ctx, warren.WithAddr("amqp://guest:guest@localhost:5672/"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer conn.Close(context.Background())
 
+	// 2. Declare topology (idempotent; redeclared automatically on reconnect)
 	topo := &warren.Topology{
 		Exchanges: []warren.Exchange{{Name: "orders", Kind: warren.ExchangeTopic, Durable: true}},
 		Queues:    []warren.Queue{{Name: "orders.created", Durable: true}},
@@ -75,30 +79,27 @@ func main() {
 	if err := topo.Declare(ctx, conn); err != nil {
 		log.Fatal(err)
 	}
+	topo.AttachTo(conn) // Ensure it redeclares on every reconnect barrier
 
-	pub, err := warren.PublisherFor[Order](conn).
+	// 3. Publish a typed message
+	pub, _ := warren.PublisherFor[Order](conn).
 		Exchange("orders").
 		RoutingKey("order.created").
-		ConfirmTimeout(30 * time.Second).
 		Build()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer pub.Close(context.Background())
+	
+	_ = pub.Publish(ctx, warren.Message[Order]{Body: &Order{ID: "ord-001", Amount: 42}})
 
-	order := Order{ID: "ord-001", Amount: 42}
-	if err := pub.Publish(ctx, warren.Message[Order]{Body: &order}); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("published")
+	// 4. Consume typed messages
+	con, _ := warren.ConsumerFor[Order](conn).
+		Queue("orders.created").
+		Concurrency(4).
+		Build()
+
+	con.Consume(ctx, func(ctx context.Context, o *Order) error {
+		fmt.Printf("Processing order %s\n", o.ID)
+		return nil // Ack
+	})
 }
-```
-
-Run against a local broker:
-
-```bash
-docker compose -f docker-compose.integration.yml up -d --wait
-AMQP_URL=amqp://guest:guest@localhost:5672/ go run ./examples/publish
 ```
 
 ---
@@ -146,8 +147,9 @@ On reconnect, Warren runs a **synchronous barrier** before resuming traffic on t
 ### Available now
 
 - **Connection** — `Dial`, multi-address failover, TLS, PLAIN and EXTERNAL (mTLS) SASL, role-split TCP pool, heartbeat and frame sizing, `Health` / `Close` / `ForceReconnect`
-- **Publisher** — `PublisherFor[M]`, publisher confirms, mandatory + returns, `PublishRetry`, confirm/publish timeouts, concurrent-safe `Publish`
+- **Publisher** — `PublisherFor[M]`, publisher confirms, mandatory + returns, `PublishRetry`, confirm/publish timeouts, concurrent-safe `Publish`, payload size guardrail
 - **Topology** — declarative exchanges, queues, bindings, dead-letter expansion; `Declare` + `AttachTo` for reconnect redeclare; degraded state on persistent redeclare failure
+- **Consumer** — `ConsumerFor[M]`, prefetch, concurrency, handler error mapping (`ErrRequeue`), re-subscribe loop, `ConsumeRaw`
 - **Codec** — lax JSON by default (Postel's Law — unknown fields are tolerated so producer-first deploys do not poison v1 DLQs); opt-in `codec.NewJSONStrict()` for compliance pipelines
 - **Errors** — AMQP reply-code sentinels, `AMQPCode`, transient/permanent classifiers
 - **Observability** — pluggable `log.Logger`, Prometheus metrics (default), OpenTelemetry tracer + W3C propagation helpers
@@ -155,11 +157,11 @@ On reconnect, Warren runs a **synchronous barrier** before resuming traffic on t
 
 ### On the roadmap (`v0.1.0`)
 
-- **Consumer** — `ConsumerFor[M]`, prefetch, concurrency, handler timeouts, `MaxRedeliveries`, `ConsumeRaw`
+- **Consumer Hardening** — `MaxRedeliveries` (quorum + in-process counters), handler timeouts, `OnCancel` metrics
 - **Batch** — `PublishBatch` (always-all), `BatchConsumerFor[M]`
 - **Patterns** — RPC (direct reply-to), delayed-message exchange helpers
 - **Codecs** — Protobuf, CloudEvents (structured + binary)
-- **Tooling** — `amqpmock/`, conformance suite, chaos/reconnect benchmarks per [SPEC §9](SPEC.md#9-success-criteria-v100)
+- **Tooling** — `amqpmock/`, `amqptest/`, conformance suite, chaos/reconnect benchmarks
 
 See [`tasks/todo.md`](tasks/todo.md) for the live checklist.
 
@@ -193,8 +195,6 @@ conn, err := warren.Dial(ctx,
     warren.WithLogger(myLogger),           // log.Logger — std, slog, or custom
     warren.WithMetrics(promMetrics),       // default: Prometheus; WithoutMetrics() to disable
     warren.WithTracer(otelTracer),         // no-op tracer baked in; swap for a real one
-    warren.WithOnReconnect(func() { /* ... */ }),
-    warren.WithOnBlocked(func(reason string) { /* connection.blocked */ }),
 )
 ```
 
@@ -213,9 +213,8 @@ if err := pub.Publish(ctx, msg); err != nil {
         // safe to retry at application level
     case warren.IsPermanent(err):
         // fix topology, permissions, or message shape
-    }
-    if code, ok := warren.AMQPCode(err); ok {
-        _ = code // e.g. 404 ErrNotFound
+    case errors.Is(err, warren.ErrMessageTooLarge):
+        // message exceeds PublisherBuilder.MaxMessageSizeBytes(n)
     }
 }
 ```
@@ -235,8 +234,6 @@ make integration-down
 ```
 
 Pre-commit hook (opt-in): `make hooks` installs `lint` + `test` on commit.
-
-**Contributing:** read [`SPEC.md`](SPEC.md) before changing public API — the spec is the contract. Implementation tasks live in [`tasks/plan.md`](tasks/plan.md) and [`tasks/todo.md`](tasks/todo.md). API changes require a spec amendment first.
 
 ---
 
