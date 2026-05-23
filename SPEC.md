@@ -1783,13 +1783,18 @@ value.
 
 - **`codec`** — `Codec` interface (`Encode`, `Decode`, `ContentType`),
   built-in `JSON`, `Protobuf`, and **CloudEvents in both modes**:
-  - `codec.NewJSON()` — **strict** by default
-    (`json.Decoder.DisallowUnknownFields()`). At billions/day with
-    schema drift across services, silently dropping unknown fields
-    on the consumer side is a real correctness risk; the strict
-    default surfaces the drift as `ErrInvalidMessage` instead.
-    `codec.NewJSONLax()` is an opt-in variant that accepts unknown
-    fields for back-compat scenarios.
+  - `codec.NewJSON()` — **lax by default** (accepts unknown fields on
+    `Decode`). The codec follows **Postel's Law**: conservative on send
+    (`Encode` emits exactly the fields declared on `M`), liberal on receive
+    (unknown fields on the wire are silently ignored). At billions/day across
+    dozens of services, producer-first deploys — a v2 service publishing a
+    new field alongside v1 services that have not yet rolled — must not
+    poison v1 consumers' DLQs. Strict-default makes every such deploy a
+    fire drill; lax-default makes them a non-event.
+    `codec.NewJSONStrict()` is an opt-in variant that calls
+    `json.Decoder.DisallowUnknownFields()` for the rare pipelines where
+    consumer-side schema drift MUST be a hard error (regulated/compliance
+    workloads).
   - `codec.NewProtobuf()` — proto3 binary; `ContentType` =
     `application/x-protobuf`.
   - `cloudevents.NewStructured()` — full CloudEvent JSON envelope is
@@ -2062,6 +2067,12 @@ how to exercise what is already merged.
   cancelled with cause `ErrChannelClosed` when the underlying
   channel dies, so handlers can abort orphan work. `Close(ctx)` on
   the consumer also cancels with cause `ErrAlreadyClosed`.
+- **Be liberal in what you receive (Postel's Law).** Default codecs
+  tolerate forward-compatible payloads (unknown fields on `Decode` are
+  ignored, not rejected). Producer-first deploys must not poison v1
+  consumers' DLQs. Strict modes (`codec.NewJSONStrict`) are opt-in for
+  the rare pipelines where consumer-side schema drift must be a hard
+  error.
 - **Ship an executable example whenever a checkpoint exposes new
   user-facing surface.** Closing a Phase 2/3/4/5/7 checkpoint in
   `tasks/plan.md` requires the matching `examples/<feature>/main.go`
@@ -2084,8 +2095,9 @@ how to exercise what is already merged.
 - Re-introducing any of the design decisions captured in this spec
   (generic options, decentralized topology, builder-style `Message`,
   magic sleeps, default requeue, raw-only handler, sync-only
-  publish, mocks in root, single-connection abstraction, lax JSON
-  default, swallowing broker nack, missing re-subscribe).
+  publish, mocks in root, single-connection abstraction, strict JSON
+  default that breaks producer-first deploys, swallowing broker nack,
+  missing re-subscribe).
 - Introducing an `OnMismatch` policy for `Topology.Declare` (only
   `ErrTopologyMismatch` is the agreed behaviour; "recreate" is
   destructive and out of scope for the lib).
@@ -2179,8 +2191,9 @@ Coverage and tooling:
 - [ ] `Connection` ships with a no-op `otel.Tracer` by default; no code
       path branches on "tracing disabled".
 - [ ] `codec.CloudEvents` supports both structured and binary modes per
-      the CloudEvents AMQP Protocol Binding spec; `codec.NewJSON()`
-      defaults to strict (`DisallowUnknownFields`).
+      the CloudEvents AMQP Protocol Binding spec; `codec.NewJSON()` is
+      lax by default (Postel's Law — accepts unknown fields on `Decode`);
+      `codec.NewJSONStrict()` is the opt-in `DisallowUnknownFields` mode.
 - [ ] AMQP reply codes from the broker are surfaced as wraps of the
       §6.8 reply-code sentinels (`ErrAccessRefused`, `ErrNotFound`,
       `ErrPreconditionFailed`, etc.) and parseable via `AMQPCode(err)`.
@@ -2408,13 +2421,20 @@ the next reader so the rationale survives the conversation:
     handler abort. `consumer_handler_aborted_channel_closed_total`
     increments per such event.
 
-23. **`codec.NewJSON()` is strict by default
-    (`DisallowUnknownFields`).** With dozens of services sharing
-    schemas at scale, silent unknown-field dropping is a real
-    correctness risk. `codec.NewJSONLax()` is the explicit opt-out.
-    Every codec call is also wrapped in `recover` — codec panics
-    become `ErrInvalidMessage`, never crash the
-    publisher/consumer goroutine.
+23. **`codec.NewJSON()` is lax by default (Postel's Law).** Earlier
+    revisions made the default strict (`DisallowUnknownFields`) to
+    surface schema drift; SRE review (2026-05-22) inverted the
+    decision after the on-call evidence: at billions/day across
+    dozens of services, the realistic failure mode is a v2 producer
+    deploying a new field while v1 consumers are still rolling. A
+    strict default turns every producer-first deploy into a
+    DLQ-poisoning fire drill that wakes the on-call. The library
+    now follows Postel's Law — conservative on send, liberal on
+    receive — and ships `codec.NewJSONStrict()` for the minority
+    of pipelines (regulated/compliance) where consumer-side drift
+    must be a hard error. Every codec call is still wrapped in
+    `recover` — codec panics become `ErrInvalidMessage`, never
+    crash the publisher/consumer goroutine.
 
 24. **Stream queues are v0.2.** `QueueTypeStream` ships in v0.1 for
     declaration only; native stream consume (`x-stream-offset`,

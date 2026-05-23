@@ -61,7 +61,7 @@ return nil
 
 **Acceptance criteria quando implementado:**
 - `NewJSON().Decode([]byte(`{"id":1}{"id":2}`), &v)` retorna `ErrInvalidMessage`.
-- `NewJSONLax()` tem o mesmo comportamento (trailing data não é "campo desconhecido").
+- `NewJSONStrict()` tem o mesmo comportamento (trailing data não é "campo desconhecido").
 - Teste de regressão: payload single-object continua passando.
 
 ---
@@ -186,21 +186,21 @@ inicialização. Em infraestrutura compartilhada ou gerenciada, pode ser explora
 
 ---
 
-### LATER-03 — Fuzz target do codec cobre apenas `NewJSON()` strict com `any` como destino
+### LATER-03 — Fuzz target do codec cobre apenas `NewJSON()` com `any` como destino
 
 **Contexto:** `codec/json_fuzz_test.go:16-21` — `FuzzCodecJSON` usa `var v any` como destino de
-decode, o que nunca dispara `DisallowUnknownFields` (qualquer JSON cabe em `interface{}`). O
-path strict do decoder — o diferencial de segurança de `NewJSON()` — não é exercitado pelo fuzz
-engine. Adicionalmente, apenas `NewJSON()` é testado; `NewJSONLax()` não tem cobertura de fuzz.
+decode, o que nunca exercita comportamentos sensíveis a schema (qualquer JSON cabe em
+`interface{}`). Os caminhos divergentes entre `NewJSON()` (lax default, Postel) e
+`NewJSONStrict()` (`DisallowUnknownFields` opt-in) não são distinguidos pelo fuzz engine.
 
-**Impacto:** Panics ou comportamentos inesperados em `NewJSONLax()` sob inputs malformados
-poderiam não ser detectados antes de chegar em produção. O valor principal do fuzz target atual
-é testar "não panics" — objetivo válido mas incompleto.
+**Impacto:** Panics ou comportamentos inesperados em qualquer dos dois codecs sob inputs
+malformados poderiam não ser detectados antes de chegar em produção. O valor principal do fuzz
+target atual é testar "não panics" — objetivo válido mas incompleto.
 
 **Evidência:** `/ship` code-review + test-engineer gaps T09/T10.
 
 **Sugestão de solução:**
-1. Adicionar um segundo fuzz target `FuzzCodecJSONLax` que use `NewJSONLax()`.
+1. Adicionar um segundo fuzz target `FuzzCodecJSONStrict` que use `NewJSONStrict()`.
 2. Usar uma struct tipada como destino (ex: a `order` já definida em `json_test.go`) para que
    `DisallowUnknownFields` seja exercitado com inputs reais do fuzz engine.
 3. Adicionar seeds adversariais ao corpus inicial:
@@ -213,10 +213,11 @@ poderiam não ser detectados antes de chegar em produção. O valor principal do
 **Pré-requisitos:** Nenhum. Pode ser feito a qualquer momento após T09.
 
 **Acceptance criteria quando implementado:**
-- `FuzzCodecJSON` usa struct tipada como destino; `DisallowUnknownFields` é acionado.
-- `FuzzCodecJSONLax` existe e cobre o caminho permissivo.
+- `FuzzCodecJSON` (lax default) usa struct tipada como destino; comportamento de "aceita unknown
+  field" exercitado por seeds com campos extras.
+- `FuzzCodecJSONStrict` existe e cobre o caminho `DisallowUnknownFields`.
 - Seeds adversariais adicionados ao corpus de ambos os targets.
-- `go test -fuzz=FuzzCodecJSON -fuzztime=60s ./codec` e o equivalente lax passam sem panics.
+- `go test -fuzz=FuzzCodecJSON -fuzztime=60s ./codec` e o equivalente strict passam sem panics.
 
 ---
 

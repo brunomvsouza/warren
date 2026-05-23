@@ -15,7 +15,7 @@ type order struct {
 	Name string `json:"name"`
 }
 
-// NewJSON — strict mode
+// NewJSON — lax-by-default (Postel's Law)
 
 func TestNewJSON_ContentType(t *testing.T) {
 	c := codec.NewJSON()
@@ -37,35 +37,43 @@ func TestNewJSON_Decode_valid(t *testing.T) {
 	assert.Equal(t, order{ID: 1, Name: "test"}, o)
 }
 
-func TestNewJSON_Decode_unknownField_returnsErrInvalidMessage(t *testing.T) {
+func TestNewJSON_Decode_unknownField_acceptsAndIgnores(t *testing.T) {
 	c := codec.NewJSON()
 	var o order
 	err := c.Decode([]byte(`{"id":1,"name":"test","extra":true}`), &o)
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, codec.ErrInvalidMessage), "expected codec.ErrInvalidMessage, got: %v", err)
-}
-
-// NewJSONLax — tolerates unknown fields
-
-func TestNewJSONLax_ContentType(t *testing.T) {
-	c := codec.NewJSONLax()
-	assert.Equal(t, "application/json", c.ContentType())
-}
-
-func TestNewJSONLax_Decode_unknownField_ok(t *testing.T) {
-	c := codec.NewJSONLax()
-	var o order
-	err := c.Decode([]byte(`{"id":1,"name":"test","extra":true}`), &o)
-	require.NoError(t, err)
+	require.NoError(t, err, "default codec must tolerate unknown fields (Postel's Law)")
 	assert.Equal(t, order{ID: 1, Name: "test"}, o)
 }
 
-func TestNewJSONLax_Decode_invalidJSON_returnsErrInvalidMessage(t *testing.T) {
-	c := codec.NewJSONLax()
+func TestNewJSON_Decode_invalidJSON_returnsErrInvalidMessage(t *testing.T) {
+	c := codec.NewJSON()
 	var o order
 	err := c.Decode([]byte(`not json`), &o)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, codec.ErrInvalidMessage))
+}
+
+// NewJSONStrict — opt-in DisallowUnknownFields
+
+func TestNewJSONStrict_ContentType(t *testing.T) {
+	c := codec.NewJSONStrict()
+	assert.Equal(t, "application/json", c.ContentType())
+}
+
+func TestNewJSONStrict_Decode_valid(t *testing.T) {
+	c := codec.NewJSONStrict()
+	var o order
+	err := c.Decode([]byte(`{"id":1,"name":"test"}`), &o)
+	require.NoError(t, err)
+	assert.Equal(t, order{ID: 1, Name: "test"}, o)
+}
+
+func TestNewJSONStrict_Decode_unknownField_returnsErrInvalidMessage(t *testing.T) {
+	c := codec.NewJSONStrict()
+	var o order
+	err := c.Decode([]byte(`{"id":1,"name":"test","extra":true}`), &o)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, codec.ErrInvalidMessage), "expected codec.ErrInvalidMessage, got: %v", err)
 }
 
 // Encode error case
@@ -89,9 +97,9 @@ func TestNewJSON_RoundTrip(t *testing.T) {
 	assert.Equal(t, original, decoded)
 }
 
-func TestNewJSONLax_RoundTrip(t *testing.T) {
-	c := codec.NewJSONLax()
-	original := order{ID: 99, Name: "lax-round-trip"}
+func TestNewJSONStrict_RoundTrip(t *testing.T) {
+	c := codec.NewJSONStrict()
+	original := order{ID: 99, Name: "strict-round-trip"}
 	b, err := c.Encode(original)
 	require.NoError(t, err)
 	var decoded order
