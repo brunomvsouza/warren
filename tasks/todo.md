@@ -484,7 +484,7 @@ workloads.
 - **Files:** `delivery.go`, `internal/headers/xdeath.go`, `delivery_test.go`, `internal/headers/xdeath_test.go`, `internal/headers/xdeath_fuzz_test.go`.
 - **Deps:** T02, T09.
 
-### [ ] T18 — Consumer + builder + handler error mapping + re-subscribe + verdict + UUID-tag · M
+### [x] T18 — Consumer + builder + handler error mapping + re-subscribe + verdict + UUID-tag · M
 Rev 5 adds `Priority(int)`, `HandlerTimeout(d)`, the re-subscribe
 loop, and handler-ctx cancel on channel close. Rev 6 adds
 `HandlerTimeoutVerdict(TimeoutVerdict)` (default
