@@ -706,23 +706,29 @@ before Phase 5 can close.
 - **Deps:** T25.
 
 ### [ ] T27 — OTel in Publisher · S
+Per SPEC §6.9 "Tracing continuity post-mortem" + §10 #51 (Rev 8 item M).
 - **Acceptance:**
   - [ ] `Publisher.Publish` opens a span named `<exchange> publish` with messaging attributes from OTel semantic conventions.
   - [ ] Span attributes match SPEC §6.9 for publish: `messaging.system="rabbitmq"`, `messaging.destination.name`, `messaging.operation.type=publish`, `messaging.message.id`, `messaging.message.conversation_id`, `messaging.message.body.size`, `network.peer.address`, `network.peer.port` (where applicable).
-  - [ ] Context is injected into the AMQP headers via `otel.Propagator`.
-  - [ ] Span records `ErrUnroutable`, `ErrConfirmTimeout`, encode errors as exceptions.
-- **Verify:** Integration test with an in-memory tracer asserts span name, attributes, error events.
+  - [ ] Context is injected into the AMQP headers via `otel.Propagator` **before any frame is written**, so the propagated context travels as part of `basic.publish` and is therefore preserved through any DLX bounce. Caller-supplied `traceparent`/`tracestate` in `Message[M].Headers` win (last-wins) — the library does not overwrite explicit values.
+  - [ ] **Span outcome contract.** On termination, set `messaging.rabbitmq.outcome` to one of `ack`/`nack`/`return`/`timeout`/`too_large`/`pool_exhausted`/`blocked`/`error` (matches the `publisher_publish_seconds{outcome}` metric label). On every failure class set OTel status to `Error`, call `Span.RecordError(err)`, and set `error.type` to the sentinel name (`"ErrUnroutable"`, `"ErrConfirmTimeout"`, `"ErrPublishNacked"`, `"ErrMessageTooLarge"`, `"ErrChannelPoolExhausted"`, `"ErrConnectionBlocked"`). Encode errors set `error.type="ErrInvalidMessage"`.
+  - [ ] Span is `End()`ed in every termination path including panics (handled by the codec panic-safety `recover`); a test injects a panicking codec and asserts no open spans remain via the in-memory tracer.
+- **Verify:** Integration test with an in-memory tracer asserts span name, attributes, `messaging.rabbitmq.outcome`, status code, and `error.type` across the full failure matrix (`ErrUnroutable`, `ErrConfirmTimeout`, `ErrPublishNacked`, `ErrMessageTooLarge`, encode error, pool-exhausted).
 - **Files:** edits to `publisher.go`, `publisher_tracing_test.go`.
-- **Deps:** T12, T05.
+- **Deps:** T12, T13 (`ErrMessageTooLarge` from Rev 8), T05.
 
 ### [ ] T28 — OTel in Consumer · S
+Per SPEC §6.9 "Tracing continuity post-mortem" + §10 #51 (Rev 8 item M).
 - **Acceptance:**
-  - [ ] Consumer extracts the parent context from AMQP headers before invoking the handler.
-  - [ ] A `<queue> process` span wraps each handler invocation.
+  - [ ] Consumer extracts the parent context from AMQP headers (`traceparent`/`tracestate`) before invoking the handler — works on **direct deliveries and DLQ deliveries alike** (DLX preserves headers verbatim per SPEC §6.6).
+  - [ ] A `<queue> process` span wraps each handler invocation with messaging attributes from OTel semantic conventions.
   - [ ] Span attributes for receive/process paths match SPEC §6.9 (`messaging.operation.type` receive | process as documented for those spans).
-  - [ ] Span continuity verified: trace-id and parent-span-id consistent from publisher → consumer.
-- **Verify:** Integration test publishes with a tracer; consumer with the same tracer; assert spans share traceID.
-- **Files:** edits to `consumer.go`, `consumer_tracing_test.go`.
+  - [ ] **Span outcome contract.** On handler return, set `messaging.rabbitmq.outcome` to one of `ack` (nil), `nack_requeue` (`ErrRequeue`), `nack_no_requeue` (any other error / `ErrPoison`), `max_redeliveries` (when the two-counter ceiling fires), `timeout` (HandlerTimeout exceeded), `handler_aborted_channel_closed` (mid-handler channel close). Set OTel status to `Ok` on `nil`, `Error` on every failure class. Call `Span.RecordError(err)` with the handler's error; set `error.type` to the sentinel name (e.g. `"ErrRequeue"`, `"ErrPoison"`, `"ErrMaxRedeliveries"`, `"ErrChannelClosed"`).
+  - [ ] **The library does NOT strip, rewrite, or normalise message headers** on the consume path. A symbol-presence test in the consumer (`grep -L 'delete(.*Headers' consumer*.go`) plus a unit test that publishes a message with a marker header `x-trace-marker=42` and asserts the value is present in `Delivery.Headers` exactly as published.
+  - [ ] Span is `End()`ed in every termination path including handler panics (wrapped in `recover` per the panic-safety contract); a test injects a panicking handler and asserts no open spans remain via the in-memory tracer.
+  - [ ] Span continuity verified end-to-end: trace-id consistent across publisher → consumer → re-publisher to DLQ (when DLX'd) → DLQ consumer; integration test publishes one message, forces a `Nack(false)`, attaches a second consumer to the DLQ, asserts both consumers' `process` spans share the *original* publisher trace-id and that `parent_span_id` of the DLQ consumer span resolves into the original producer span.
+- **Verify:** Integration test publishes with a tracer; consumer with the same tracer; assert spans share traceID. Additional integration test for the DLX path described above. Outcome-matrix unit test exercises every verdict (`ack`/`nack_requeue`/`nack_no_requeue`/`max_redeliveries`/`timeout`/`handler_aborted_channel_closed`) and asserts span status + `messaging.rabbitmq.outcome` + `error.type`.
+- **Files:** edits to `consumer.go`, `consumer_tracing_test.go`, `consumer_tracing_dlx_integration_test.go`.
 - **Deps:** T18, T27.
 
 ### Checkpoint — Phase 6 done

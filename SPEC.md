@@ -1054,6 +1054,17 @@ Handler error semantics:
 - `errors.Is(err, ErrPoison)` → identical to default error semantically;
   exists for readability when "this is unambiguously bad input".
 
+**Tracing on handler outcome.** The `<queue> process` span (created
+by T28) terminates with an outcome attribute and an OTel status
+matching the handler verdict. `nil` → `messaging.rabbitmq.outcome=ack`
++ `Status=Ok`; any error → `outcome` ∈
+`nack_requeue|nack_no_requeue|max_redeliveries|timeout|handler_aborted_channel_closed`,
+`Status=Error`, `Span.RecordError(err)`, and `error.type` set to the
+sentinel name (e.g. `"ErrMaxRedeliveries"`). A poisoned message
+therefore renders red in trace UIs and supports assertive alerts like
+"spike of `error.type="ErrMaxRedeliveries"` over 5m". Full contract
+in §6.9 "Tracing continuity post-mortem".
+
 Builder:
 
 ```go
@@ -1541,6 +1552,17 @@ Behaviour:
   broker has a conflicting definition, the call returns
   `ErrTopologyMismatch` (wrapping `ErrPreconditionFailed`) — never
   silently mutates.
+- **DLX preserves message context (load-bearing).** When a consumer
+  `Nack`'s without requeue and the source queue has a DLX, RabbitMQ
+  re-publishes the original message to the DLX preserving every
+  `basic.properties` field and every header — including
+  `traceparent`/`tracestate` so downstream observers can link the
+  DLQ delivery span to the original producer's trace. The broker
+  appends `x-death` to record the dead-letter event; it does not
+  strip caller-supplied headers. The library never strips, rewrites,
+  or normalises message headers on the consume path; any future
+  code path that touches headers on consume MUST first update the
+  §6.9 "Tracing continuity post-mortem" contract.
 - **`(*Topology).validate()` runs before `Declare` and before
   `AttachTo` snapshot capture.** Validation rules (each returns
   `ErrInvalidOptions` with a specific message):
@@ -1879,6 +1901,65 @@ value.
   `network.peer.port`. Header propagation uses `traceparent` and
   `tracestate` keys; CloudEvents binary-mode `ce-*` headers do not
   conflict.
+
+  **Tracing continuity post-mortem (load-bearing).** The library treats
+  dead-lettered and poisoned messages as first-class trace artefacts so
+  on-call engineers can pivot from a DLQ entry to the producing trace
+  in Jaeger/Datadog without rebuilding context by hand.
+
+  - **Publisher side.** `Publish` injects `traceparent` and
+    `tracestate` into `Message[M].Headers` via `otel.Propagator`
+    *before* any frame is written; these headers travel as part of
+    `basic.properties.headers`. Headers explicitly set by the caller
+    win (last-wins), so callers can override propagation in tests
+    without the library silently overwriting.
+  - **Broker side (DLX path).** When a consumer `Nack(requeue=false)`s
+    a message and the source queue has a configured DLX, RabbitMQ
+    re-publishes the message to the DLX preserving every original
+    `basic.properties` field *and* every header — including
+    `traceparent` / `tracestate`. The broker appends an `x-death`
+    field-array describing the dead-letter event; it does not strip
+    or rewrite caller-supplied headers. The library never strips,
+    rewrites, or normalises message headers on the consume path
+    either, so a downstream consumer reading from the DLQ extracts
+    the *original* trace context and links its own span to the
+    original producer's trace. Documented as a contract — any
+    future code path that mutates headers on consume MUST surface
+    the change in this section first.
+  - **Consumer span lifecycle on poison.** When the handler returns
+    a non-nil error (including `ErrRequeue`, `ErrPoison`, an
+    `errors.Is(ErrMaxRedeliveries)` escalation, or a `HandlerTimeout`
+    verdict), the `<queue> process` span:
+    1. Records the error via `Span.RecordError(err)`.
+    2. Sets `messaging.rabbitmq.outcome` to one of `ack`,
+       `nack_requeue`, `nack_no_requeue` (poison), `max_redeliveries`,
+       `timeout`, `handler_aborted_channel_closed`.
+    3. Sets a non-`Unset` status: `Ok` on `nil`, `Error` on every
+       failure class above (so trace UIs render the span red).
+    4. Sets `error.type` to the sentinel name (e.g. `"ErrRequeue"`,
+       `"ErrPoison"`, `"ErrMaxRedeliveries"`) for assertive
+       alerting and aggregation. Alerts like "spike of
+       `error.type="ErrMaxRedeliveries"` over 5m" become trivial.
+
+    The span is `End()`ed in every termination path (including
+    panics — wrapped in `recover` per the codec panic-safety
+    contract) so there are never open spans after a handler dies.
+  - **Publisher span lifecycle on failure.** `Publish` mirrors the
+    consumer contract for the `<exchange> publish` span: every
+    `ErrUnroutable`, `ErrConfirmTimeout`, `ErrPublishNacked`,
+    `ErrMessageTooLarge`, encode error, and channel-pool exhaustion
+    is recorded via `RecordError` with `error.type` set to the
+    sentinel name and span status `Error`. `messaging.rabbitmq.outcome`
+    mirrors the metric `publisher_publish_seconds{outcome}` label
+    (`ack`/`nack`/`return`/`timeout`/`too_large`/`pool_exhausted`/
+    `blocked`/`error`).
+  - **Why this matters.** Without the outcome attribute and error
+    status, a poisoned message looks identical to a successful one
+    in trace UIs — the consumer span ends "successfully" because
+    the handler returned a value, even though the value was an
+    error. Operators lose the ability to filter traces by "show me
+    only the messages that hit the DLX in the last hour", which is
+    the most common debug query during incidents.
 
 - **`amqpmock`** — generated gomock mocks for the public interfaces
   (`codec.Codec`, `log.Logger`, the three metrics interfaces, `otel.Tracer`)
@@ -2652,6 +2733,37 @@ spec amendment.
     frame-max × ~128 frames); `n=0` disables the guard explicitly;
     `n<0` fails `Build` with `ErrInvalidOptions`. Mandatory metric:
     `publisher_publish_seconds{exchange, outcome="too_large"}`.
+
+51. **Tracing continuity post-mortem.** SRE on-call review
+    (2026-05-22): a dead-lettered message that loses its trace
+    context is a debug black hole — Jaeger/Datadog show a producer
+    span with no downstream link, and the DLQ entry shows no
+    upstream link. The library treats trace continuity through DLX
+    as a contract, not a side effect:
+    1. **Publisher injects `traceparent`/`tracestate` before any
+       frame is written** so the propagated context is part of
+       every `basic.publish`.
+    2. **The library never strips or rewrites message headers on
+       consume.** RabbitMQ's DLX path preserves the original
+       headers verbatim while appending `x-death`, so the DLQ
+       consumer extracts the original trace context — but only if
+       the library does not mutate headers in between. Documented
+       as a load-bearing invariant of §6.6 and §6.9.
+    3. **Consumer span is terminated with an outcome attribute and
+       an `Error` status whenever the handler does not return
+       `nil`.** `messaging.rabbitmq.outcome` carries the verdict
+       (`ack`/`nack_requeue`/`nack_no_requeue`/`max_redeliveries`/
+       `timeout`/`handler_aborted_channel_closed`); `error.type`
+       carries the sentinel name. Poisoned messages render red and
+       support assertive alerts like "spike of
+       `error.type="ErrMaxRedeliveries"`". Publisher span mirrors
+       the contract for `ErrUnroutable`/`ErrConfirmTimeout`/
+       `ErrPublishNacked`/`ErrMessageTooLarge`.
+
+    T27/T28 acceptance criteria carry the verbatim expected
+    attributes and status codes. Reverting any of the three is a
+    breaking change to the tracing contract and requires a SPEC
+    amendment.
 
 49. **Executable examples land at checkpoints, not only at release.**
     Phase 2/3/4/5/7 checkpoints in `tasks/plan.md` each carry an
