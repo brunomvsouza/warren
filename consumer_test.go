@@ -12,6 +12,7 @@ import (
 	amqp091 "github.com/rabbitmq/amqp091-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	"github.com/brunomvsouza/warren/codec"
 	"github.com/brunomvsouza/warren/log"
@@ -112,6 +113,61 @@ func TestConsumerBuilder_EmptyQueue_Error(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidOptions)
 }
 
+func TestConsumerBuilder_BuildDoesNotMutateDefaults(t *testing.T) {
+	// applyDefaults must operate on a copy; original builder state must be unchanged.
+	conn := newFakeConsumerConn(t)
+	b := ConsumerFor[string](conn).Queue("q") // concurrency=0, prefetch=0 (zero values)
+	_, err := b.Build()
+	require.NoError(t, err)
+	assert.Equal(t, uint(0), b.concurrency, "builder.concurrency must not be mutated by Build")
+	assert.Equal(t, uint16(0), b.prefetch, "builder.prefetch must not be mutated by Build")
+	assert.Nil(t, b.c, "builder.codec must not be mutated by Build")
+}
+
+// — connIndexForTag unit tests ————————————————————————————————————————
+
+func TestConnIndexForTag_ZeroOrOneConn_AlwaysZero(t *testing.T) {
+	assert.Equal(t, 0, connIndexForTag("any-tag", 0))
+	assert.Equal(t, 0, connIndexForTag("any-tag", 1))
+}
+
+func TestConnIndexForTag_MultipleConns_InBounds(t *testing.T) {
+	const n = 4
+	for _, tag := range []string{"ctag-abc", "ctag-xyz", "my-consumer", ""} {
+		idx := connIndexForTag(tag, n)
+		assert.GreaterOrEqual(t, idx, 0, "index must be >= 0 for tag %q", tag)
+		assert.Less(t, idx, n, "index must be < %d for tag %q", n, tag)
+	}
+}
+
+func TestConnIndexForTag_StableHash(t *testing.T) {
+	idx := connIndexForTag("ctag-stable", 4)
+	for range 10 {
+		assert.Equal(t, idx, connIndexForTag("ctag-stable", 4), "same tag must map to same index")
+	}
+}
+
+func TestConnIndexForTag_DifferentTags_DistributedAcrossConns(t *testing.T) {
+	const n = 8
+	seen := make(map[int]bool)
+	tags := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"}
+	for _, tag := range tags {
+		seen[connIndexForTag(tag, n)] = true
+	}
+	// With 12 tags and 8 slots the hash should hit more than one slot.
+	assert.Greater(t, len(seen), 1, "hash should distribute across multiple connection slots")
+}
+
+// — Close unit test ———————————————————————————————————————————————————
+
+func TestConsumer_Close_Idempotent(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	consumer, err := ConsumerFor[string](conn).Queue("q").Build()
+	require.NoError(t, err)
+	require.NoError(t, consumer.Close(context.Background()))
+	require.NoError(t, consumer.Close(context.Background())) // sync.Once must prevent panic
+}
+
 // — Consume unit tests (fake channel injection) ———————————————————————
 
 func TestConsumer_ConsumeRaw_AlreadyStarted_ReturnsError(t *testing.T) {
@@ -131,6 +187,8 @@ func TestConsumer_ConsumeRaw_AlreadyStarted_ReturnsError(t *testing.T) {
 }
 
 func TestConsumer_Consume_HandlerCalledWithDecodedPayload(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	conn := newFakeConsumerConn(t)
 	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
 	require.NoError(t, err)
@@ -161,6 +219,8 @@ func TestConsumer_Consume_HandlerCalledWithDecodedPayload(t *testing.T) {
 }
 
 func TestConsumer_Consume_HandlerNilReturn_Acks(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	conn := newFakeConsumerConn(t)
 	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
 	require.NoError(t, err)
@@ -197,6 +257,8 @@ func TestConsumer_Consume_HandlerNilReturn_Acks(t *testing.T) {
 }
 
 func TestConsumer_Consume_HandlerErrorReturn_NackNoRequeue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	conn := newFakeConsumerConn(t)
 	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
 	require.NoError(t, err)
@@ -236,6 +298,8 @@ func TestConsumer_Consume_HandlerErrorReturn_NackNoRequeue(t *testing.T) {
 }
 
 func TestConsumer_Consume_HandlerErrRequeue_NackRequeue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	conn := newFakeConsumerConn(t)
 	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
 	require.NoError(t, err)
@@ -275,6 +339,8 @@ func TestConsumer_Consume_HandlerErrRequeue_NackRequeue(t *testing.T) {
 }
 
 func TestConsumer_Consume_DecodeFailure_NackNoRequeue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	conn := newFakeConsumerConn(t)
 	cm := &countingConsumerMetrics{}
 	consumer, err := ConsumerFor[string](conn).Queue("testq").Metrics(cm).Build()
@@ -316,7 +382,47 @@ func TestConsumer_Consume_DecodeFailure_NackNoRequeue(t *testing.T) {
 	assert.Equal(t, 1, cm.decodeErrors)
 }
 
+func TestConsumer_Consume_CodecPanic_NackNoRequeue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	consumer, err := ConsumerFor[string](conn).Queue("testq").Codec(panicCodec{}).Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	nacked := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = consumer.Consume(ctx, func(_ context.Context, _ string) error { return nil })
+	}()
+
+	deliveryCh <- amqp091.Delivery{
+		Body: []byte(`"hello"`),
+		Acknowledger: &fakeAcknowledger{
+			nackFn: func(_ uint64, _, _ bool) error {
+				close(nacked)
+				cancel()
+				return nil
+			},
+		},
+	}
+
+	select {
+	case <-nacked:
+	case <-time.After(time.Second):
+		t.Fatal("expected nack after codec panic")
+	}
+	<-done
+}
+
 func TestConsumer_Consume_HandlerTimeout_DefaultVerdict_NackNoRequeue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	conn := newFakeConsumerConn(t)
 	cm := &countingConsumerMetrics{}
 	consumer, err := ConsumerFor[string](conn).
@@ -368,7 +474,203 @@ func TestConsumer_Consume_HandlerTimeout_DefaultVerdict_NackNoRequeue(t *testing
 	assert.Equal(t, 1, cm.handlerTimeouts)
 }
 
+func TestConsumer_Consume_HandlerTimeout_RequeueVerdict_NackRequeue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	cm := &countingConsumerMetrics{}
+	consumer, err := ConsumerFor[string](conn).
+		Queue("testq").
+		HandlerTimeout(50 * time.Millisecond).
+		HandlerTimeoutVerdict(TimeoutNackRequeue).
+		Metrics(cm).
+		Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	nackedRequeue := make(chan bool, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = consumer.Consume(ctx, func(hCtx context.Context, _ string) error {
+			select {
+			case <-hCtx.Done():
+				return hCtx.Err()
+			case <-time.After(500 * time.Millisecond):
+				return nil
+			}
+		})
+	}()
+
+	deliveryCh <- amqp091.Delivery{
+		Body:        []byte(`"hello"`),
+		ContentType: "application/json",
+		Acknowledger: &fakeAcknowledger{
+			nackFn: func(_ uint64, _, requeue bool) error {
+				nackedRequeue <- requeue
+				cancel()
+				return nil
+			},
+		},
+	}
+
+	select {
+	case requeue := <-nackedRequeue:
+		assert.True(t, requeue, "TimeoutNackRequeue verdict must nack with requeue=true")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout: expected nack for handler timeout")
+	}
+	<-done
+	assert.Equal(t, 1, cm.handlerTimeouts)
+}
+
+func TestConsumer_Consume_FastPath_ChannelClose_AbortsWithoutAck(t *testing.T) {
+	// When the AMQP channel closes while a fast-path (no timeout) handler runs
+	// and the handler returns an error, dispatch must abort without ack/nack.
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	cm := &countingConsumerMetrics{}
+	consumer, err := ConsumerFor[string](conn).Queue("testq").Metrics(cm).Build()
+	require.NoError(t, err)
+
+	doneCh := make(chan struct{})
+	close(doneCh) // pre-closed: channel was already gone before handler runs
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliverySubOverride = &deliverySub{ch: deliveryCh, done: doneCh}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	ackOrNack := make(chan string, 1)
+	handlerRan := make(chan struct{})
+
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = consumer.Consume(ctx, func(_ context.Context, _ string) error {
+			close(handlerRan)
+			return errors.New("handler error")
+		})
+	}()
+
+	deliveryCh <- amqp091.Delivery{
+		Body: []byte(`"hello"`),
+		Acknowledger: &fakeAcknowledger{
+			ackFn:  func(_ uint64, _ bool) error { ackOrNack <- "ack"; return nil },
+			nackFn: func(_ uint64, _, _ bool) error { ackOrNack <- "nack"; return nil },
+		},
+	}
+
+	<-handlerRan
+	cancel() // end ConsumeRaw; wg.Wait drains the dispatch goroutine
+	<-consumeDone
+
+	select {
+	case op := <-ackOrNack:
+		t.Fatalf("expected no ack/nack when channel is closed and handler errored, got %q", op)
+	default:
+	}
+	assert.Equal(t, 1, cm.channelAborts, "RecordHandlerAbortedChannelClosed must be called once")
+}
+
+func TestConsumer_Consume_TimeoutPath_ChannelClose_AbortsWithoutAck(t *testing.T) {
+	// When the AMQP channel closes while the handler goroutine (timeout path) is
+	// blocked, the dispatch select must pick <-chanDone, cancel the handler ctx,
+	// and return without ack/nack.
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	cm := &countingConsumerMetrics{}
+	consumer, err := ConsumerFor[string](conn).
+		Queue("testq").
+		HandlerTimeout(5 * time.Second). // long: must not fire before doneCh
+		Metrics(cm).
+		Build()
+	require.NoError(t, err)
+
+	doneCh := make(chan struct{})
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliverySubOverride = &deliverySub{ch: deliveryCh, done: doneCh}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ackOrNack := make(chan string, 1)
+	handlerStarted := make(chan struct{})
+
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = consumer.Consume(ctx, func(hCtx context.Context, _ string) error {
+			close(handlerStarted)
+			<-hCtx.Done() // block until ctx is cancelled (by cancelCause(ErrChannelClosed))
+			return hCtx.Err()
+		})
+	}()
+
+	deliveryCh <- amqp091.Delivery{
+		Body: []byte(`"hello"`),
+		Acknowledger: &fakeAcknowledger{
+			ackFn:  func(_ uint64, _ bool) error { ackOrNack <- "ack"; return nil },
+			nackFn: func(_ uint64, _, _ bool) error { ackOrNack <- "nack"; return nil },
+		},
+	}
+
+	<-handlerStarted
+	close(doneCh) // signal channel close; dispatch must pick <-chanDone case
+	// cancel outer ctx and drain ConsumeRaw; wg.Wait ensures dispatch finishes
+	// and writes to channelAborts before consumeDone closes.
+	cancel()
+	<-consumeDone
+
+	select {
+	case op := <-ackOrNack:
+		t.Fatalf("expected no ack/nack when channel is closed mid-handler, got %q", op)
+	default:
+	}
+	assert.Equal(t, 1, cm.channelAborts)
+}
+
+func TestConsumer_Consume_DeliveryChannelClosed_WaitsForCtxCancel(t *testing.T) {
+	// When cur.ch receives !ok (AMQP channel closed), ConsumeRaw enters the inner
+	// select waiting for resubCh or ctx cancel. Without a resubCh signal, ctx
+	// cancel must terminate cleanly.
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery)
+	consumer.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = consumer.Consume(ctx, func(_ context.Context, _ string) error { return nil })
+	}()
+
+	close(deliveryCh) // simulate AMQP channel closed
+	cancel()          // trigger ctx.Done in the inner select
+
+	select {
+	case <-consumeDone:
+	case <-time.After(time.Second):
+		t.Fatal("ConsumeRaw did not exit after ctx cancel following channel close")
+	}
+}
+
 func TestConsumer_Consume_Concurrency(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
 	conn := newFakeConsumerConn(t)
 	consumer, err := ConsumerFor[string](conn).Queue("testq").Concurrency(3).Prefetch(8).Build()
 	require.NoError(t, err)
@@ -453,13 +755,14 @@ func (f *fakeAcknowledger) Nack(tag uint64, multiple, requeue bool) error {
 	return nil
 }
 
-func (f *fakeAcknowledger) Reject(tag uint64, requeue bool) error { return nil }
+func (f *fakeAcknowledger) Reject(_ uint64, _ bool) error { return nil }
 
 // countingConsumerMetrics counts specific metric increments.
 type countingConsumerMetrics struct {
 	metrics.NoOpConsumerMetrics
 	decodeErrors    int
 	handlerTimeouts int
+	channelAborts   int
 }
 
 func (c *countingConsumerMetrics) RecordHandler(_, outcome string, _ time.Duration) {
@@ -470,6 +773,10 @@ func (c *countingConsumerMetrics) RecordHandler(_, outcome string, _ time.Durati
 
 func (c *countingConsumerMetrics) RecordHandlerTimeout(_ string) {
 	c.handlerTimeouts++
+}
+
+func (c *countingConsumerMetrics) RecordHandlerAbortedChannelClosed(_ string) {
+	c.channelAborts++
 }
 
 // captureLogger captures warning log lines.
@@ -487,3 +794,10 @@ func (l *captureLogger) Warningf(format string, args ...any) {
 	l.onWarning(fmt.Sprintf(format, args...))
 }
 func (l *captureLogger) Errorf(_ string, _ ...any) {}
+
+// panicCodec simulates a codec that panics during Decode.
+type panicCodec struct{}
+
+func (panicCodec) Encode(_ any) ([]byte, error) { return nil, nil }
+func (panicCodec) Decode(_ []byte, _ any) error { panic("codec exploded") }
+func (panicCodec) ContentType() string          { return "application/octet-stream" }
