@@ -41,6 +41,14 @@ var (
 	ErrPartialBatch = errors.New("warren: batch publish partially failed")
 	// ErrBatchTooLarge is returned when PublishBatch is called with more messages than PublishBatchMaxSize allows.
 	ErrBatchTooLarge = errors.New("warren: PublishBatch exceeds max in-flight budget")
+	// ErrMessageTooLarge is returned when an encoded message body exceeds the
+	// publisher's MaxMessageSizeBytes guardrail. The publish is rejected locally
+	// before any channel is opened — protecting the publisher from OOM and the
+	// broker from frame fragmentation pressure. Classified as permanent: the same
+	// body will never succeed on retry. The broker-side equivalent (reply code
+	// 311, ErrContentTooLarge) only fires after the payload has been allocated
+	// and partially sent; this local guard avoids that round-trip.
+	ErrMessageTooLarge = errors.New("warren: message body exceeds MaxMessageSizeBytes")
 
 	// Consumer errors.
 
@@ -222,8 +230,8 @@ func IsTransient(err error) bool {
 }
 
 // IsPermanent reports whether err is classified as non-retryable.
-// True for: ErrPermanent wraps; ErrTopologyRedeclareFailed; AMQP codes
-// 311, 402, 403, 404, 405, 406, 501, 502, 503, 505, 506, 530, 540.
+// True for: ErrPermanent wraps; ErrTopologyRedeclareFailed; ErrMessageTooLarge;
+// AMQP codes 311, 402, 403, 404, 405, 406, 501, 502, 503, 505, 506, 530, 540.
 func IsPermanent(err error) bool {
 	if err == nil {
 		return false
@@ -232,6 +240,9 @@ func IsPermanent(err error) bool {
 		return true
 	}
 	if errors.Is(err, ErrTopologyRedeclareFailed) {
+		return true
+	}
+	if errors.Is(err, ErrMessageTooLarge) {
 		return true
 	}
 	for _, sentinel := range []error{

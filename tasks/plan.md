@@ -20,8 +20,10 @@ listed in `SPEC.md` §6 ("Note on AMQP 0-9-1 vs RabbitMQ").
 
 **Revision history:** (Rev 8 → Rev 7 → Rev 6 → Rev 5 ordering preserved at the top — newest specialist pass first; Rev 5 sits below Rev 6 because it was the prior milestone the Rev 6 pass superseded.)
 - Rev 8 — post SRE on-call review (2026-05-22). 54 tasks (unchanged).
-  Single decision inverted: **`codec.NewJSON()` is now lax by default
-  (Postel's Law)**; `codec.NewJSONStrict()` is the opt-in
+  Two surface changes from the SRE review (items A + E in the
+  analysis).
+  - **Item A (codec):** **`codec.NewJSON()` is now lax by default
+    (Postel's Law)**; `codec.NewJSONStrict()` is the opt-in
   `DisallowUnknownFields` variant. The Rev 5 strict-default was
   optimised for "surface schema drift as `ErrInvalidMessage`", but on-call
   evidence from operating Rabbit at billions/day shows the realistic
@@ -33,8 +35,19 @@ listed in `SPEC.md` §6 ("Note on AMQP 0-9-1 vs RabbitMQ").
   symbol (now collapsed into `NewJSON`) all updated. Code change:
   `codec/json.go` + `codec/json_test.go` flip default; existing
   callers using `codec.NewJSON()` automatically get the safer
-  producer-first-deploy behaviour. No new tasks; no dependency-graph
-  change.
+  producer-first-deploy behaviour.
+  - **Item E (payload guardrail):** new
+    `PublisherBuilder.MaxMessageSizeBytes(n)` rejects oversized
+    bodies locally with `ErrMessageTooLarge` (permanent) **before**
+    opening a channel. Default 16 MiB; `n=0` disables; `n<0` fails
+    `Build` with `ErrInvalidOptions`. Mandatory metric outcome:
+    `publisher_publish_seconds{exchange, outcome="too_large"}`.
+    SPEC §6.2 + §6.8 + §10 #50 updated. T13 acceptance amended in
+    todo.md. Code lives in `publisher_builder.go` (option) +
+    `publisher.go` (Publish-time check) + `errors.go` (new sentinel
+    classified `IsPermanent==true`).
+
+  No new tasks; no dependency-graph change.
 - Rev 7 — post cross-check tightening pass (no structural changes). A
   decision-by-decision audit of SPEC §10 (32 decisions: 8 originals +
   24 Rev 6 specialist) against the 54 plan tasks found **zero structural

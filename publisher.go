@@ -228,6 +228,9 @@ type Publisher[M any] struct {
 	publishTimeout time.Duration
 	// publishBatchMaxSize is validated at PublishBatch-time only (T22).
 	publishBatchMaxSize int
+	// maxMessageSizeBytes is the per-publish payload cap (0 disables; default 16 MiB).
+	// Enforced in Publish after Encode, before any channel is opened.
+	maxMessageSizeBytes int
 	retryPolicy         *RetryPolicy
 	stampUserID         bool
 	// authUser is the identity from conn.AuthenticatedUser(); used for UserID
@@ -340,6 +343,13 @@ func (p *Publisher[M]) Publish(ctx context.Context, msg Message[M]) error {
 	body, err := p.codec.Encode(msg.Body)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidMessage, err)
+	}
+
+	// Local payload guardrail: reject before opening a channel so the publisher
+	// never allocates broker-side frame buffers for a body it knows is too large.
+	if p.maxMessageSizeBytes > 0 && len(body) > p.maxMessageSizeBytes {
+		p.pm.RecordPublish(p.exchange, "too_large", 0)
+		return fmt.Errorf("%w: encoded body is %d bytes (cap %d)", ErrMessageTooLarge, len(body), p.maxMessageSizeBytes)
 	}
 
 	var attempt int
