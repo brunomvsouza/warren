@@ -1,0 +1,949 @@
+package warren
+
+// T23 — BatchConsumer auto-verdict unit tests.
+//
+// These tests verify the idempotent ack/nack guard and the single-frame
+// multiple=true contract without a live broker. Each test builds a
+// Batch[string] manually with fake acknowledgeable deliveries.
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	amqp091 "github.com/rabbitmq/amqp091-go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
+
+	"github.com/brunomvsouza/warren/codec"
+	"github.com/brunomvsouza/warren/metrics"
+)
+
+// — Batch unit tests —————————————————————————————————————————————————————————
+
+// makeFakeDelivery creates a Delivery[string] backed by a fakeAcknowledger
+// so we can observe and control acks/nacks in unit tests.
+func makeFakeDelivery(tag uint64, body string, fa *fakeAcknowledger) *Delivery[string] {
+	raw := amqp091.Delivery{
+		DeliveryTag:  tag,
+		Acknowledger: fa,
+		Body:         []byte(`"` + body + `"`),
+	}
+	b := body
+	return &Delivery[string]{
+		body: &b,
+		raw:  raw,
+	}
+}
+
+// newTestBatch builds a Batch[string] from a slice of deliveries,
+// wiring ackNotify on each delivery to set batch.acked via the same
+// mechanism that BatchConsumer uses internally.
+func newTestBatch(deliveries []*Delivery[string]) *Batch[string] {
+	b := &Batch[string]{deliveries: deliveries}
+	for _, d := range deliveries {
+		d := d // capture
+		d.ackNotify = func() {
+			b.mu.Lock()
+			b.acked = true
+			b.mu.Unlock()
+		}
+	}
+	return b
+}
+
+// TestBatch_Ack_MultipleTrue verifies that Batch.Ack emits a single
+// basic.ack with multiple=true on the highest delivery-tag.
+func TestBatch_Ack_MultipleTrue(t *testing.T) {
+	var mu sync.Mutex
+	var ackCalls []struct {
+		tag      uint64
+		multiple bool
+	}
+
+	makeFA := func() *fakeAcknowledger {
+		return &fakeAcknowledger{
+			ackFn: func(tag uint64, multiple bool) error {
+				mu.Lock()
+				ackCalls = append(ackCalls, struct {
+					tag      uint64
+					multiple bool
+				}{tag, multiple})
+				mu.Unlock()
+				return nil
+			},
+		}
+	}
+
+	// Three deliveries: tags 1, 2, 3. All backed by the same acknowledger
+	// (simulates same AMQP channel).
+	fa := makeFA()
+	d1 := makeFakeDelivery(1, "msg1", fa)
+	d2 := makeFakeDelivery(2, "msg2", fa)
+	d3 := makeFakeDelivery(3, "msg3", fa)
+
+	batch := newTestBatch([]*Delivery[string]{d1, d2, d3})
+	require.NoError(t, batch.Ack())
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, ackCalls, 1, "exactly one basic.ack frame must be emitted")
+	assert.Equal(t, uint64(3), ackCalls[0].tag, "ack must target the highest delivery-tag")
+	assert.True(t, ackCalls[0].multiple, "ack must use multiple=true")
+}
+
+// TestBatch_Nack_NoRequeue_MultipleTrue verifies that Batch.Nack(false)
+// emits a single basic.nack with multiple=true, requeue=false.
+func TestBatch_Nack_NoRequeue_MultipleTrue(t *testing.T) {
+	var mu sync.Mutex
+	var nackCalls []struct {
+		tag      uint64
+		multiple bool
+		requeue  bool
+	}
+
+	fa := &fakeAcknowledger{
+		nackFn: func(tag uint64, multiple, requeue bool) error {
+			mu.Lock()
+			nackCalls = append(nackCalls, struct {
+				tag      uint64
+				multiple bool
+				requeue  bool
+			}{tag, multiple, requeue})
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	d1 := makeFakeDelivery(5, "a", fa)
+	d2 := makeFakeDelivery(7, "b", fa)
+
+	batch := newTestBatch([]*Delivery[string]{d1, d2})
+	require.NoError(t, batch.Nack(false))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, nackCalls, 1, "exactly one basic.nack frame")
+	assert.Equal(t, uint64(7), nackCalls[0].tag, "nack must target the highest delivery-tag")
+	assert.True(t, nackCalls[0].multiple, "nack must use multiple=true")
+	assert.False(t, nackCalls[0].requeue, "requeue must be false")
+}
+
+// TestBatch_Nack_Requeue_MultipleTrue verifies Batch.Nack(true) with multiple=true, requeue=true.
+func TestBatch_Nack_Requeue_MultipleTrue(t *testing.T) {
+	var mu sync.Mutex
+	var nackCalls []struct {
+		tag      uint64
+		multiple bool
+		requeue  bool
+	}
+
+	fa := &fakeAcknowledger{
+		nackFn: func(tag uint64, multiple, requeue bool) error {
+			mu.Lock()
+			nackCalls = append(nackCalls, struct {
+				tag      uint64
+				multiple bool
+				requeue  bool
+			}{tag, multiple, requeue})
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	d1 := makeFakeDelivery(10, "x", fa)
+	batch := newTestBatch([]*Delivery[string]{d1})
+	require.NoError(t, batch.Nack(true))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, nackCalls, 1)
+	assert.Equal(t, uint64(10), nackCalls[0].tag)
+	assert.True(t, nackCalls[0].multiple)
+	assert.True(t, nackCalls[0].requeue)
+}
+
+// TestBatch_Ack_Idempotent verifies that calling Batch.Ack twice only emits one
+// AMQP frame.
+func TestBatch_Ack_Idempotent(t *testing.T) {
+	var mu sync.Mutex
+	var ackCalls int
+
+	fa := &fakeAcknowledger{
+		ackFn: func(_ uint64, _ bool) error {
+			mu.Lock()
+			ackCalls++
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	d1 := makeFakeDelivery(1, "m", fa)
+	batch := newTestBatch([]*Delivery[string]{d1})
+	require.NoError(t, batch.Ack())
+	require.NoError(t, batch.Ack()) // second call: idempotent
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, ackCalls, "second Ack must be a no-op")
+}
+
+// TestBatch_Messages returns decoded payloads.
+func TestBatch_Messages(t *testing.T) {
+	fa := &fakeAcknowledger{}
+	d1 := makeFakeDelivery(1, "hello", fa)
+	d2 := makeFakeDelivery(2, "world", fa)
+	batch := newTestBatch([]*Delivery[string]{d1, d2})
+	msgs := batch.Messages()
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "hello", msgs[0])
+	assert.Equal(t, "world", msgs[1])
+}
+
+// TestBatch_Deliveries returns the underlying delivery slice.
+func TestBatch_Deliveries(t *testing.T) {
+	fa := &fakeAcknowledger{}
+	d1 := makeFakeDelivery(1, "a", fa)
+	batch := newTestBatch([]*Delivery[string]{d1})
+	deliveries := batch.Deliveries()
+	require.Len(t, deliveries, 1)
+	assert.Same(t, d1, deliveries[0])
+}
+
+// TestBatch_PerDeliveryAck_SuppressesAutoVerdict verifies that calling Ack on an
+// individual delivery from Deliveries() sets acked=true, which the BatchConsumer's
+// auto-verdict logic uses to skip the batch-level Ack/Nack.
+func TestBatch_PerDeliveryAck_SuppressesAutoVerdict(t *testing.T) {
+	var mu sync.Mutex
+	var ackCalls []struct {
+		tag      uint64
+		multiple bool
+	}
+
+	fa := &fakeAcknowledger{
+		ackFn: func(tag uint64, multiple bool) error {
+			mu.Lock()
+			ackCalls = append(ackCalls, struct {
+				tag      uint64
+				multiple bool
+			}{tag, multiple})
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	d1 := makeFakeDelivery(1, "m1", fa)
+	d2 := makeFakeDelivery(2, "m2", fa)
+	batch := newTestBatch([]*Delivery[string]{d1, d2})
+
+	// Simulate handler calling per-delivery Nack on one delivery.
+	require.NoError(t, batch.Deliveries()[0].Nack(true))
+
+	// The batch.acked flag must be true now.
+	batch.mu.Lock()
+	acked := batch.acked
+	batch.mu.Unlock()
+	assert.True(t, acked, "per-delivery ack must set batch.acked=true")
+
+	// A subsequent Batch.Ack must be a no-op.
+	require.NoError(t, batch.Ack())
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Only 1 frame: from the per-delivery Nack. The batch.Ack must not fire.
+	assert.Len(t, ackCalls, 0, "batch.Ack must be a no-op after per-delivery ack")
+}
+
+// — BatchConsumerBuilder unit tests ————————————————————————————————————————
+
+func TestBatchConsumerBuilder_Defaults(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).Queue("q").Build()
+	require.NoError(t, err)
+	assert.Equal(t, "q", bc.queue)
+	assert.Equal(t, uint(100), bc.size, "default batch size must be 100")
+	assert.Equal(t, uint16(64), bc.prefetch, "default prefetch must be 64")
+	assert.NotNil(t, bc.codec)
+	assert.NotNil(t, bc.cm)
+}
+
+func TestBatchConsumerBuilder_NilConn_Error(t *testing.T) {
+	_, err := BatchConsumerFor[string](nil).Queue("q").Build()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestBatchConsumerBuilder_EmptyQueue_Error(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	_, err := BatchConsumerFor[string](conn).Build()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestBatchConsumerBuilder_LastWins_Size(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).Queue("q").Size(50).Size(200).Build()
+	require.NoError(t, err)
+	assert.Equal(t, uint(200), bc.size)
+}
+
+func TestBatchConsumerBuilder_LastWins_FlushAfter(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).Queue("q").
+		FlushAfter(1 * time.Second).
+		FlushAfter(2 * time.Second).
+		Build()
+	require.NoError(t, err)
+	assert.Equal(t, 2*time.Second, bc.flushAfter)
+}
+
+func TestBatchConsumerBuilder_LastWins_HandlerTimeout(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).Queue("q").
+		HandlerTimeout(100 * time.Millisecond).
+		HandlerTimeout(0).
+		Build()
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), bc.handlerTimeout)
+}
+
+// — BatchConsumer Consume unit tests (fake delivery injection) ————————————
+
+// newTestBatchConsumer builds a BatchConsumer[string] with injected delivery channel.
+// stopFn must be called after the test to release pool resources.
+func newTestBatchConsumer(t *testing.T, deliveryCh chan amqp091.Delivery, size uint, flushAfter time.Duration) (*BatchConsumer[string], func()) {
+	t.Helper()
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		Size(size).
+		FlushAfter(flushAfter).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	return bc, func() { _ = bc.Close(context.Background()) }
+}
+
+// makeJSONDelivery builds an amqp091.Delivery carrying a JSON-encoded string
+// and a fakeAcknowledger so we can observe acks.
+func makeJSONDelivery(tag uint64, body string, fa *fakeAcknowledger) amqp091.Delivery {
+	return amqp091.Delivery{
+		DeliveryTag:  tag,
+		Acknowledger: fa,
+		Body:         []byte(`"` + body + `"`),
+	}
+}
+
+// TestBatchConsumer_SizeFlush verifies that a batch is flushed when Size is reached.
+func TestBatchConsumer_SizeFlush(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	bc, stopFn := newTestBatchConsumer(t, deliveryCh, 3 /* size */, 0 /* no timer */)
+	defer stopFn()
+
+	var mu sync.Mutex
+	var batches [][]string
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, b *Batch[string]) error {
+			mu.Lock()
+			batches = append(batches, b.Messages())
+			mu.Unlock()
+			return nil
+		})
+	}()
+
+	fa := &fakeAcknowledger{}
+	// Send 3 messages; expect exactly 1 batch flush.
+	for i := 1; i <= 3; i++ {
+		deliveryCh <- makeJSONDelivery(uint64(i), "msg", fa) //nolint:gosec
+	}
+
+	// Give the consumer time to process.
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(batches) == 1
+	}, time.Second, 10*time.Millisecond, "expected exactly 1 batch after size reached")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, batches, 1)
+	assert.Len(t, batches[0], 3, "batch must contain all 3 messages")
+}
+
+// TestBatchConsumer_FlushAfterTimer verifies that accumulated messages are flushed
+// when the FlushAfter timer fires, even if size has not been reached.
+func TestBatchConsumer_FlushAfterTimer(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	// size=100 (won't be reached), flushAfter=50ms.
+	bc, stopFn := newTestBatchConsumer(t, deliveryCh, 100, 50*time.Millisecond)
+	defer stopFn()
+
+	var mu sync.Mutex
+	var batches [][]string
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, b *Batch[string]) error {
+			mu.Lock()
+			batches = append(batches, b.Messages())
+			mu.Unlock()
+			return nil
+		})
+	}()
+
+	fa := &fakeAcknowledger{}
+	// Send 2 messages — less than size; timer must flush.
+	deliveryCh <- makeJSONDelivery(1, "a", fa)
+	deliveryCh <- makeJSONDelivery(2, "b", fa)
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(batches) == 1
+	}, 500*time.Millisecond, 10*time.Millisecond, "expected batch to flush after timer")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, batches, 1)
+	assert.Len(t, batches[0], 2)
+}
+
+// TestBatchConsumer_AutoAck_NilError verifies that a nil-returning handler causes
+// a single basic.ack with multiple=true on the highest delivery-tag.
+func TestBatchConsumer_AutoAck_NilError(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	bc, stopFn := newTestBatchConsumer(t, deliveryCh, 2 /* size */, 0)
+	defer stopFn()
+
+	var mu sync.Mutex
+	type ackEvent struct {
+		tag      uint64
+		multiple bool
+	}
+	var ackEvents []ackEvent
+
+	fa := &fakeAcknowledger{
+		ackFn: func(tag uint64, multiple bool) error {
+			mu.Lock()
+			ackEvents = append(ackEvents, ackEvent{tag, multiple})
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+			return nil // nil → auto Ack with multiple=true
+		})
+	}()
+
+	deliveryCh <- makeJSONDelivery(1, "a", fa)
+	deliveryCh <- makeJSONDelivery(2, "b", fa)
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(ackEvents) > 0
+	}, time.Second, 10*time.Millisecond)
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, ackEvents, 1, "exactly one basic.ack frame")
+	assert.Equal(t, uint64(2), ackEvents[0].tag, "ack must target highest delivery-tag")
+	assert.True(t, ackEvents[0].multiple, "ack must be multiple=true")
+}
+
+// TestBatchConsumer_AutoNack_ErrRequeue verifies that an ErrRequeue-wrapping error
+// causes a single basic.nack with multiple=true, requeue=true.
+func TestBatchConsumer_AutoNack_ErrRequeue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	bc, stopFn := newTestBatchConsumer(t, deliveryCh, 2, 0)
+	defer stopFn()
+
+	var mu sync.Mutex
+	type nackEvent struct {
+		tag      uint64
+		multiple bool
+		requeue  bool
+	}
+	var nackEvents []nackEvent
+
+	fa := &fakeAcknowledger{
+		nackFn: func(tag uint64, multiple, requeue bool) error {
+			mu.Lock()
+			nackEvents = append(nackEvents, nackEvent{tag, multiple, requeue})
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+			return fmt.Errorf("transient: %w", ErrRequeue)
+		})
+	}()
+
+	deliveryCh <- makeJSONDelivery(3, "x", fa)
+	deliveryCh <- makeJSONDelivery(4, "y", fa)
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(nackEvents) > 0
+	}, time.Second, 10*time.Millisecond)
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, nackEvents, 1, "exactly one basic.nack frame")
+	assert.Equal(t, uint64(4), nackEvents[0].tag, "nack must target highest delivery-tag")
+	assert.True(t, nackEvents[0].multiple)
+	assert.True(t, nackEvents[0].requeue)
+}
+
+// TestBatchConsumer_AutoNack_OtherError verifies that a non-ErrRequeue error
+// causes a single basic.nack with multiple=true, requeue=false.
+func TestBatchConsumer_AutoNack_OtherError(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	bc, stopFn := newTestBatchConsumer(t, deliveryCh, 1, 0)
+	defer stopFn()
+
+	var mu sync.Mutex
+	type nackEvent struct {
+		tag               uint64
+		multiple, requeue bool
+	}
+	var nackEvents []nackEvent
+
+	fa := &fakeAcknowledger{
+		nackFn: func(tag uint64, multiple, requeue bool) error {
+			mu.Lock()
+			nackEvents = append(nackEvents, nackEvent{tag, multiple, requeue})
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+			return errors.New("handler error: not requeue")
+		})
+	}()
+
+	deliveryCh <- makeJSONDelivery(5, "z", fa)
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(nackEvents) > 0
+	}, time.Second, 10*time.Millisecond)
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, nackEvents, 1)
+	assert.Equal(t, uint64(5), nackEvents[0].tag)
+	assert.True(t, nackEvents[0].multiple)
+	assert.False(t, nackEvents[0].requeue, "non-ErrRequeue must nack without requeue")
+}
+
+// TestBatchConsumer_ManualBatchAck_SkipsAutoVerdict verifies that when the handler
+// calls Batch.Ack(), the framework does NOT emit a second ack.
+func TestBatchConsumer_ManualBatchAck_SkipsAutoVerdict(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	bc, stopFn := newTestBatchConsumer(t, deliveryCh, 2, 0)
+	defer stopFn()
+
+	var mu sync.Mutex
+	var ackCount int
+
+	fa := &fakeAcknowledger{
+		ackFn: func(_ uint64, _ bool) error {
+			mu.Lock()
+			ackCount++
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, b *Batch[string]) error {
+			// Handler manually acks the batch.
+			_ = b.Ack()
+			return nil // auto-verdict must be suppressed
+		})
+	}()
+
+	deliveryCh <- makeJSONDelivery(1, "m1", fa)
+	deliveryCh <- makeJSONDelivery(2, "m2", fa)
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return ackCount >= 1
+	}, time.Second, 10*time.Millisecond)
+
+	// Give a little extra time to detect a potential second ack.
+	time.Sleep(30 * time.Millisecond)
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, ackCount, "only one ack frame must be emitted")
+}
+
+// TestBatchConsumer_ManualPerDeliveryAck_SkipsAutoVerdict verifies that when the
+// handler acks an individual delivery from batch.Deliveries(), the framework skips
+// the batch-level auto-verdict.
+func TestBatchConsumer_ManualPerDeliveryAck_SkipsAutoVerdict(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	bc, stopFn := newTestBatchConsumer(t, deliveryCh, 1, 0)
+	defer stopFn()
+
+	var mu sync.Mutex
+	type nackCall struct {
+		tag               uint64
+		multiple, requeue bool
+	}
+	var nackCalls []nackCall
+	var ackCalls int
+
+	fa := &fakeAcknowledger{
+		ackFn: func(_ uint64, _ bool) error {
+			mu.Lock()
+			ackCalls++
+			mu.Unlock()
+			return nil
+		},
+		nackFn: func(tag uint64, multiple, requeue bool) error {
+			mu.Lock()
+			nackCalls = append(nackCalls, nackCall{tag, multiple, requeue})
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, b *Batch[string]) error {
+			// Handler manually nacks the first (only) delivery.
+			_ = b.Deliveries()[0].Nack(true)
+			return nil // auto-verdict must be suppressed because per-delivery nack fired
+		})
+	}()
+
+	deliveryCh <- makeJSONDelivery(7, "msg", fa)
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(nackCalls) > 0
+	}, time.Second, 10*time.Millisecond)
+
+	time.Sleep(30 * time.Millisecond)
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	// The per-delivery Nack (multiple=false) is the only frame.
+	require.Len(t, nackCalls, 1, "only the per-delivery nack must fire")
+	assert.False(t, nackCalls[0].multiple, "per-delivery nack must use multiple=false")
+	assert.Equal(t, 0, ackCalls, "no auto-ack must fire after per-delivery nack")
+}
+
+// TestBatchConsumer_DecodeError_NacksAndContinues verifies that a delivery whose
+// payload cannot be decoded is nacked without requeue and the consumer continues.
+func TestBatchConsumer_DecodeError_NacksAndContinues(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	bc, stopFn := newTestBatchConsumer(t, deliveryCh, 2, 0)
+	defer stopFn()
+
+	var mu sync.Mutex
+	type nackCall struct {
+		tag               uint64
+		multiple, requeue bool
+	}
+	var nackCalls []nackCall
+	var batchesSeen int
+
+	fa := &fakeAcknowledger{
+		nackFn: func(tag uint64, multiple, requeue bool) error {
+			mu.Lock()
+			nackCalls = append(nackCalls, nackCall{tag, multiple, requeue})
+			mu.Unlock()
+			return nil
+		},
+		ackFn: func(_ uint64, _ bool) error { return nil },
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+			mu.Lock()
+			batchesSeen++
+			mu.Unlock()
+			return nil
+		})
+	}()
+
+	// First delivery: invalid JSON → decode error → nack individually, never batched.
+	deliveryCh <- amqp091.Delivery{
+		DeliveryTag:  1,
+		Acknowledger: fa,
+		Body:         []byte(`not valid json`),
+	}
+	// Second and third: valid → batched together.
+	deliveryCh <- makeJSONDelivery(2, "ok", fa)
+	deliveryCh <- makeJSONDelivery(3, "ok", fa)
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return batchesSeen >= 1
+	}, time.Second, 10*time.Millisecond, "expected one batch to be flushed")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Tag 1 must be nacked directly (not via multiple=true batch).
+	var found bool
+	for _, nc := range nackCalls {
+		if nc.tag == 1 && !nc.multiple && !nc.requeue {
+			found = true
+		}
+	}
+	assert.True(t, found, "tag 1 (decode error) must be nacked with multiple=false, requeue=false")
+	assert.Equal(t, 1, batchesSeen, "exactly 1 batch for the 2 valid messages")
+}
+
+// TestBatchConsumer_AlreadyStarted_Error verifies that calling Consume twice
+// returns ErrInvalidOptions.
+func TestBatchConsumer_AlreadyStarted_Error(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).Queue("q").Build()
+	require.NoError(t, err)
+	bc.started.Store(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err = bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error { return nil })
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+// TestBatchConsumer_Close_Idempotent verifies that Close can be called multiple times.
+func TestBatchConsumer_Close_Idempotent(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).Queue("q").Build()
+	require.NoError(t, err)
+	require.NoError(t, bc.Close(context.Background()))
+	require.NoError(t, bc.Close(context.Background()))
+}
+
+// TestBatchConsumer_HandlerTimeout_NacksWithoutRequeue verifies that when
+// HandlerTimeout fires, the default verdict is Nack(requeue=false) for the whole batch.
+func TestBatchConsumer_HandlerTimeout_NacksWithoutRequeue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		Size(2).
+		HandlerTimeout(20 * time.Millisecond).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	var mu sync.Mutex
+	type nackCall struct {
+		tag               uint64
+		multiple, requeue bool
+	}
+	var nackCalls []nackCall
+
+	fa := &fakeAcknowledger{
+		nackFn: func(tag uint64, multiple, requeue bool) error {
+			mu.Lock()
+			nackCalls = append(nackCalls, nackCall{tag, multiple, requeue})
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(hCtx context.Context, _ *Batch[string]) error {
+			// Block until the timeout fires.
+			<-hCtx.Done()
+			return hCtx.Err()
+		})
+	}()
+
+	deliveryCh <- makeJSONDelivery(1, "slow", fa)
+	deliveryCh <- makeJSONDelivery(2, "slow", fa)
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(nackCalls) > 0
+	}, time.Second, 10*time.Millisecond, "expected a nack after handler timeout")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, nackCalls, 1, "exactly one batch-level nack on timeout")
+	assert.Equal(t, uint64(2), nackCalls[0].tag, "nack targets highest tag")
+	assert.True(t, nackCalls[0].multiple)
+	assert.False(t, nackCalls[0].requeue, "default timeout verdict is nack without requeue")
+}
+
+// TestBatchConsumer_MetricsRecorded verifies that handler metrics are emitted.
+func TestBatchConsumer_MetricsRecorded(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+
+	capturedCM := &captureConsumerMetrics{}
+
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("myq").
+		Size(2).
+		Metrics(capturedCM).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	fa := &fakeAcknowledger{ackFn: func(_ uint64, _ bool) error { return nil }}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+			return nil
+		})
+	}()
+
+	deliveryCh <- makeJSONDelivery(1, "a", fa)
+	deliveryCh <- makeJSONDelivery(2, "b", fa)
+
+	assert.Eventually(t, func() bool {
+		capturedCM.mu.Lock()
+		defer capturedCM.mu.Unlock()
+		return len(capturedCM.records) > 0
+	}, time.Second, 10*time.Millisecond)
+
+	cancel()
+	require.NoError(t, <-done)
+
+	capturedCM.mu.Lock()
+	defer capturedCM.mu.Unlock()
+	require.Len(t, capturedCM.records, 1)
+	assert.Equal(t, "myq", capturedCM.records[0].queue)
+	assert.Equal(t, "ack", capturedCM.records[0].outcome)
+}
+
+// captureConsumerMetrics records handler calls for assertions.
+type captureConsumerMetrics struct {
+	metrics.NoOpConsumerMetrics
+	mu      sync.Mutex
+	records []struct {
+		queue   string
+		outcome string
+		elapsed time.Duration
+	}
+}
+
+func (c *captureConsumerMetrics) RecordHandler(queue, outcome string, elapsed time.Duration) {
+	c.mu.Lock()
+	c.records = append(c.records, struct {
+		queue   string
+		outcome string
+		elapsed time.Duration
+	}{queue, outcome, elapsed})
+	c.mu.Unlock()
+}

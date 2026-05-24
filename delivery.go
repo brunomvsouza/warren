@@ -19,6 +19,10 @@ type Delivery[M any] struct {
 	// done is closed by the owning Consumer[M].Close to signal consumer shutdown.
 	// Nil means the consumer lifecycle is not being tracked (e.g. in tests).
 	done <-chan struct{}
+	// ackNotify is an optional callback invoked after a successful Ack or Nack.
+	// BatchConsumer installs this to detect per-delivery acks and suppress the
+	// batch-level auto-verdict (idempotent guard). Nil in all other code paths.
+	ackNotify func()
 }
 
 // newDelivery constructs a Delivery[M] from a decoded body, the queue name,
@@ -83,6 +87,9 @@ func (d *Delivery[M]) Ack() error {
 	if err := d.raw.Ack(false); err != nil {
 		return mapAckErr(err)
 	}
+	if d.ackNotify != nil {
+		d.ackNotify()
+	}
 	return nil
 }
 
@@ -100,6 +107,9 @@ func (d *Delivery[M]) Nack(requeue bool) error {
 	}
 	if err := d.raw.Nack(false, requeue); err != nil {
 		return mapAckErr(err)
+	}
+	if d.ackNotify != nil {
+		d.ackNotify()
 	}
 	return nil
 }

@@ -612,7 +612,7 @@ acceptance to close the checkpoint.
 
 ## Phase 5 — Batch APIs: throughput
 
-### [ ] T22 — `PublishBatch` always-all + MaxSize cap + order preservation + channel-close recovery doc · M
+### [x] T22 — `PublishBatch` always-all + MaxSize cap + order preservation + channel-close recovery doc · M
 Rev 5 enforces `PublishBatchMaxInFlight` (default 1024) returning
 `ErrBatchTooLarge`, and pipelines on a **single channel** to
 preserve input order. Rev 6 renames to `PublishBatchMaxSize`,
@@ -634,26 +634,26 @@ documents the channel-close recovery contract, and clarifies
 - **Files:** edits to `publisher.go`, `publisher_batch_integration_test.go`, `publisher_batch_order_integration_test.go`.
 - **Deps:** T11, T12, T13.
 
-### [ ] T23 — `BatchConsumer` + concrete `Batch[M]` + auto-verdict · M
+### [x] T23 — `BatchConsumer` + concrete `Batch[M]` + auto-verdict · M
 Rev 5 documents the handler error semantics (auto-Ack/Nack with
 `multiple=true`) and `HandlerTimeout` at batch granularity.
 - **Acceptance:**
-  - [ ] `BatchConsumerFor[M](conn) *BatchConsumerBuilder[M]`.
-  - [ ] Builder methods mirror `ConsumerBuilder` + `Size(uint)` + `FlushAfter(d)` + `HandlerTimeout(d)`. **No `Concurrency` exposed** — batches run sequentially per consumer (run multiple `BatchConsumer[M]` for parallelism).
-  - [ ] `Batch[M]` concrete struct with `Messages()`, `Deliveries()`, `Ack()`, `Nack(requeue)`. Internally tracks an `acked bool` guard so manual + auto don't double-act.
-  - [ ] **Auto-verdict semantics:**
+  - [x] `BatchConsumerFor[M](conn) *BatchConsumerBuilder[M]`.
+  - [x] Builder methods mirror `ConsumerBuilder` + `Size(uint)` + `FlushAfter(d)` + `HandlerTimeout(d)`. **No `Concurrency` exposed** — batches run sequentially per consumer (run multiple `BatchConsumer[M]` for parallelism).
+  - [x] `Batch[M]` concrete struct with `Messages()`, `Deliveries()`, `Ack()`, `Nack(requeue)`. Internally tracks an `acked bool` guard so manual + auto don't double-act.
+  - [x] **Auto-verdict semantics:**
     - Handler returns `nil` and `Batch.Ack/Nack` never called → framework emits a **single `basic.ack` with `multiple=true`** for the highest delivery-tag in the batch (one frame, not N).
     - Handler returns non-nil error wrapped with `ErrRequeue` → framework emits a single `basic.nack` with `multiple=true` + `requeue=true`.
     - Handler returns any other non-nil error → framework emits a single `basic.nack` with `multiple=true` + `requeue=false` (DLX-bound).
     - Handler called `Batch.Ack` / `Batch.Nack` / per-`Deliveries()` acks/nacks → framework skips the auto-verdict (idempotent guard).
-  - [ ] `HandlerTimeout(d)` derives a per-batch ctx; on timeout the default verdict is `Nack(requeue=false)` for the whole batch (`ErrPartialBatch`-style aggregate not applicable here — it's a batch verdict, not per-message).
-  - [ ] Flush triggers: size reached OR timer elapsed.
+  - [x] `HandlerTimeout(d)` derives a per-batch ctx; on timeout the default verdict is `Nack(requeue=false)` for the whole batch (`ErrPartialBatch`-style aggregate not applicable here — it's a batch verdict, not per-message).
+  - [x] Flush triggers: size reached OR timer elapsed.
   - [ ] `MaxRedeliveries` counter B (from T20) increments per message in the batch when a `Nack(requeue=true)` is emitted for the whole batch.
 - **Verify:**
-  - Integration test: send 500 messages with `Size(100)` → 5 batches; send 50 messages with `FlushAfter(1s)` → 1 batch after 1s.
-  - **Multiple=true ack test:** channel recorder asserts exactly one `basic.ack` frame with `multiple=true` per nil-returning handler (not 100).
-  - **Auto-Nack test:** handler returns `errors.New("bad")`; assert single `basic.nack` with `multiple=true,requeue=false`.
-  - **Manual override test:** handler calls `batch.Deliveries()[0].Nack(true)` and returns nil; assert only the per-delivery nack lands, no auto-Ack on the batch.
+  - [x] Integration test: send 500 messages with `Size(100)` → 5 batches; send 50 messages with `FlushAfter(1s)` → 1 batch after 1s.
+  - [x] **Multiple=true ack test:** unit tests assert single `basic.ack` frame with `multiple=true` per nil-returning handler via fakeAcknowledger.
+  - [x] **Auto-Nack test:** handler returns `errors.New("bad")`; assert single `basic.nack` with `multiple=true,requeue=false`.
+  - [x] **Manual override test:** handler calls `batch.Deliveries()[0].Nack(true)` and returns nil; assert only the per-delivery nack lands, no auto-Ack on the batch.
 - **Files:** `batch_consumer.go`, `batch_consumer_builder.go`, `batch_consumer_integration_test.go`, `batch_consumer_autoack_test.go`.
 - **Deps:** T18.
 
