@@ -428,6 +428,198 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 	return nil
 }
 
+// PublishBatch publishes all messages in msgs on a single AMQP channel, preserving
+// input order (RabbitMQ's per-channel ordering guarantee). It never short-circuits:
+// even if some messages fail client-side validation, valid messages are still
+// published and confirmed.
+//
+// If len(msgs) exceeds the configured PublishBatchMaxSize (default 1024),
+// PublishBatch returns (nil, ErrBatchTooLarge) immediately without any broker work.
+//
+// Per-message outcomes are in []PublishResult, one slot per input. Result.Err may be:
+//   - nil (broker confirmed)
+//   - ErrInvalidMessage (client-side header validation or encode failure)
+//   - ErrPublishNacked (broker sent basic.nack, e.g. overflow=reject-publish)
+//   - ErrUnroutable (mandatory publish returned via basic.return then acked)
+//   - ErrChannelClosed (channel died before confirm arrived)
+//
+// If any message fails, the overall error wraps ErrPartialBatch.
+//
+// # Channel-close recovery
+//
+// Per-message ErrChannelClosed does NOT distinguish "broker persisted" from
+// "broker did not receive". Retry produces duplicates when the broker persisted
+// but the ack was lost. PublishRetry does NOT apply to PublishBatch — chunking
+// and partial-retry are the caller's responsibility because the right strategy
+// is workload-specific. Consumers MUST be idempotent per SPEC §6.2.1.
+//
+// # PublishRetry
+//
+// PublishRetry configured on the publisher is intentionally ignored for
+// PublishBatch. Retry semantics across a multi-message batch require the caller
+// to understand which messages were persisted vs lost, so automatic retry would
+// produce uncontrolled duplicates. Use PublishRetry only with Publish (single
+// message).
+func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]PublishResult, error) {
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+
+	maxSize := p.publishBatchMaxSize
+	if maxSize <= 0 {
+		maxSize = 1024
+	}
+	if len(msgs) > maxSize {
+		return nil, ErrBatchTooLarge
+	}
+
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, ErrAlreadyClosed
+	}
+	p.wg.Add(1)
+	p.mu.Unlock()
+	defer p.wg.Done()
+
+	results := make([]PublishResult, len(msgs))
+
+	// Step 1: client-side validation and encoding for all messages up front.
+	// This avoids holding the channel while doing CPU work.
+	type ready struct {
+		msg  Message[M]
+		body []byte
+		err  error
+	}
+	encoded := make([]ready, len(msgs))
+
+	for i, msg := range msgs {
+		if err := msg.applyDefaults(p.codec); err != nil {
+			encoded[i].err = err
+			continue
+		}
+		if err := msg.validateHeaders(); err != nil {
+			encoded[i].err = err
+			continue
+		}
+
+		if p.stampUserID && msg.UserID == "" {
+			msg.UserID = p.authUser
+		}
+		if msg.UserID != "" && p.authUser != "" && msg.UserID != p.authUser {
+			encoded[i].err = fmt.Errorf("%w: UserID %q does not match the authenticated connection identity", ErrInvalidMessage, msg.UserID)
+			continue
+		}
+
+		body, err := p.codec.Encode(msg.Body)
+		if err != nil {
+			encoded[i].err = fmt.Errorf("%w: %w", ErrInvalidMessage, err)
+			continue
+		}
+
+		if p.maxMessageSizeBytes > 0 && len(body) > p.maxMessageSizeBytes {
+			p.pm.RecordPublish(p.exchange, "too_large", 0)
+			encoded[i].err = fmt.Errorf("%w: encoded body is %d bytes (cap %d)", ErrMessageTooLarge, len(body), p.maxMessageSizeBytes)
+			continue
+		}
+
+		encoded[i].msg = msg
+		encoded[i].body = body
+	}
+
+	// Propagate client-side failures to results immediately.
+	allFailed := true
+	for i, e := range encoded {
+		if e.err != nil {
+			results[i].Err = e.err
+		} else {
+			allFailed = false
+		}
+	}
+
+	if allFailed {
+		return results, ErrPartialBatch
+	}
+
+	// Step 2: acquire ONE channel from the pool. All valid messages pipeline on it
+	// to guarantee per-channel in-order delivery.
+	pool, mc := p.selectPool()
+	if err := mc.waitBarrier(ctx); err != nil {
+		return nil, err
+	}
+
+	entry, release, err := pool.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pool.inflight.Add(1)
+	defer func() {
+		pool.inflight.Add(-1)
+		release()
+	}()
+
+	// Step 3: register + publish all valid messages. Track which delivery tags
+	// correspond to which result indices so we can await them in order.
+	type tagIdx struct {
+		tag uint64
+		idx int
+	}
+	published := make([]tagIdx, 0, len(msgs))
+
+	for i, e := range encoded {
+		if e.err != nil {
+			continue // already failed client-side
+		}
+
+		pub := buildPublishing(e.msg, e.body)
+		deliveryTag := entry.ch.GetNextPublishSeqNo()
+
+		// Set activeTag before publish so that any concurrent basic.return frame
+		// arriving for this message can be correlated to the right delivery tag.
+		// Note: for batches with multiple mandatory messages, returns arrive after
+		// all publishes complete. In that case activeTag reflects the last-published
+		// tag, which may mis-correlate returns with tags. The limitation is
+		// documented (see LATER.md) and only affects mandatory+batch combinations.
+		if entry.activeTag != nil {
+			entry.activeTag.Store(deliveryTag)
+		}
+
+		if regErr := entry.tracker.Register(deliveryTag); regErr != nil {
+			results[i].Err = p.mapConfirmError(regErr)
+			continue
+		}
+
+		if pubErr := entry.ch.PublishWithContext(ctx, p.exchange, p.routingKey, p.mandatory, false, pub); pubErr != nil {
+			entry.tracker.Cancel(deliveryTag)
+			results[i].Err = wrapAMQPError(pubErr)
+			continue
+		}
+
+		published = append(published, tagIdx{tag: deliveryTag, idx: i})
+	}
+
+	// Clear activeTag after all publishes — no more returns expected for this batch.
+	if entry.activeTag != nil {
+		entry.activeTag.Store(0)
+	}
+
+	// Step 4: wait for confirms on all successfully-published messages.
+	for _, ti := range published {
+		if waitErr := entry.tracker.Wait(ctx, ti.tag, p.confirmTimeout); waitErr != nil {
+			results[ti.idx].Err = p.mapConfirmError(waitErr)
+		}
+	}
+
+	// Step 5: check for any failure and wrap ErrPartialBatch if needed.
+	for _, r := range results {
+		if r.Err != nil {
+			return results, ErrPartialBatch
+		}
+	}
+
+	return results, nil
+}
+
 // selectPool returns the publisher connection pool with the lowest in-flight count.
 func (p *Publisher[M]) selectPool() (*publisherConnPool, *managedConn) {
 	minFlight := int64(-1)

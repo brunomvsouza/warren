@@ -771,3 +771,31 @@ protocolarmente; o problema é de operabilidade a longo prazo.
 **Pré-requisitos:** T36 (ciclo completo de `basic.cancel`). Não atacar antes: a solução
 correta depende de ter o contexto do consumer cancel disponível na goroutine de
 `openDeliveryCh`, que T36 vai refatorar.
+
+---
+
+### LATER-23 — `PublishBatch` com `Mandatory()` pode mis-correlacionar `basic.return` para tags não-últimas
+
+**Contexto:** `publisher.go` — `PublishBatch` usa `entry.activeTag` para correlacionar
+`basic.return` frames com delivery tags. O listener goroutine lê `activeTag` ao receber
+um return. Durante um batch, `activeTag` é atualizado a cada publish; quando todos os
+publishes terminam, `activeTag` é zerado. Returns de mensagens mandatory chegam *após*
+todos os publishes, então o listener lê `activeTag = 0` → `MarkReturned` não é chamado
+→ os affected `Wait` retornam `nil` em vez de `ErrUnroutable`.
+
+**Impacto:** `PublishBatch` com `Mandatory()` e mensagens sem rota retorna `nil` em vez
+de `ErrUnroutable` por mensagem. A mensagem ainda é dead-lettered ou dropada conforme
+policy, mas o caller não sabe que foi não roteada. Afeta apenas o combo `PublishBatch` +
+`Mandatory()` + exchanges sem binding — incomum em produção.
+
+**Evidência:** Identificado durante T22 (implementação de `PublishBatch`). Não há test de
+verificação para este caso no plan (T22 verify usa `ErrInvalidMessage`, não `ErrUnroutable`).
+
+**Sugestão de solução:** Manter uma fila (slice) de delivery tags publicados em ordem no
+`publisherEntry` durante um batch. O listener goroutine, ao receber um return, drena o
+front da fila para obter o delivery tag correto em vez de usar `activeTag`. Requer:
+(1) campo `batchTagQueue *atomic.Pointer[[]uint64]` em `publisherEntry`; (2) `PublishBatch`
+preenche a fila antes de publicar cada mensagem; (3) goroutine checa a fila.
+
+**Pré-requisitos:** T22 concluída (base); apenas atacar após T23 (batch consumer) porque
+a rearquitetura do listener pode afetar o fluxo de ack do `BatchConsumer`.

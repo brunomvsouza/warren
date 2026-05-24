@@ -107,6 +107,13 @@ type Return struct {
 	Properties ReturnedProperties
 }
 
+// PublishResult holds the outcome for a single message in a PublishBatch call.
+// Err is nil when the message was confirmed by the broker; non-nil for
+// ErrInvalidMessage, ErrPublishNacked, ErrUnroutable, or ErrChannelClosed.
+type PublishResult struct {
+	Err error
+}
+
 // TimeoutVerdict decides the ack/nack action when a handler exceeds its
 // HandlerTimeout. The zero value is TimeoutNackNoRequeue so that a
 // misconfigured handler does not create an infinite requeue loop.
