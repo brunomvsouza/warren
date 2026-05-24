@@ -257,6 +257,8 @@ func TestPublisher_Publish_publishRetry_doesNotRetryPermanent(t *testing.T) {
 	defer stopPool()
 	defer func() { _ = pub.Close(context.Background()) }()
 
+	// mandatory=true is required: basic.return only arrives for mandatory publishes.
+	pub.mandatory = true
 	pub.retryPolicy = &RetryPolicy{Min: time.Millisecond, WithoutJitter: true}
 
 	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
@@ -415,6 +417,9 @@ func TestPublisher_Publish_amqpCode312_onErrUnroutable(t *testing.T) {
 	defer stopPool()
 	defer func() { _ = pub.Close(context.Background()) }()
 
+	// mandatory=true is required: basic.return only arrives for mandatory publishes.
+	pub.mandatory = true
+
 	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrUnroutable), "expected ErrUnroutable, got %v", err)
@@ -430,6 +435,9 @@ func TestPublisher_Publish_amqpCode313_onErrUnroutable(t *testing.T) {
 	pub, stopPool := newTestPubReturn[testPayload](fake, metrics.NoOpPublisherMetrics{}, nil)
 	defer stopPool()
 	defer func() { _ = pub.Close(context.Background()) }()
+
+	// mandatory=true is required: basic.return only arrives for mandatory publishes.
+	pub.mandatory = true
 
 	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
 	require.Error(t, err)
@@ -459,6 +467,9 @@ func TestPublisher_Publish_onReturn_firesBeforePublishUnblocks(t *testing.T) {
 	pub, stopPool := newTestPubReturn[testPayload](fake, metrics.NoOpPublisherMetrics{}, cb)
 	defer stopPool()
 	defer func() { _ = pub.Close(context.Background()) }()
+
+	// mandatory=true is required: basic.return only arrives for mandatory publishes.
+	pub.mandatory = true
 
 	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{Value: "return-test"}})
 	require.Error(t, err)

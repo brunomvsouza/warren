@@ -14,6 +14,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/brunomvsouza/warren/codec"
+	"github.com/brunomvsouza/warren/internal/confirms"
 	"github.com/brunomvsouza/warren/metrics"
 )
 
@@ -353,32 +354,26 @@ func TestPublishBatch_SingleChannelOrdering(t *testing.T) {
 	assert.Len(t, fake.publishes, n, "all %d messages must go through the single channel", n)
 }
 
-// TestPublishBatch_Mandatory_OnReturnFires verifies that the OnReturn callback
-// fires exactly once for each unroutable message in a mandatory batch, before the
-// corresponding PublishResult slot is resolved with ErrUnroutable. This exercises
-// the SPEC §5.1 contract: "OnReturn fires for each returned message, before the
-// corresponding slot is resolved."
+// TestPublishBatch_Mandatory_OnReturnFires verifies that the user-facing OnReturn
+// callback fires exactly once for each unroutable message in a mandatory batch,
+// carrying the correctly converted Return struct (not the raw amqp091.Return),
+// before the corresponding PublishResult slot is resolved with ErrUnroutable.
+// This exercises the SPEC §5.1 contract: "OnReturn fires for each returned message,
+// before the corresponding slot is resolved."
 func TestPublishBatch_Mandatory_OnReturnFires(t *testing.T) {
 	const unroutableMsgID = "test-on-return-batch-fire"
 
 	fake := newFakePubCh(true /* autoAck — sends ack after return */)
 	fake.returnMsgIDs = map[string]uint16{unroutableMsgID: 312}
 
-	// Capture raw returns from the pool goroutine.
+	// Capture user-facing Return via pub.onReturn (not the raw amqp091.Return).
 	var mu sync.Mutex
-	var capturedReturns []amqp091.Return
-	rawOnReturn := func(r amqp091.Return) {
-		mu.Lock()
-		capturedReturns = append(capturedReturns, r)
-		mu.Unlock()
-	}
+	var capturedReturns []Return
 
-	// Build the publisher manually so we can pass the callback to wireFakePool
-	// (pub.callOnReturn needs the publisher to exist first).
-	pool, stopPool := wireFakePool(fake, rawOnReturn)
+	// Create the publisher first so we can pass pub.callOnReturn to wireFakePool.
+	// pub.callOnReturn converts amqp091.Return → Return before invoking pub.onReturn.
 	mc := &managedConn{}
 	pub := &Publisher[testPayload]{
-		pools:               []*publisherConnPool{pool},
 		mcs:                 []*managedConn{mc},
 		codec:               codec.NewJSON(),
 		pm:                  metrics.NoOpPublisherMetrics{},
@@ -386,7 +381,17 @@ func TestPublishBatch_Mandatory_OnReturnFires(t *testing.T) {
 		publishBatchMaxSize: 1024,
 		confirmTimeout:      2 * time.Second,
 		mandatory:           true,
+		onReturn: func(r Return) {
+			mu.Lock()
+			capturedReturns = append(capturedReturns, r)
+			mu.Unlock()
+		},
 	}
+
+	// Wire the pool passing pub.callOnReturn so the goroutine goes through the
+	// Publisher's conversion logic (amqp091.Return → Return → pub.onReturn).
+	pool, stopPool := wireFakePool(fake, pub.callOnReturn)
+	pub.pools = []*publisherConnPool{pool}
 
 	defer goleak.VerifyNone(t)
 	defer stopPool()
@@ -407,15 +412,14 @@ func TestPublishBatch_Mandatory_OnReturnFires(t *testing.T) {
 		"result[1] (unroutable) must be ErrUnroutable, got %v", results[1].Err)
 	assert.NoError(t, results[2].Err, "result[2] (routed) must succeed")
 
-	// OnReturn must have fired exactly once, for the one unroutable message,
-	// before PublishBatch returned (the call is synchronous in the goroutine).
+	// pub.onReturn must have fired exactly once via the user-facing Return struct.
 	mu.Lock()
 	defer mu.Unlock()
 	require.Len(t, capturedReturns, 1, "OnReturn must fire exactly once for the unroutable message")
 	assert.Equal(t, uint16(312), capturedReturns[0].ReplyCode,
-		"OnReturn must carry the broker reply code 312")
-	assert.Equal(t, unroutableMsgID, capturedReturns[0].MessageId,
-		"OnReturn must identify the correct message by MessageID")
+		"Return.ReplyCode must carry broker reply code 312")
+	assert.Equal(t, unroutableMsgID, capturedReturns[0].Properties.MessageID,
+		"Return.Properties.MessageID must identify the correct message")
 }
 
 // TestPublishBatch_Mandatory_AllRouted verifies that a mandatory batch where all
@@ -810,6 +814,12 @@ func TestPublishBatch_Metrics_PartialFailure(t *testing.T) {
 // TestPublishBatch_Race verifies that concurrent PublishBatch calls on the same
 // publisher do not trigger the race detector. The -race flag is what makes this
 // test meaningful.
+//
+// NOTE: pool size is fixed at 1 (by wireFakePool) so all goroutines serialize at
+// channel acquisition. The race detector still catches races on Publisher-level
+// fields (mu, closed, wg). Concurrent writes to returnTagMap from different
+// entries cannot occur with a single-entry pool; that would require pool size > 1
+// and multiple simultaneous acquisitions.
 func TestPublishBatch_Race(t *testing.T) {
 	fake := newFakePubCh(true /* autoAck */)
 	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
@@ -831,6 +841,231 @@ func TestPublishBatch_Race(t *testing.T) {
 			}
 			_, _ = pub.PublishBatch(context.Background(), msgs)
 		}()
+	}
+	wg.Wait()
+}
+
+// TestPublishBatch_RegisterFailure_CleansReturnTagMap verifies the immediate
+// returnTagMap.Delete cleanup path (publisher.go step 3) when tracker.Register
+// fails for a mandatory publisher. Orphaned entries would cause false-positive
+// ErrUnroutable on future messages in the same channel that happened to reuse
+// a colliding MessageID.
+func TestPublishBatch_RegisterFailure_CleansReturnTagMap(t *testing.T) {
+	// Build pool + goroutine manually to get direct access to the tracker
+	// and returnTagMap, allowing us to pre-close the tracker.
+	tracker := confirms.New()
+	confirmCh := make(chan amqp091.Confirmation, 16)
+	returnCh := make(chan amqp091.Return)
+	rtm := new(sync.Map)
+
+	fake := newFakePubCh(false /* no auto-ack */)
+	fake.mu.Lock()
+	fake.confirmCh = confirmCh
+	fake.returnCh = returnCh
+	fake.mu.Unlock()
+
+	goroutineDone := make(chan struct{})
+	go func() {
+		defer close(goroutineDone)
+		for {
+			select {
+			case ret, ok := <-returnCh:
+				if !ok {
+					returnCh = nil
+					continue
+				}
+				if ret.MessageId != "" {
+					if v, loaded := rtm.LoadAndDelete(ret.MessageId); loaded {
+						tag := v.(uint64) //nolint:forcetypeassert
+						tracker.MarkReturned(tag, ret.ReplyCode)
+					}
+				}
+			case c, ok := <-confirmCh:
+				if !ok {
+					tracker.CloseAll()
+					return
+				}
+				if c.Ack {
+					tracker.Ack(c.DeliveryTag, false)
+				} else {
+					tracker.Nack(c.DeliveryTag, false)
+				}
+			}
+		}
+	}()
+
+	pool := newPublisherConnPool(1, func() (publisherEntry, error) {
+		return publisherEntry{ch: fake, tracker: tracker, closeCh: fake.closedCh, returnTagMap: rtm}, nil
+	})
+
+	mc := &managedConn{}
+	pub := &Publisher[testPayload]{
+		pools:               []*publisherConnPool{pool},
+		mcs:                 []*managedConn{mc},
+		codec:               codec.NewJSON(),
+		pm:                  metrics.NoOpPublisherMetrics{},
+		exchange:            "x",
+		publishBatchMaxSize: 1024,
+		confirmTimeout:      2 * time.Second,
+		mandatory:           true,
+	}
+
+	defer goleak.VerifyNone(t)
+	stop := func() {
+		_ = fake.Close()
+		<-goroutineDone
+	}
+	defer stop()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	// Pre-close the tracker to force all Register calls to fail immediately.
+	// This simulates a channel close that occurred before the batch started.
+	tracker.CloseAll()
+
+	msgs := []Message[testPayload]{
+		{Body: &testPayload{Value: "m1"}},
+		{Body: &testPayload{Value: "m2"}},
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrPartialBatch))
+	require.Len(t, results, 2)
+
+	for i, r := range results {
+		assert.True(t, errors.Is(r.Err, ErrChannelClosed),
+			"result[%d] must be ErrChannelClosed when Register fails, got %v", i, r.Err)
+	}
+
+	// returnTagMap must be empty: the immediate cleanup in the Register failure
+	// path must have deleted every entry it stored.
+	var mapSize int
+	rtm.Range(func(_, _ any) bool { mapSize++; return true })
+	assert.Equal(t, 0, mapSize,
+		"returnTagMap must be empty after Register failures for a mandatory publisher")
+}
+
+// TestPublishBatch_WaitBarrierDegraded_ReturnsNilResults verifies that when the
+// connection is in degraded state (topology redeclare failed after reconnect),
+// PublishBatch returns (nil, ErrTopologyRedeclareFailed) without touching the broker.
+// This covers the mc.waitBarrier error path in PublishBatch.
+func TestPublishBatch_WaitBarrierDegraded_ReturnsNilResults(t *testing.T) {
+	fake := newFakePubCh(true)
+	pool, stopPool := wireFakePool(fake)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+
+	// Set degradedErr on the managed connection (no reconnect barrier needed —
+	// waitBarrier returns immediately when reconnecting==false && blocked==false).
+	mc := &managedConn{}
+	mc.degradedErr = ErrTopologyRedeclareFailed
+
+	pub := &Publisher[testPayload]{
+		pools:               []*publisherConnPool{pool},
+		mcs:                 []*managedConn{mc},
+		codec:               codec.NewJSON(),
+		pm:                  metrics.NoOpPublisherMetrics{},
+		exchange:            "x",
+		publishBatchMaxSize: 1024,
+		confirmTimeout:      2 * time.Second,
+	}
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	msgs := []Message[testPayload]{{Body: &testPayload{Value: "v"}}}
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrTopologyRedeclareFailed),
+		"PublishBatch must propagate degraded waitBarrier error, got %v", err)
+	assert.Nil(t, results, "results must be nil on connection-level error")
+
+	// No broker work must have occurred.
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Empty(t, fake.publishes, "no publishes expected when connection is degraded")
+}
+
+// TestPublishBatch_PublishWithContext_FailsMidBatch verifies that when
+// PublishWithContext returns an error for a mid-batch message, the batch continues
+// for the remaining messages (always-all contract), tracker.Cancel is called for
+// the failed message, and the result slice reflects partial success.
+func TestPublishBatch_PublishWithContext_FailsMidBatch(t *testing.T) {
+	fake := newFakePubCh(true /* autoAck */)
+	fake.failAtTag = 2 // second message (tag 2) fails at PublishWithContext
+
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	msgs := []Message[testPayload]{
+		{Body: &testPayload{Value: "first"}},  // tag 1: succeeds
+		{Body: &testPayload{Value: "second"}}, // tag 2: PublishWithContext fails
+		{Body: &testPayload{Value: "third"}},  // tag 3: succeeds
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrPartialBatch),
+		"overall error must wrap ErrPartialBatch for mid-batch failure, got %v", err)
+	require.Len(t, results, 3)
+
+	assert.NoError(t, results[0].Err, "first message (tag 1) must succeed")
+	assert.Error(t, results[1].Err, "second message (tag 2) must fail at PublishWithContext")
+	assert.NoError(t, results[2].Err, "third message (tag 3) must succeed")
+
+	// Only messages 0 and 2 (tags 1 and 3) must have reached the broker.
+	// Message 1 (tag 2) failed at PublishWithContext before appending to publishes.
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Len(t, fake.publishes, 2, "only messages 0 and 2 must reach the broker")
+}
+
+// TestPublisher_ConcurrentPublish_And_PublishBatch verifies that concurrent Publish
+// and PublishBatch calls on the same mandatory publisher are data-race-free. Mixing
+// both APIs is the most realistic production scenario and exercises all shared
+// Publisher-level fields (mu, closed, wg) as well as the returnTagMap operations
+// under the race detector.
+func TestPublisher_ConcurrentPublish_And_PublishBatch(t *testing.T) {
+	fake := newFakePubCh(true /* autoAck */)
+	pool, stopPool := wireFakePool(fake)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+
+	mc := &managedConn{}
+	pub := &Publisher[testPayload]{
+		pools:               []*publisherConnPool{pool},
+		mcs:                 []*managedConn{mc},
+		codec:               codec.NewJSON(),
+		pm:                  metrics.NoOpPublisherMetrics{},
+		exchange:            "x",
+		publishBatchMaxSize: 1024,
+		confirmTimeout:      2 * time.Second,
+		mandatory:           true,
+	}
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	const goroutines = 4
+	const iterations = 5
+	var wg sync.WaitGroup
+	for i := range goroutines {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for range iterations {
+				if i%2 == 0 {
+					// Single-message Publish path
+					_ = pub.Publish(context.Background(),
+						Message[testPayload]{Body: &testPayload{Value: "single"}})
+				} else {
+					// Batch Publish path
+					msgs := []Message[testPayload]{
+						{Body: &testPayload{Value: "batch-a"}},
+						{Body: &testPayload{Value: "batch-b"}},
+					}
+					_, _ = pub.PublishBatch(context.Background(), msgs)
+				}
+			}
+		}(i)
 	}
 	wg.Wait()
 }

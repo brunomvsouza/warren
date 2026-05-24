@@ -39,6 +39,14 @@ type fakePubChannel struct {
 	// MessageID is present in this map receives a basic.return with that
 	// reply code before the auto-ack. Takes precedence over returnAll.
 	returnMsgIDs map[string]uint16
+	// returnEmptyMsgID, when true, sends the basic.return with an empty MessageId
+	// regardless of the actual message's ID. Used to test the uncorrelatable-return
+	// path (openPublisherEntry's guard: if ret.MessageId != "").
+	returnEmptyMsgID bool
+	// failAtTag, if > 0, causes PublishWithContext to return an error when the
+	// delivery tag of the current publish matches. Used to simulate mid-batch
+	// PublishWithContext failures without affecting other messages in the batch.
+	failAtTag uint64
 }
 
 func newFakePubCh(autoAck bool) *fakePubChannel {
@@ -95,9 +103,17 @@ func (f *fakePubChannel) PublishWithContext(_ context.Context, _, _ string, mand
 		f.mu.Unlock()
 		return err
 	}
+	tag := f.seq - 1 // last tag returned by GetNextPublishSeqNo
+
+	// failAtTag allows individual messages within a batch to be failed at the
+	// PublishWithContext layer without affecting other messages.
+	if f.failAtTag > 0 && tag == f.failAtTag {
+		f.mu.Unlock()
+		return errors.New("simulated targeted publish failure")
+	}
+
 	f.publishes = append(f.publishes, msg)
 	f.mandatories = append(f.mandatories, mandatory)
-	tag := f.seq - 1 // last tag returned by GetNextPublishSeqNo
 	ch := f.confirmCh
 	returnCh := f.returnCh
 	isAutoAck := f.autoAck
@@ -111,6 +127,13 @@ func (f *fakePubChannel) PublishWithContext(_ context.Context, _, _ string, mand
 			replyCode = 312 // NO_ROUTE
 		}
 	}
+
+	// returnEmptyMsgID overrides the MessageId in the return frame with an empty
+	// string, simulating a broker that omits MessageId in basic.return.
+	returnMsgID := msg.MessageId
+	if f.returnEmptyMsgID {
+		returnMsgID = ""
+	}
 	f.mu.Unlock()
 
 	if replyCode != 0 && returnCh != nil {
@@ -121,7 +144,7 @@ func (f *fakePubChannel) PublishWithContext(_ context.Context, _, _ string, mand
 		returnCh <- amqp091.Return{
 			ReplyCode: replyCode,
 			ReplyText: "NO_ROUTE",
-			MessageId: msg.MessageId,
+			MessageId: returnMsgID,
 		}
 	}
 	if isAutoAck && ch != nil {
@@ -721,4 +744,53 @@ func TestAmqpCodeTable_coversAllExpectedCodes(t *testing.T) {
 		assert.True(t, ok, "amqpCodeTable missing code %d", code)
 	}
 	assert.Len(t, amqpCodeTable, len(expected), "amqpCodeTable has unexpected entries")
+}
+
+// TestPublisher_Publish_basicReturn_emptyMessageId_resolvesAsSuccess locks in the
+// documented contract at publisher.go: when a broker sends basic.return with an
+// empty MessageId the return cannot be correlated (the guard `if ret.MessageId != ""`
+// skips it). The subsequent basic.ack must resolve the publish as nil (success),
+// not ErrUnroutable. This prevents a refactor from accidentally removing the guard.
+func TestPublisher_Publish_basicReturn_emptyMessageId_resolvesAsSuccess(t *testing.T) {
+	fake := newFakePubCh(true /* autoAck — sends ack after return */)
+	fake.returnAll = true        // all mandatory publishes trigger a return
+	fake.returnEmptyMsgID = true // but the return carries an empty MessageId
+
+	pub, _, stopPool := newTestPub[testPayload](fake, metrics.NoOpPublisherMetrics{})
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	pub.mandatory = true
+
+	// Even though a basic.return arrives, the empty MessageId means it cannot be
+	// correlated to any in-flight message. The subsequent ack must resolve the
+	// publish as nil (success), not ErrUnroutable.
+	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
+	require.NoError(t, err, "basic.return with empty MessageId must not surface ErrUnroutable")
+}
+
+// TestPublisherConnPool_release_discardsStaleChannel verifies that when the channel
+// closure signal arrives on entry.closeCh while the entry is held, release discards
+// the entry (does not return it to the free queue) while still returning the
+// semaphore token so the pool remains usable.
+func TestPublisherConnPool_release_discardsStaleChannel(t *testing.T) {
+	fake := newFakePubCh(false)
+	pool, stopPool := wireFakePool(fake)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+
+	// Acquire the single pool entry.
+	entry, release, err := pool.acquire(context.Background())
+	require.NoError(t, err)
+
+	// Simulate a channel-level error arriving while the entry is held: send on
+	// closeCh exactly as managedConn does when the AMQP channel closes.
+	entry.closeCh <- &amqp091.Error{Code: 504, Reason: "channel/connection is not open"}
+
+	// Release must detect the signal on closeCh and discard the entry.
+	release()
+
+	// free queue must be empty: the stale entry was discarded, not returned.
+	assert.Equal(t, 0, len(pool.free), "release must discard entry with closed-channel signal")
 }

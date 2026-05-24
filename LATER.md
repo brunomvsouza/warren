@@ -774,3 +774,81 @@ correta depende de ter o contexto do consumer cancel disponível na goroutine de
 
 ---
 
+### LATER-24 — `sync.Map` retém memória interna após batches grandes
+
+**Contexto:** `publisher.go:returnTagMap` — `sync.Map` mantém o estado de cópia de leitura
+interna (`readOnly` + `dirty`) mesmo após todos os pares serem deletados. Após um
+`PublishBatch` com batch grande (ex: 1024 mensagens), a `sync.Map` pode reter capacidade
+interna proporcional ao pico do batch, que é reaproveitada no próximo caller que obtiver o
+mesmo `publisherEntry` via `pool.acquire`.
+
+**Impacto:** Overhead de memória O(peak_batch_size) por entry enquanto o entry não for
+descartado (por fechamento de canal) ou substituído (por reconexão). Em uso normal o GC
+eventualmente libera; não é exploitável remotamente. Não é bloqueante.
+
+**Evidência:** `/ship` security-audit — LOW finding (2026-05-24, mandatory+batch review).
+
+**Sugestão de solução:** Em `publisherConnPool.release`, substituir a `returnTagMap` por uma
+nova `new(sync.Map)` se o batch processado foi maior que um threshold (ex: 256 entries):
+
+```go
+// Em release, após os selects:
+if shouldResetMap(entry.returnTagMap) {
+    entry.returnTagMap = new(sync.Map)
+}
+```
+
+Alternativamente, reavaliar se `returnTagMap` deve ser recriada no `openPublisherEntry` a
+cada canal reaberto (pós-reconexão), já que nesse ponto o estado anterior é inválido de
+qualquer forma.
+
+**Pré-requisitos:** Nenhum. Standalone, mas de baixa prioridade.
+
+---
+
+### LATER-25 — Latência de batch exclui tempo de aquisição de canal na métrica
+
+**Contexto:** `publisher.go:649` — em `PublishBatch`, `msgStart = time.Now()` é definido
+antes de `tracker.Wait` (depois da aquisição do canal). Em `publishOnce`, `start = time.Now()`
+é definido antes de `pool.acquire`. Logo, métricas de latência de batch excluem o tempo de
+espera no pool, enquanto métricas de publish unitário incluem.
+
+**Impacto:** Dashboards que comparam `publisher_publish_latency_seconds` entre publishers
+unitários e em batch vão observar latências sistematicamente menores para batch, mesmo quando
+o tempo de espera no pool é idêntico. Pode induzir operadores a concluir incorretamente que
+batch é mais rápido quando a diferença é de método de medição.
+
+**Evidência:** `/ship` code-review — Suggestion S-2 (2026-05-24, mandatory+batch review).
+
+**Sugestão de solução:** Mover `msgStart = time.Now()` para antes da aquisição do canal em
+`PublishBatch`, ou documentar explicitamente a diferença de semântica no godoc da métrica
+`publisher_publish_latency_seconds` em `metrics/`.
+
+**Pré-requisitos:** Nenhum. Decisão de design a ser tomada ao revisar o contrato da métrica.
+
+---
+
+### LATER-26 — `wireReturnPool` e `wireFakePool` são near-duplicatas
+
+**Contexto:** `publisher_t13_test.go:wireReturnPool` e `publisher_test.go:wireFakePool` —
+ambas implementam o mesmo select goroutine de correlação confirm+return. Diferem apenas na
+assinatura: `wireReturnPool` aceita qualquer `pubChannel` e retorna o tracker separadamente;
+`wireFakePool` é especializada para `*fakePubChannel`. Qualquer mudança futura na lógica do
+goroutine deve ser aplicada em ambos os lugares.
+
+**Impacto:** Risco de divergência silenciosa. Ex: se o guard `if ret.MessageId != ""` for
+atualizado em uma função mas esquecido na outra, os testes exercitariam semânticas diferentes
+da produção.
+
+**Evidência:** `/ship` code-review — Suggestion S-1 (2026-05-24, mandatory+batch review).
+
+**Sugestão de solução:** Extrair o corpo do goroutine para uma função shared unexported
+`runReturnCorrelationLoop(returnCh <-chan amqp091.Return, confirmCh <-chan amqp091.Confirmation,
+rtm *sync.Map, tracker *confirms.Tracker, onReturn func(amqp091.Return))` e ter ambas as
+funções chamá-la. Alternativamente, colapsar `wireReturnPool` em `wireFakePool` com parâmetro
+`pubChannel` genérico e retornar o tracker opcionalmente.
+
+**Pré-requisitos:** Nenhum. Refactoring de teste puro, sem impacto no código de produção.
+
+---
+

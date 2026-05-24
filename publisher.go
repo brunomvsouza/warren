@@ -173,7 +173,14 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 	}
 
 	confirmCh := ch.NotifyPublish(make(chan amqp091.Confirmation, buf))
-	returnCh := ch.NotifyReturn(make(chan amqp091.Return, buf))
+	// returnCh is intentionally unbuffered: the broker's dispatcher blocks on the
+	// send to returnCh, which guarantees that MarkReturned is called before the
+	// subsequent basic.ack is dispatched to confirmCh. This enforces the
+	// return-before-ack ordering at the Go runtime level (mirrors the wire-level
+	// guarantee from RabbitMQ) and prevents the race where both channels are ready
+	// simultaneously in the select loop, causing the ack to be processed first and
+	// silently discarding the ErrUnroutable result.
+	returnCh := ch.NotifyReturn(make(chan amqp091.Return))
 
 	go func() {
 		for {
@@ -433,12 +440,14 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 	pub := buildPublishing(msg, body)
 
 	deliveryTag := entry.ch.GetNextPublishSeqNo()
-	// Register MessageID → deliveryTag before publishing so that any concurrent
-	// basic.return arriving for this message can be correlated by the entry's
-	// goroutine. The deferred Delete is a no-op if LoadAndDelete already removed
-	// the entry (i.e. a return arrived before the confirm).
-	entry.returnTagMap.Store(msg.MessageID, deliveryTag)
-	defer entry.returnTagMap.Delete(msg.MessageID)
+	// Register MessageID → deliveryTag only when mandatory is set: basic.return
+	// frames can only arrive for mandatory publishes. For non-mandatory publishers
+	// the broker never sends basic.return, so storing and deleting would be pure
+	// sync.Map churn on the hot path with no benefit.
+	if p.mandatory {
+		entry.returnTagMap.Store(msg.MessageID, deliveryTag)
+		defer entry.returnTagMap.Delete(msg.MessageID)
+	}
 
 	if err := entry.tracker.Register(deliveryTag); err != nil {
 		p.pm.RecordPublish(exchange, "error", time.Since(start))
@@ -613,18 +622,21 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 		pub := buildPublishing(e.msg, e.body)
 		deliveryTag := entry.ch.GetNextPublishSeqNo()
 
-		// Register MessageID → deliveryTag before publishing so that the entry's
-		// goroutine can correlate any basic.return frame to the correct delivery tag.
-		// The goroutine calls LoadAndDelete on return; entries for successfully-routed
-		// messages (no return ever arrives) are cleaned up in step 4.5 below.
-		entry.returnTagMap.Store(e.msg.MessageID, deliveryTag)
+		// Register MessageID → deliveryTag only when mandatory is set (same
+		// rationale as publishOnce): basic.return frames only arrive for mandatory
+		// publishes. For non-mandatory publishers this is dead code.
+		if p.mandatory {
+			entry.returnTagMap.Store(e.msg.MessageID, deliveryTag)
+		}
 
 		if regErr := entry.tracker.Register(deliveryTag); regErr != nil {
 			// Channel already closed; no publish will happen, so no return can
-			// arrive. Clean up the returnTagMap entry immediately rather than
-			// relying on step 4.5 — the comment there applies only to messages
-			// that were actually published to the broker.
-			entry.returnTagMap.Delete(e.msg.MessageID)
+			// arrive. Clean up the returnTagMap entry immediately (mandatory only)
+			// rather than relying on step 4.5 — the comment there applies only to
+			// messages that were actually published to the broker.
+			if p.mandatory {
+				entry.returnTagMap.Delete(e.msg.MessageID)
+			}
 			results[i].Err = p.mapConfirmError(regErr)
 			continue
 		}
@@ -655,18 +667,21 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 		}
 	}
 
-	// Step 4.5: clean up returnTagMap entries for all messages that were published
-	// to the broker (i.e. passed encoding and Register). For unroutable messages the
-	// goroutine already called LoadAndDelete when the basic.return arrived — those
-	// entries are gone by the time Wait returns (basic.return always precedes
-	// basic.ack, and Wait only returns after the ack). For successfully-routed
-	// messages no return ever arrives, so their entries remain and must be removed
-	// here. For messages that failed at PublishWithContext, their entries were also
-	// never consumed by a return, so they are cleaned up here too.
+	// Step 4.5: clean up returnTagMap entries for mandatory publishers only.
+	// For unroutable messages the goroutine already called LoadAndDelete when the
+	// basic.return arrived — those entries are gone by the time Wait returns
+	// (basic.return always precedes basic.ack on the unbuffered returnCh, and Wait
+	// only returns after the ack). For successfully-routed messages no return ever
+	// arrives, so their entries remain and must be removed here. For messages that
+	// failed at PublishWithContext, their entries were also never consumed by a
+	// return, so they are cleaned up here too. Messages that failed at Register had
+	// their entries removed immediately above (not here).
 	// Delete on a missing key is a no-op in sync.Map.
-	for _, e := range encoded {
-		if e.err == nil {
-			entry.returnTagMap.Delete(e.msg.MessageID)
+	if p.mandatory {
+		for _, e := range encoded {
+			if e.err == nil {
+				entry.returnTagMap.Delete(e.msg.MessageID)
+			}
 		}
 	}
 
