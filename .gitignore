@@ -1,6 +1,8 @@
 # Build & test artifacts
 *.test
 *.out
+/consume
+/examples/consume/consume
 *.prof
 coverage.out
 coverage.html
