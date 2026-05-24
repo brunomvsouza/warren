@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -868,8 +869,8 @@ func (f *fakeAcknowledger) Nack(tag uint64, multiple, requeue bool) error {
 func (f *fakeAcknowledger) Reject(_ uint64, _ bool) error { return nil }
 
 // countingConsumerMetrics counts specific metric increments.
-// cancelledNotify, if non-nil, is closed on the first RecordCancelled call so
-// callers can synchronise without a sleep.
+// cancelledNotify, if non-nil, is closed on the first RecordCancelled call
+// (exactly once, via cancelledOnce) so callers can synchronise without a sleep.
 type countingConsumerMetrics struct {
 	metrics.NoOpConsumerMetrics
 	decodeErrors    int
@@ -877,6 +878,7 @@ type countingConsumerMetrics struct {
 	channelAborts   int
 	cancelled       int
 	cancelledReason string
+	cancelledOnce   sync.Once
 	cancelledNotify chan struct{} // closed on first RecordCancelled call; may be nil
 }
 
@@ -898,8 +900,7 @@ func (c *countingConsumerMetrics) RecordCancelled(_ string, reason string) {
 	c.cancelled++
 	c.cancelledReason = reason
 	if c.cancelledNotify != nil {
-		close(c.cancelledNotify)
-		c.cancelledNotify = nil // prevent double-close on repeated calls
+		c.cancelledOnce.Do(func() { close(c.cancelledNotify) })
 	}
 }
 

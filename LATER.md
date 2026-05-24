@@ -726,3 +726,48 @@ topo := &warren.Topology{
 **Pré-requisitos:** LATER-20 (binding DLX/DLQ), RabbitMQ 3.10+ (quorum queue
 `x-delivery-limit` suportado). CI usa `rabbitmq:3-management` que suporta quorum
 queues desde 3.8.
+
+---
+
+### LATER-22 — Cardinalidade ilimitada do label `reason` em `consumer_cancelled_total`
+
+**Contexto:** `metrics/prometheus.go:183-188`, `consumer.go:276` — o counter
+`consumer_cancelled_total{queue, reason}` usa o **consumer tag** como valor do label
+`reason`. Tags auto-geradas seguem o padrão `ctag-<uuidv7>`: cada consumer recebe
+um UUID único ao ser criado, e cada restart gera um novo UUID. Cada par único
+`(queue, reason)` cria uma nova série temporal no Prometheus, sem limite superior.
+
+O protocolo AMQP 0-9-1 não inclui um campo de causa no frame `basic.cancel` — apenas
+`consumer-tag` (shortstr) e `no-wait` (bit). A função `ch.NotifyCancel` do amqp091-go
+retorna o consumer tag. Não há como obter "queue deleted" diretamente do frame.
+
+O SPEC §1086 descreve `reason` como `e.g. "queue deleted"`, sugerindo um conjunto
+fechado de causas humanas. Esse texto é aspiracional: o protocolo não fornece a causa.
+
+**Impacto:** Em ambientes com muitos restarts (Kubernetes, falhas intermitentes), a
+cardinalidade cresce indefinidamente → Prometheus OOM ou degradação de storage. O
+cenário crítico é: consumers com UUIDs auto-gerados que são cancelados (queue deletada,
+exclusive revoked) e recriados em loop.
+
+**Evidência:** Identificado durante revisão `/ship` do commit `884cf44` (T19), eixo
+Segurança/Performance. Não é bloqueador para T19 porque o counter está correto
+protocolarmente; o problema é de operabilidade a longo prazo.
+
+**Sugestão de solução:** Quando T36 implementar o ciclo completo de `basic.cancel`
+(`OnCancel`, `ErrConsumerCancelled`, retorno de `Consume`), avaliar uma das abordagens:
+
+1. **Normalizar `reason` para um enum fixo**: mapear o consumer tag recebido para uma
+   causa derivável do contexto (e.g., checar se a queue existe após o cancel via
+   `amqp091.Channel.QueueInspect`; se não existir → `"queue_deleted"`; se existir →
+   `"exclusive_revoked"`; default `"unknown"`). Isso mantém cardinalidade O(1).
+
+2. **Remover `reason` do label do counter e expô-lo apenas no log**: o label `{queue}`
+   já identifica o recurso afetado; o consumer tag no log (com `queue`, `tag`, causa
+   inferida) fornece rastreabilidade sem inflar o cardinality set.
+
+3. **Documentar o risco no godoc de `NewPrometheusConsumerMetrics`**: se a mudança for
+   considerada breaking change, ao menos alertar operadores sobre a cardinalidade.
+
+**Pré-requisitos:** T36 (ciclo completo de `basic.cancel`). Não atacar antes: a solução
+correta depende de ter o contexto do consumer cancel disponível na goroutine de
+`openDeliveryCh`, que T36 vai refatorar.

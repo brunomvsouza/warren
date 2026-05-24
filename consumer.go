@@ -61,9 +61,10 @@ type Consumer[M any] struct {
 	deliveryCh chan amqp091.Delivery
 
 	// basicCancelCh is a test-injection hook for basic.cancel notifications.
-	// When non-nil and deliveryCh is also set, the goroutine in openDeliveryCh
-	// selects on basicCancelCh to simulate broker-initiated consumer cancellation
-	// and calls cm.RecordCancelled with the received consumer tag.
+	// When non-nil, ConsumeRaw's main select loop picks it up and calls
+	// cm.RecordCancelled with the received consumer tag. A nil channel is never
+	// selected in Go, so production code (where basicCancelCh is always nil) is
+	// unaffected.
 	basicCancelCh chan string
 
 	// deliverySubOverride is a full test-injection hook: when non-nil, openDeliveryCh
