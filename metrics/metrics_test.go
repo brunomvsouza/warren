@@ -65,6 +65,7 @@ func TestNoOpConsumerMetrics_zeroAllocs(t *testing.T) {
 		m.RecordHandler("orders", "ack", 3*time.Millisecond)
 		m.RecordReplierDropNoDLX("orders")
 		m.RecordCancelled("orders", "broker_initiated")
+		m.RecordMaxRedeliveries("orders", "x-death")
 	}))
 }
 
@@ -184,6 +185,7 @@ func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
 	m.RecordHandler("orders", "ack", 5*time.Millisecond)
 	m.RecordReplierDropNoDLX("requests")
 	m.RecordCancelled("orders", "broker_initiated")
+	m.RecordMaxRedeliveries("orders", "x-death")
 
 	names := gatherNames(t, reg)
 	assert.Contains(t, names, "consumer_resubscribed_total")
@@ -192,6 +194,53 @@ func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
 	assert.Contains(t, names, "consumer_handler_seconds")
 	assert.Contains(t, names, "replier_drop_no_dlx_total")
 	assert.Contains(t, names, "consumer_cancelled_total")
+	assert.Contains(t, names, "consumer_max_redeliveries_total")
+}
+
+func TestPrometheusConsumerMetrics_maxRedeliveriesTotal(t *testing.T) {
+	// RecordMaxRedeliveries must increment consumer_max_redeliveries_total{queue,cause}.
+	reg := prometheus.NewRegistry()
+	m, err := metrics.NewPrometheusConsumerMetrics(reg, nil)
+	require.NoError(t, err)
+
+	m.RecordMaxRedeliveries("orders", "x-death")
+	m.RecordMaxRedeliveries("orders", "x-death")
+	m.RecordMaxRedeliveries("orders", "in-process")
+
+	names := gatherNames(t, reg)
+	assert.Contains(t, names, "consumer_max_redeliveries_total")
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+
+	var xDeathVal, inProcessVal float64
+	for _, mf := range mfs {
+		if mf.GetName() != "consumer_max_redeliveries_total" {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			var q, cause string
+			for _, lp := range metric.GetLabel() {
+				switch lp.GetName() {
+				case "queue":
+					q = lp.GetValue()
+				case "cause":
+					cause = lp.GetValue()
+				}
+			}
+			if q != "orders" {
+				continue
+			}
+			switch cause {
+			case "x-death":
+				xDeathVal = metric.GetCounter().GetValue()
+			case "in-process":
+				inProcessVal = metric.GetCounter().GetValue()
+			}
+		}
+	}
+	assert.InDelta(t, 2.0, xDeathVal, 0.001, "x-death counter must be 2")
+	assert.InDelta(t, 1.0, inProcessVal, 0.001, "in-process counter must be 1")
 }
 
 func TestPrometheusConsumerMetrics_cancelledTotalIncrement(t *testing.T) {
@@ -262,6 +311,7 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		conm.RecordHandler("orders", "ack", time.Duration(i+1)*time.Millisecond)
 		conm.RecordReplierDropNoDLX("requests")
 		conm.RecordCancelled("orders", "broker_initiated")
+		conm.RecordMaxRedeliveries("orders", "x-death")
 	}
 
 	names := gatherNames(t, reg)
@@ -280,6 +330,7 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		"consumer_handler_seconds",
 		"replier_drop_no_dlx_total",
 		"consumer_cancelled_total",
+		"consumer_max_redeliveries_total",
 	}
 	for _, name := range mandatory {
 		assert.Contains(t, names, name, "mandatory metric %q missing from gathered output", name)
@@ -319,5 +370,6 @@ func BenchmarkNoOpConsumerMetrics(b *testing.B) {
 		m.RecordHandler("orders", "ack", 3*time.Millisecond)
 		m.RecordReplierDropNoDLX("orders")
 		m.RecordCancelled("orders", "ctag-test")
+		m.RecordMaxRedeliveries("orders", "x-death")
 	}
 }

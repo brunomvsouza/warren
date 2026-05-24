@@ -1,6 +1,10 @@
 package headers
 
-import amqp091 "github.com/rabbitmq/amqp091-go"
+import (
+	"math"
+
+	amqp091 "github.com/rabbitmq/amqp091-go"
+)
 
 // XDeathResult holds the parsed x-death header for a given delivery queue.
 type XDeathResult struct {
@@ -51,6 +55,12 @@ func ParseXDeath(tbl amqp091.Table, queue string) XDeathResult {
 		count, _ := entry["count"].(int64)
 		if count < 0 {
 			count = 0
+		}
+		// Cap to math.MaxInt to prevent int overflow on 32-bit platforms.
+		// x-death counts legitimately exceeding this bound are treated as MaxInt,
+		// which still exceeds any practical MaxRedeliveries ceiling.
+		if count > math.MaxInt {
+			count = math.MaxInt
 		}
 
 		if _, seen := result.byReason[reason]; !seen {

@@ -323,10 +323,9 @@ func TestConsumer_MaxRedeliveries_CounterB_ChannelClose_ResetsCounter(t *testing
 	}
 
 	// Verify counter B has count=2 for msgID.
-	// Key is now just the MessageID (chanID prefix removed — each redeliveryCounter
-	// owns its own sync.Map so no cross-channel collision is possible).
+	// Key is "mid:<MessageID>" (namespaced to avoid collision with fallback "dlv:" keys).
 	cs := c.counterState.Load()
-	v, ok := cs.m.Load(msgID)
+	v, ok := cs.m.Load("mid:" + msgID)
 	require.True(t, ok, "counter B entry must exist for msgID after 2 requeues")
 	assert.Equal(t, int64(2), v.(int64))
 
@@ -532,6 +531,156 @@ func TestConsumer_MaxRedeliveries_Disabled_NoIntercept(t *testing.T) {
 	}
 	<-consumeDone
 	assert.Equal(t, 5, requeued, "all deliveries must be Nack(requeue=true) when MaxRedeliveries=0")
+}
+
+// — Counter B: empty MessageID uses non-stable fallback key ——————————————
+
+func TestConsumer_MaxRedeliveries_CounterB_EmptyMessageID_FallbackKey(t *testing.T) {
+	// When MessageID is empty, counter B uses "dlv:<consumerTag>:<deliveryTag>" as the key.
+	// Delivery tags change on each redelivery, so the counter never accumulates — counter B
+	// is effectively disabled for these messages and must NOT rewrite the verdict.
+	defer goleak.VerifyNone(t)
+
+	const n = 3
+	conn := newFakeConsumerConn(t)
+	cm := &maxRedeliveriesCountingMetrics{}
+	c, err := ConsumerFor[string](conn).
+		Queue("testq").
+		MaxRedeliveries(n).
+		Metrics(cm).
+		Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, n+2)
+	c.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var nackCalls []bool
+	var mu sync.Mutex
+
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = c.Consume(ctx, func(_ context.Context, _ string) error { return ErrRequeue })
+	}()
+
+	// Send n+1 deliveries with NO MessageID but distinct DeliveryTags (simulating redeliveries).
+	// Each delivery gets a fresh fallback key → counter never accumulates → all stay requeued.
+	lastNack := make(chan struct{})
+	for i := range n + 1 {
+		isLast := i == n
+		deliveryCh <- amqp091.Delivery{
+			Body:        []byte(`"hello"`),
+			MessageId:   "", // intentionally empty
+			DeliveryTag: uint64(i + 1),
+			Acknowledger: &fakeAcknowledger{
+				nackFn: func(_ uint64, _, requeue bool) error {
+					mu.Lock()
+					nackCalls = append(nackCalls, requeue)
+					if isLast {
+						close(lastNack)
+					}
+					mu.Unlock()
+					return nil
+				},
+			},
+		}
+	}
+
+	select {
+	case <-lastNack:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for last nack")
+	}
+	cancel()
+	<-consumeDone
+
+	mu.Lock()
+	defer mu.Unlock()
+	for i, requeue := range nackCalls {
+		assert.True(t, requeue,
+			"delivery %d: empty MessageID → fallback key is not stable across redeliveries → must remain Nack(requeue=true)", i+1)
+	}
+	assert.Equal(t, 0, cm.maxRedeliveries["in-process"],
+		"counter B must NOT fire when MessageID is absent (fallback key changes per delivery)")
+}
+
+// — Counter B: wrapped ErrRequeue via fmt.Errorf is detected correctly ——
+
+func TestConsumer_MaxRedeliveries_CounterB_WrappedErrRequeue(t *testing.T) {
+	// errors.Is(err, ErrRequeue) must match even when ErrRequeue is wrapped.
+	// A handler that returns fmt.Errorf("ctx: %w", ErrRequeue) must accumulate in counter B.
+	defer goleak.VerifyNone(t)
+
+	const n = 3
+	conn := newFakeConsumerConn(t)
+	cm := &maxRedeliveriesCountingMetrics{}
+	c, err := ConsumerFor[string](conn).
+		Queue("testq").
+		MaxRedeliveries(n).
+		Metrics(cm).
+		Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, n+2)
+	c.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var nackCalls []bool
+	var mu sync.Mutex
+
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = c.Consume(ctx, func(_ context.Context, _ string) error {
+			// Wrap ErrRequeue like a real handler that also includes context.
+			return fmt.Errorf("transient failure: %w", ErrRequeue)
+		})
+	}()
+
+	lastNack := make(chan struct{})
+	for i := range n + 1 {
+		isLast := i == n
+		deliveryCh <- amqp091.Delivery{
+			Body:      []byte(`"hello"`),
+			MessageId: "wrapped-requeue-msg",
+			Acknowledger: &fakeAcknowledger{
+				nackFn: func(_ uint64, _, requeue bool) error {
+					mu.Lock()
+					nackCalls = append(nackCalls, requeue)
+					if isLast {
+						close(lastNack)
+					}
+					mu.Unlock()
+					return nil
+				},
+			},
+		}
+	}
+
+	select {
+	case <-lastNack:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for last nack")
+	}
+	cancel()
+	<-consumeDone
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Len(t, nackCalls, n+1, "expected %d nack calls (n requeue + 1 dead-letter)", n+1)
+	// First n calls: Nack(requeue=true)
+	for i := range n {
+		assert.True(t, nackCalls[i], "delivery %d: wrapped ErrRequeue must Nack(requeue=true)", i+1)
+	}
+	// (n+1)-th call: counter B fires → Nack(requeue=false)
+	assert.False(t, nackCalls[n], "delivery %d: counter B must rewrite to Nack(requeue=false) on wrapped ErrRequeue", n+1)
+	assert.Equal(t, 1, cm.maxRedeliveries["in-process"], "counter B must fire once for wrapped ErrRequeue")
 }
 
 // — Map leak stress test ——————————————————————————————————————————————

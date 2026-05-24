@@ -35,11 +35,15 @@ type deliverySub struct {
 // redeliveryCounter holds per-channel in-process redelivery state (counter B).
 // A new instance is created on every channel open so that channel close automatically
 // "drops" the old counts — delivery tags from a previous channel cannot bleed over.
-// The map is keyed by MessageID (or a fallback delivery-tag string when MessageID is absent).
-// No chanID prefix is needed: each redeliveryCounter owns its own sync.Map, so keys are
+//
+// Key families (namespaced to prevent collision):
+//   - "mid:<MessageID>"             when MessageID is present (stable across redeliveries)
+//   - "dlv:<consumerTag>:<tag>"     fallback when MessageID is absent (delivery-tag-based, not stable)
+//
+// No chanID prefix is needed: each redeliveryCounter instance owns its own sync.Map, so keys are
 // implicitly scoped to the channel that created this instance.
 type redeliveryCounter struct {
-	m sync.Map // key: MessageID or "_dlv_<tag>_<deliveryTag>", value: int64
+	m sync.Map // key: "mid:<MessageID>" or "dlv:<tag>:<deliveryTag>", value: int64
 }
 
 // Consumer receives AMQP messages from a single queue, decodes each payload
@@ -157,7 +161,12 @@ func (c *Consumer[M]) Consume(ctx context.Context, h Handler[M]) error {
 
 // ConsumeRaw starts consuming, passing the full Delivery envelope to h.
 // The raw handler is responsible for calling d.Ack(), d.Nack(), or d.AckIf()
-// to acknowledge the delivery. The consumer does NOT auto-ack.
+// to acknowledge the delivery. The consumer does NOT auto-ack on handler return.
+//
+// Exception — HandlerTimeout: if HandlerTimeout is configured and the deadline fires,
+// the consumer still issues a Nack automatically to prevent unacknowledged deliveries
+// from accumulating. The handler is free to call Ack/Nack before the deadline;
+// if it does so, the library's Nack on timeout will be a no-op (broker de-duplicates).
 //
 // Use ConsumeRaw to access envelope fields (Headers, Redelivered, DeathCount)
 // or to implement custom ack strategies. For most workloads, Consume is simpler.
@@ -401,11 +410,16 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 	var cs *redeliveryCounter
 	if autoAck && c.maxRedeliveries > 0 && !c.counterBDisabled {
 		cs = c.counterState.Load()
-		counterBKey = raw.MessageId
-		if counterBKey == "" {
+		if raw.MessageId != "" {
+			// Stable key: MessageID persists across redeliveries → counter accumulates correctly.
+			// "mid:" prefix ensures no collision with the delivery-tag-based fallback family.
+			counterBKey = "mid:" + raw.MessageId
+		} else {
 			// No stable MessageID: use delivery tag as a unique-but-non-stable key.
+			// "dlv:" prefix ensures no collision with the "mid:" family even if a publisher
+			// crafts a MessageID that looks like a delivery-tag key.
 			// Counter B will not accumulate across redeliveries for these messages.
-			counterBKey = fmt.Sprintf("_dlv_%s_%d", c.tag, raw.DeliveryTag)
+			counterBKey = fmt.Sprintf("dlv:%s:%d", c.tag, raw.DeliveryTag)
 		}
 	}
 
@@ -573,7 +587,9 @@ func handlerOutcome(err error) string {
 func safeDecodeConsumer(c codec.Codec, payload []byte, out any) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("%w: codec panic: %v", ErrInvalidMessage, r)
+			// Use %T (type only) rather than %v to avoid embedding payload data in the
+			// error message; the panic value may carry message content from a custom codec.
+			err = fmt.Errorf("%w: codec panic: %T", ErrInvalidMessage, r)
 		}
 	}()
 	return c.Decode(payload, out)

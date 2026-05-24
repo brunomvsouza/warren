@@ -476,6 +476,57 @@ func TestConsumeRaw_DecodeFailure_NackNoRequeue(t *testing.T) {
 		"handler must NOT be called when decode fails")
 }
 
+// TestConsumeRaw_WithHandlerTimeout_TimeoutFires_AutoNacks verifies the documented
+// exception: even in ConsumeRaw mode, if HandlerTimeout fires the consumer issues a
+// Nack automatically to prevent unacknowledged delivery accumulation.
+func TestConsumeRaw_WithHandlerTimeout_TimeoutFires_AutoNacks(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	c, err := ConsumerFor[string](conn).
+		Queue("testq").
+		HandlerTimeout(50 * time.Millisecond). // short timeout so the test is fast
+		Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	c.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	nacked := make(chan bool, 1) // receives the requeue flag
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = c.ConsumeRaw(ctx, func(hCtx context.Context, _ *Delivery[string]) error {
+			// Block until the handler context is cancelled (timeout fires).
+			<-hCtx.Done()
+			return nil
+		})
+	}()
+
+	deliveryCh <- amqp091.Delivery{
+		Body: []byte(`"hello"`),
+		Acknowledger: &fakeAcknowledger{
+			nackFn: func(_ uint64, _, requeue bool) error {
+				nacked <- requeue
+				cancel()
+				return nil
+			},
+		},
+	}
+
+	select {
+	case requeue := <-nacked:
+		// Exception: HandlerTimeout fires a Nack even for ConsumeRaw.
+		assert.False(t, requeue, "HandlerTimeout default verdict is NackNoRequeue")
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected Nack from HandlerTimeout in ConsumeRaw mode")
+	}
+	<-consumeDone
+}
+
 // TestConsumeRaw_ReturnError_NotAutoAcked verifies that a non-nil return error from
 // a ConsumeRaw handler does NOT trigger auto-ack/nack — unlike Consume where the
 // error drives the verdict.
