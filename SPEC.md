@@ -825,12 +825,17 @@ Semantics:
 - **`basic.return` / `basic.ack` correlation for mandatory publishes.**
   For an unroutable mandatory publish, RabbitMQ sends `basic.return`
   *first*, then `basic.ack` (the broker acks because *it* handled the
-  message — by returning it). The confirm tracker correlates the two
-  frames by `delivery-tag`: when an ack arrives for a `delivery-tag`
-  that already saw a return, `Publish` resolves with `ErrUnroutable`
-  rather than success. The `OnReturn` callback fires synchronously
-  before `Publish` unblocks, so users can inspect the rejection
-  before the publish path completes.
+  message — by returning it). For **`Publish`** (single message) the
+  confirm tracker correlates the two frames by `delivery-tag`: when an
+  ack arrives for a `delivery-tag` that already saw a return, `Publish`
+  resolves with `ErrUnroutable` rather than success. The `OnReturn`
+  callback fires synchronously before `Publish` unblocks. For
+  **`PublishBatch`** with `Mandatory()`, multiple `basic.return` frames
+  can arrive for different messages before any ack is processed; the
+  library correlates each return to its delivery-tag via `MessageID`
+  (a UUIDv7 auto-stamped by `applyDefaults` when `Message.MessageID`
+  is empty). Per-message `ErrUnroutable` results are independent: a
+  batch can have some slots succeed and others fail routing.
 - **No double-acknowledgement guarantee.** AMQP `basic.ack` from
   broker → publisher means "the broker took responsibility" (queued
   for routing). It does *not* guarantee the message is persisted to
@@ -845,6 +850,13 @@ Semantics:
   `ErrPublishNacked`, `ErrUnroutable`, `ErrChannelClosed` (if the
   channel died mid-batch and unconfirmed publishes were not
   resolved), and `ErrInvalidMessage` (client-side validation).
+- **`PublishBatch` supports `Mandatory()`.** When the publisher is
+  configured with `Mandatory()`, each message in the batch is
+  published with the mandatory flag set. Unroutable messages produce
+  `ErrUnroutable` in their result slot (via the `MessageID`-based
+  return correlation described above); routable messages succeed
+  independently. `OnReturn` fires for each returned message, before
+  the corresponding slot is resolved.
 - **Channel-close mid-batch recovery contract.** If the channel
   dies between `basic.publish` and confirm receipt for some
   subset of the batch, each affected `PublishResult.Err` is
@@ -2447,10 +2459,19 @@ the next reader so the rationale survives the conversation:
 
 14. **Mandatory + `basic.return` correlation.** RabbitMQ sends
     `basic.return` before `basic.ack` for unroutable mandatory
-    publishes. The confirm tracker correlates the two frames by
-    `delivery-tag` and resolves the publish as `ErrUnroutable`
-    rather than success, with `OnReturn` firing synchronously before
-    `Publish` unblocks.
+    publishes. For `Publish` (single message), the confirm tracker
+    correlates the two frames by `delivery-tag` and resolves the
+    publish as `ErrUnroutable` rather than success, with `OnReturn`
+    firing synchronously before `Publish` unblocks. For
+    `PublishBatch`, correlation is done via `MessageID` rather than
+    `delivery-tag` because multiple `basic.return` frames for
+    different batch messages can arrive before the corresponding acks;
+    a single `delivery-tag` slot cannot distinguish them. The library
+    stores a `MessageID → delivery-tag` map per channel entry before
+    each batch publish; the return goroutine looks up and removes the
+    entry on each `basic.return`. `Message.MessageID` is
+    auto-populated (UUIDv7) when left empty, so every message always
+    has a unique key without caller effort.
 
 15. **`NoWait=true` on topology declares disables synchronous
     mismatch detection.** A mismatch with `NoWait=true` surfaces only
