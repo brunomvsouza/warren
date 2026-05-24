@@ -140,20 +140,38 @@ func connIndexForTag(tag string, n int) int {
 
 // Consume starts consuming from the configured queue, decoding each message
 // and dispatching to h. It blocks until ctx is cancelled.
+//
+// The consumer automatically acks (nil return), nacks without requeue (any
+// non-ErrRequeue error), or nacks with requeue (errors.Is(err, ErrRequeue)).
 // May only be called once per consumer; create a new consumer to restart.
 // Cancelling ctx waits for all in-flight handlers to return; set HandlerTimeout
 // to bound shutdown latency when handlers may block indefinitely.
 func (c *Consumer[M]) Consume(ctx context.Context, h Handler[M]) error {
-	return c.ConsumeRaw(ctx, func(innerCtx context.Context, d *Delivery[M]) error {
+	// Wrap the typed handler so dispatch can auto-ack based on the return value.
+	wrapped := func(innerCtx context.Context, d *Delivery[M]) error {
 		return h(innerCtx, *d.Body())
-	})
+	}
+	return c.runConsume(ctx, wrapped, true /* autoAck */)
 }
 
 // ConsumeRaw starts consuming, passing the full Delivery envelope to h.
+// The raw handler is responsible for calling d.Ack(), d.Nack(), or d.AckIf()
+// to acknowledge the delivery. The consumer does NOT auto-ack.
+//
+// Use ConsumeRaw to access envelope fields (Headers, Redelivered, DeathCount)
+// or to implement custom ack strategies. For most workloads, Consume is simpler.
+//
 // May only be called once per consumer; create a new consumer to restart.
 // Cancelling ctx waits for all in-flight handlers to return; set HandlerTimeout
 // to bound shutdown latency when handlers may block indefinitely.
 func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error {
+	return c.runConsume(ctx, h, false /* autoAck */)
+}
+
+// runConsume is the shared loop for Consume and ConsumeRaw.
+// autoAck=true: dispatch applies MaxRedeliveries counter B and calls d.AckIf based on handler error.
+// autoAck=false: dispatch skips counter B and d.AckIf; handler is responsible for acking.
+func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck bool) error {
 	if !c.started.CompareAndSwap(false, true) {
 		return fmt.Errorf("%w: consumer already started; create a new consumer via Build() to restart", ErrInvalidOptions)
 	}
@@ -223,7 +241,7 @@ func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error {
 			go func(raw amqp091.Delivery, chanDone <-chan struct{}) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				c.dispatch(ctx, chanDone, raw, h)
+				c.dispatch(ctx, chanDone, raw, h, autoAck)
 			}(d, chanDone)
 		}
 	}
@@ -341,7 +359,10 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 //
 // chanDone is nil when channel-close detection is not available (test injection path);
 // a nil receive case in a Go select is never ready, so the chanDone case is safely disabled.
-func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, raw amqp091.Delivery, h RawHandler[M]) {
+//
+// autoAck=true (Consume path): counter B applied; d.AckIf called with the verdict.
+// autoAck=false (ConsumeRaw path): counter B skipped; handler is responsible for acking.
+func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, raw amqp091.Delivery, h RawHandler[M], autoAck bool) {
 	var body M
 	if err := safeDecodeConsumer(c.codec, raw.Body, &body); err != nil {
 		c.cm.RecordHandler(c.queue, "decode_error", 0)
@@ -365,13 +386,13 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 	}
 
 	// — Counter B key (in-process, per channel) ————————————————————————
-	// Capture the current channel's state atomically at dispatch start.
-	// This snapshot is stable for the lifetime of this dispatch goroutine;
-	// if the channel reconnects mid-handler, new dispatches get a fresh
-	// redeliveryCounter while this goroutine still works with the old one.
+	// Only applies on the autoAck=true (Consume) path. ConsumeRaw handlers
+	// control their own acking, so counter B cannot safely intercept the verdict.
+	// Capture the current channel's state atomically at dispatch start so that
+	// a mid-handler reconnect does not corrupt the counter map reference.
 	var counterBKey string
 	var cs *redeliveryCounter
-	if c.maxRedeliveries > 0 && !c.counterBDisabled {
+	if autoAck && c.maxRedeliveries > 0 && !c.counterBDisabled {
 		cs = c.counterState.Load()
 		msgID := raw.MessageId
 		if msgID == "" {
@@ -414,9 +435,14 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
 			return // no ack — broker will redeliver
 		}
-		processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
-		c.cm.RecordHandler(c.queue, handlerOutcome(processedErr), elapsed)
-		_ = d.AckIf(processedErr)
+		if autoAck {
+			processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
+			c.cm.RecordHandler(c.queue, handlerOutcome(processedErr), elapsed)
+			_ = d.AckIf(processedErr)
+		} else {
+			// ConsumeRaw: handler is responsible for ack/nack.
+			c.cm.RecordHandler(c.queue, "raw", elapsed)
+		}
 		return
 	}
 
@@ -442,9 +468,13 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
 			return
 		}
-		processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
-		c.cm.RecordHandler(c.queue, handlerOutcome(processedErr), elapsed)
-		_ = d.AckIf(processedErr)
+		if autoAck {
+			processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
+			c.cm.RecordHandler(c.queue, handlerOutcome(processedErr), elapsed)
+			_ = d.AckIf(processedErr)
+		} else {
+			c.cm.RecordHandler(c.queue, "raw", elapsed)
+		}
 
 	case <-chanDone: // nil channel: never selected when chanDone is nil
 		elapsed := time.Since(start)
