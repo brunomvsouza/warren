@@ -401,11 +401,7 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 	// control their own acking, so counter B cannot safely intercept the verdict.
 	// Capture the current channel's state atomically at dispatch start so that
 	// a mid-handler reconnect does not corrupt the counter map reference.
-	//
-	// Key is MessageID when present (stable across redeliveries → counter accumulates
-	// correctly). Fallback is _dlv_<consumerTag>_<deliveryTag> when MessageID is absent;
-	// delivery tags are unique within a channel but change on redelivery, so counter B
-	// is effectively disabled for those messages (each delivery gets a fresh key).
+	// Key families: see redeliveryCounter struct comment.
 	var counterBKey string
 	var cs *redeliveryCounter
 	if autoAck && c.maxRedeliveries > 0 && !c.counterBDisabled {

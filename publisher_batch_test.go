@@ -99,6 +99,42 @@ func TestPublishBatch_AllSuccess(t *testing.T) {
 	assert.Len(t, fake.publishes, n, "expected %d broker publishes", n)
 }
 
+// TestPublishBatch_MessageTooLarge verifies that messages exceeding
+// maxMessageSizeBytes are rejected with ErrMessageTooLarge (wrapped as
+// ErrInvalidMessage), while the rest of the batch proceeds normally.
+func TestPublishBatch_MessageTooLarge(t *testing.T) {
+	fake := newFakePubCh(true /* autoAck */)
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	// {"value":"ok"} = 14 bytes; {"value":"toolarge!!!"} = 23 bytes.
+	// Set cap to 15 bytes so small messages pass and the large one is rejected.
+	pub.maxMessageSizeBytes = 15
+
+	msgs := []Message[testPayload]{
+		{Body: &testPayload{Value: "ok"}},          // 14 bytes — fits
+		{Body: &testPayload{Value: "toolarge!!!"}}, // 23 bytes — rejected
+		{Body: &testPayload{Value: "ok"}},          // 14 bytes — fits
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrPartialBatch), "overall error must wrap ErrPartialBatch, got %v", err)
+	require.Len(t, results, 3)
+
+	assert.NoError(t, results[0].Err, "result[0] (small) must succeed")
+	assert.True(t, errors.Is(results[1].Err, ErrMessageTooLarge),
+		"result[1] (too large) must be ErrMessageTooLarge, got %v", results[1].Err)
+	assert.NoError(t, results[2].Err, "result[2] (small) must succeed")
+
+	// Only the two valid messages should reach the broker.
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Len(t, fake.publishes, 2, "only 2 valid messages must reach the broker")
+}
+
 // TestPublishBatch_PartialFailure_InvalidMessage verifies the always-all contract:
 // client-side rejections (invalid Headers type) do not abort the batch; valid
 // messages proceed and the overall error wraps ErrPartialBatch.

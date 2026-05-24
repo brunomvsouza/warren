@@ -66,10 +66,22 @@ func ParseXDeath(tbl amqp091.Table, queue string) XDeathResult {
 		if _, seen := result.byReason[reason]; !seen {
 			result.Reasons = append(result.Reasons, reason)
 		}
-		result.byReason[reason] += int(count)
+		// Saturate the accumulated sum so that multiple entries for the same
+		// reason cannot overflow int on 32-bit platforms (math.MaxInt = 2^31-1
+		// there). Any value exceeding MaxInt still exceeds any practical
+		// MaxRedeliveries ceiling, so saturation is semantically correct.
+		newByReason := result.byReason[reason] + int(count)
+		if newByReason < 0 {
+			newByReason = math.MaxInt
+		}
+		result.byReason[reason] = newByReason
 
 		if reason == "rejected" || reason == "delivery-limit" {
-			result.Count += int(count)
+			newCount := result.Count + int(count)
+			if newCount < 0 {
+				newCount = math.MaxInt
+			}
+			result.Count = newCount
 		}
 	}
 	return result

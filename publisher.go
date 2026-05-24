@@ -321,35 +321,9 @@ func (p *Publisher[M]) Publish(ctx context.Context, msg Message[M]) error {
 		defer cancel()
 	}
 
-	if err := msg.applyDefaults(p.codec); err != nil {
-		return err
-	}
-	if err := msg.validateHeaders(); err != nil {
-		return err
-	}
-
-	// StampUserID: auto-set UserID from the authenticated connection identity.
-	if p.stampUserID && msg.UserID == "" {
-		msg.UserID = p.authUser
-	}
-
-	// Client-side UserID validation: if caller set a UserID that doesn't match
-	// the connection identity, reject locally without writing a publish frame.
-	// This prevents the 406-channel-close footgun from a mismatched stamp.
-	if msg.UserID != "" && p.authUser != "" && msg.UserID != p.authUser {
-		return fmt.Errorf("%w: UserID %q does not match the authenticated connection identity", ErrInvalidMessage, msg.UserID)
-	}
-
-	body, err := p.codec.Encode(msg.Body)
+	msg, body, err := p.encodeMsg(msg)
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidMessage, err)
-	}
-
-	// Local payload guardrail: reject before opening a channel so the publisher
-	// never allocates broker-side frame buffers for a body it knows is too large.
-	if p.maxMessageSizeBytes > 0 && len(body) > p.maxMessageSizeBytes {
-		p.pm.RecordPublish(p.exchange, "too_large", 0)
-		return fmt.Errorf("%w: encoded body is %d bytes (cap %d)", ErrMessageTooLarge, len(body), p.maxMessageSizeBytes)
+		return err
 	}
 
 	var attempt int
@@ -375,6 +349,45 @@ func (p *Publisher[M]) Publish(ctx context.Context, msg Message[M]) error {
 		case <-timer.C:
 		}
 	}
+}
+
+// encodeMsg applies defaults, validates headers, stamps/validates UserID, encodes
+// the body, and enforces the per-message size cap. It is the single choke-point
+// for all client-side validation so that Publish and PublishBatch stay in sync.
+// Returns the (possibly mutated) message, the encoded body, and any validation error.
+func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
+	if err := msg.applyDefaults(p.codec); err != nil {
+		return msg, nil, err
+	}
+	if err := msg.validateHeaders(); err != nil {
+		return msg, nil, err
+	}
+
+	// StampUserID: auto-set UserID from the authenticated connection identity.
+	if p.stampUserID && msg.UserID == "" {
+		msg.UserID = p.authUser
+	}
+
+	// Client-side UserID validation: if caller set a UserID that doesn't match
+	// the connection identity, reject locally without writing a publish frame.
+	// This prevents the 406-channel-close footgun from a mismatched stamp.
+	if msg.UserID != "" && p.authUser != "" && msg.UserID != p.authUser {
+		return msg, nil, fmt.Errorf("%w: UserID %q does not match the authenticated connection identity", ErrInvalidMessage, msg.UserID)
+	}
+
+	body, err := p.codec.Encode(msg.Body)
+	if err != nil {
+		return msg, nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
+	}
+
+	// Local payload guardrail: reject before opening a channel so the publisher
+	// never allocates broker-side frame buffers for a body it knows is too large.
+	if p.maxMessageSizeBytes > 0 && len(body) > p.maxMessageSizeBytes {
+		p.pm.RecordPublish(p.exchange, "too_large", 0)
+		return msg, nil, fmt.Errorf("%w: encoded body is %d bytes (cap %d)", ErrMessageTooLarge, len(body), p.maxMessageSizeBytes)
+	}
+
+	return msg, body, nil
 }
 
 // publishOnce performs a single publish attempt (no retry logic).
@@ -443,7 +456,16 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 //   - ErrUnroutable (mandatory publish returned via basic.return then acked)
 //   - ErrChannelClosed (channel died before confirm arrived)
 //
-// If any message fails, the overall error wraps ErrPartialBatch.
+// If any message fails, the overall error wraps ErrPartialBatch. Note that when a
+// connection-level error occurs (e.g. ErrReconnecting, ErrChannelPoolExhausted),
+// results is nil and err is the connection-level error — no per-message results are
+// available because no messages were sent to the broker.
+//
+// # PublishTimeout
+//
+// PublishTimeout configured on the publisher is NOT applied to PublishBatch.
+// If a per-batch deadline is needed, wrap ctx with context.WithTimeout before
+// calling PublishBatch.
 //
 // # Channel-close recovery
 //
@@ -485,7 +507,9 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 	results := make([]PublishResult, len(msgs))
 
 	// Step 1: client-side validation and encoding for all messages up front.
-	// This avoids holding the channel while doing CPU work.
+	// encodeMsg is the single choke-point for validation so Publish and
+	// PublishBatch stay in sync. This avoids holding the channel while doing
+	// CPU work (encoding happens before channel acquisition in step 2).
 	type ready struct {
 		msg  Message[M]
 		body []byte
@@ -494,36 +518,12 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 	encoded := make([]ready, len(msgs))
 
 	for i, msg := range msgs {
-		if err := msg.applyDefaults(p.codec); err != nil {
-			encoded[i].err = err
-			continue
-		}
-		if err := msg.validateHeaders(); err != nil {
-			encoded[i].err = err
-			continue
-		}
-
-		if p.stampUserID && msg.UserID == "" {
-			msg.UserID = p.authUser
-		}
-		if msg.UserID != "" && p.authUser != "" && msg.UserID != p.authUser {
-			encoded[i].err = fmt.Errorf("%w: UserID %q does not match the authenticated connection identity", ErrInvalidMessage, msg.UserID)
-			continue
-		}
-
-		body, err := p.codec.Encode(msg.Body)
+		encMsg, body, err := p.encodeMsg(msg)
 		if err != nil {
-			encoded[i].err = fmt.Errorf("%w: %w", ErrInvalidMessage, err)
+			encoded[i].err = err
 			continue
 		}
-
-		if p.maxMessageSizeBytes > 0 && len(body) > p.maxMessageSizeBytes {
-			p.pm.RecordPublish(p.exchange, "too_large", 0)
-			encoded[i].err = fmt.Errorf("%w: encoded body is %d bytes (cap %d)", ErrMessageTooLarge, len(body), p.maxMessageSizeBytes)
-			continue
-		}
-
-		encoded[i].msg = msg
+		encoded[i].msg = encMsg
 		encoded[i].body = body
 	}
 
@@ -553,6 +553,7 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 		return nil, err
 	}
 	pool.inflight.Add(1)
+	batchStart := time.Now()
 	defer func() {
 		pool.inflight.Add(-1)
 		release()
@@ -603,10 +604,17 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 		entry.activeTag.Store(0)
 	}
 
-	// Step 4: wait for confirms on all successfully-published messages.
+	// Step 4: wait for confirms on all successfully-published messages and record
+	// per-message metrics so batch publishes are visible to Prometheus/operators.
+	p.pm.InFlightAdd(p.exchange, int64(len(published)))
+	defer p.pm.InFlightAdd(p.exchange, -int64(len(published)))
+
 	for _, ti := range published {
 		if waitErr := entry.tracker.Wait(ctx, ti.tag, p.confirmTimeout); waitErr != nil {
 			results[ti.idx].Err = p.mapConfirmError(waitErr)
+			p.pm.RecordPublish(p.exchange, "error", time.Since(batchStart))
+		} else {
+			p.pm.RecordPublish(p.exchange, "success", time.Since(batchStart))
 		}
 	}
 
