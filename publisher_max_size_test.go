@@ -46,6 +46,22 @@ func TestPublisherBuilder_Build_rejectsNegativeMaxMessageSizeBytes(t *testing.T)
 		"negative MaxMessageSizeBytes must be ErrInvalidOptions, got %v", err)
 }
 
+func TestPublisherBuilder_Build_rejectsNegativePublishBatchMaxSize(t *testing.T) {
+	conn := &Connection{} // any non-nil; Build validates options before touching it
+	_, err := PublisherFor[testPayload](conn).PublishBatchMaxSize(-1).Build()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrInvalidOptions),
+		"negative PublishBatchMaxSize must be ErrInvalidOptions, got %v", err)
+}
+
+func TestPublisherBuilder_Build_acceptsZeroPublishBatchMaxSize(t *testing.T) {
+	// Zero is explicitly allowed and means "use default 1024".
+	b := PublisherFor[testPayload](nil).PublishBatchMaxSize(0)
+	b.applyBuilderDefaults()
+	assert.Equal(t, 1024, b.publishBatchMaxSize,
+		"publishBatchMaxSize=0 must fall back to 1024 after applyBuilderDefaults")
+}
+
 // — Publish-time enforcement —————————————————————————————————————————————————
 
 func TestPublisher_Publish_rejectsBodyOverMax(t *testing.T) {

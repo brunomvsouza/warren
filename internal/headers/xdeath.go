@@ -56,10 +56,12 @@ func ParseXDeath(tbl amqp091.Table, queue string) XDeathResult {
 		if count < 0 {
 			count = 0
 		}
-		// Cap to math.MaxInt to prevent int overflow on 32-bit platforms.
-		// x-death counts legitimately exceeding this bound are treated as MaxInt,
-		// which still exceeds any practical MaxRedeliveries ceiling.
-		if count > math.MaxInt {
+		// Cap individual count to math.MaxInt to prevent int overflow on 32-bit
+		// platforms (math.MaxInt = 2^31-1 there; int64 can exceed it).
+		// On 64-bit platforms math.MaxInt == math.MaxInt64, so count (int64) can
+		// never exceed it and this branch is dead code by design — it protects
+		// 32-bit builds without penalising 64-bit runtime performance.
+		if count > math.MaxInt { //nolint:staticcheck // intentional 32-bit guard; dead on 64-bit
 			count = math.MaxInt
 		}
 
@@ -70,15 +72,17 @@ func ParseXDeath(tbl amqp091.Table, queue string) XDeathResult {
 		// reason cannot overflow int on 32-bit platforms (math.MaxInt = 2^31-1
 		// there). Any value exceeding MaxInt still exceeds any practical
 		// MaxRedeliveries ceiling, so saturation is semantically correct.
+		// On 64-bit: int == int64; the sum of two int64 values each ≤ MaxInt64/2
+		// cannot wrap, so the < 0 guard below is dead code on 64-bit by design.
 		newByReason := result.byReason[reason] + int(count)
-		if newByReason < 0 {
+		if newByReason < 0 { //nolint:staticcheck // 32-bit saturation guard; dead on 64-bit
 			newByReason = math.MaxInt
 		}
 		result.byReason[reason] = newByReason
 
 		if reason == "rejected" || reason == "delivery-limit" {
 			newCount := result.Count + int(count)
-			if newCount < 0 {
+			if newCount < 0 { //nolint:staticcheck // 32-bit saturation guard; dead on 64-bit
 				newCount = math.MaxInt
 			}
 			result.Count = newCount

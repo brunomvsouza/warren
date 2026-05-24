@@ -176,6 +176,9 @@ func (b *PublisherBuilder[M]) Build() (*Publisher[M], error) {
 	if b.maxMessageSizeBytesSet && b.maxMessageSizeBytes < 0 {
 		return nil, fmt.Errorf("%w: MaxMessageSizeBytes must be >= 0 (0 disables; default is 16 MiB)", ErrInvalidOptions)
 	}
+	if b.publishBatchMaxSize < 0 {
+		return nil, fmt.Errorf("%w: PublishBatchMaxSize must be >= 0 (0 uses default 1024)", ErrInvalidOptions)
+	}
 	if b.conn == nil {
 		return nil, fmt.Errorf("%w: conn must not be nil", ErrInvalidOptions)
 	}

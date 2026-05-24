@@ -371,8 +371,14 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 	// Client-side UserID validation: if caller set a UserID that doesn't match
 	// the connection identity, reject locally without writing a publish frame.
 	// This prevents the 406-channel-close footgun from a mismatched stamp.
+	// Note: the mismatch value is intentionally omitted from the error string to
+	// prevent it from leaking into log labels, Prometheus metrics, or OTEL spans.
 	if msg.UserID != "" && p.authUser != "" && msg.UserID != p.authUser {
-		return msg, nil, fmt.Errorf("%w: UserID %q does not match the authenticated connection identity", ErrInvalidMessage, msg.UserID)
+		return msg, nil, fmt.Errorf("%w: UserID field does not match the authenticated connection identity", ErrInvalidMessage)
+	}
+
+	if msg.Body == nil {
+		return msg, nil, fmt.Errorf("%w: Body must not be nil", ErrInvalidMessage)
 	}
 
 	body, err := p.codec.Encode(msg.Body)
@@ -446,20 +452,28 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 // even if some messages fail client-side validation, valid messages are still
 // published and confirmed.
 //
+// An empty batch (len(msgs) == 0) returns (nil, nil) without contacting the broker.
+//
 // If len(msgs) exceeds the configured PublishBatchMaxSize (default 1024),
 // PublishBatch returns (nil, ErrBatchTooLarge) immediately without any broker work.
 //
 // Per-message outcomes are in []PublishResult, one slot per input. Result.Err may be:
 //   - nil (broker confirmed)
-//   - ErrInvalidMessage (client-side header validation or encode failure)
+//   - ErrInvalidMessage (client-side header validation, nil Body, or encode failure)
 //   - ErrPublishNacked (broker sent basic.nack, e.g. overflow=reject-publish)
-//   - ErrUnroutable (mandatory publish returned via basic.return then acked)
 //   - ErrChannelClosed (channel died before confirm arrived)
+//   - ErrConfirmTimeout (no confirm received within the configured ConfirmTimeout)
 //
 // If any message fails, the overall error wraps ErrPartialBatch. Note that when a
 // connection-level error occurs (e.g. ErrReconnecting, ErrChannelPoolExhausted),
 // results is nil and err is the connection-level error — no per-message results are
 // available because no messages were sent to the broker.
+//
+// # Mandatory not supported
+//
+// PublishBatch does not support publishers configured with Mandatory(). Calling
+// PublishBatch on a mandatory publisher returns (nil, ErrInvalidOptions) without any
+// broker work. Use Publish (single-message) for mandatory publishes.
 //
 // # PublishTimeout
 //
@@ -485,6 +499,13 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]PublishResult, error) {
 	if len(msgs) == 0 {
 		return nil, nil
+	}
+
+	// Mandatory is unsupported for batches: the activeTag mechanism cannot
+	// correlate basic.return frames across multiple in-flight messages.
+	// Use Publish (single-message) for mandatory publishes.
+	if p.mandatory {
+		return nil, fmt.Errorf("%w: PublishBatch does not support Mandatory() — use Publish for mandatory messages", ErrInvalidOptions)
 	}
 
 	maxSize := p.publishBatchMaxSize
@@ -553,7 +574,6 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 		return nil, err
 	}
 	pool.inflight.Add(1)
-	batchStart := time.Now()
 	defer func() {
 		pool.inflight.Add(-1)
 		release()
@@ -606,15 +626,18 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 
 	// Step 4: wait for confirms on all successfully-published messages and record
 	// per-message metrics so batch publishes are visible to Prometheus/operators.
+	// Each latency sample is measured from the moment Wait begins for that message,
+	// giving a per-message confirm-wait duration rather than an accumulated batch total.
 	p.pm.InFlightAdd(p.exchange, int64(len(published)))
 	defer p.pm.InFlightAdd(p.exchange, -int64(len(published)))
 
 	for _, ti := range published {
+		msgStart := time.Now()
 		if waitErr := entry.tracker.Wait(ctx, ti.tag, p.confirmTimeout); waitErr != nil {
 			results[ti.idx].Err = p.mapConfirmError(waitErr)
-			p.pm.RecordPublish(p.exchange, "error", time.Since(batchStart))
+			p.pm.RecordPublish(p.exchange, "error", time.Since(msgStart))
 		} else {
-			p.pm.RecordPublish(p.exchange, "success", time.Since(batchStart))
+			p.pm.RecordPublish(p.exchange, "success", time.Since(msgStart))
 		}
 	}
 

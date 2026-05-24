@@ -3,6 +3,8 @@ package warren
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -349,4 +351,335 @@ func TestPublishBatch_SingleChannelOrdering(t *testing.T) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	assert.Len(t, fake.publishes, n, "all %d messages must go through the single channel", n)
+}
+
+// TestPublishBatch_MandatoryNotSupported verifies that a publisher configured with
+// Mandatory() returns ErrInvalidOptions immediately without any broker work.
+func TestPublishBatch_MandatoryNotSupported(t *testing.T) {
+	fake := newFakePubCh(true)
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	pub.mandatory = true
+
+	msgs := []Message[testPayload]{{Body: &testPayload{Value: "v"}}}
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrInvalidOptions),
+		"Mandatory+PublishBatch must return ErrInvalidOptions, got %v", err)
+	assert.Nil(t, results, "results must be nil on ErrInvalidOptions")
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Empty(t, fake.publishes, "no broker publishes expected on ErrInvalidOptions")
+}
+
+// TestPublishBatch_NilBody verifies that a message with a nil Body is rejected
+// with ErrInvalidMessage while the rest of the batch proceeds normally.
+func TestPublishBatch_NilBody(t *testing.T) {
+	fake := newFakePubCh(true)
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	msgs := []Message[testPayload]{
+		{Body: &testPayload{Value: "ok"}},
+		{Body: nil}, // nil body — must be rejected
+		{Body: &testPayload{Value: "ok"}},
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrPartialBatch), "overall error must wrap ErrPartialBatch, got %v", err)
+	require.Len(t, results, 3)
+
+	assert.NoError(t, results[0].Err, "result[0] (valid) must succeed")
+	assert.True(t, errors.Is(results[1].Err, ErrInvalidMessage),
+		"result[1] (nil Body) must be ErrInvalidMessage, got %v", results[1].Err)
+	assert.NoError(t, results[2].Err, "result[2] (valid) must succeed")
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Len(t, fake.publishes, 2, "only 2 valid messages must reach the broker")
+}
+
+// TestPublishBatch_UserIDMismatch verifies that a message whose UserID does not
+// match the connection's authenticated user is rejected with ErrInvalidMessage,
+// and that the error string does not expose the mismatched value (security R-1).
+func TestPublishBatch_UserIDMismatch(t *testing.T) {
+	fake := newFakePubCh(true)
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	pub.authUser = "alice"
+
+	msgs := []Message[testPayload]{
+		{Body: &testPayload{Value: "ok"}},
+		{Body: &testPayload{Value: "mismatch"}, UserID: "bob"},
+		{Body: &testPayload{Value: "ok"}},
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrPartialBatch))
+	require.Len(t, results, 3)
+
+	assert.NoError(t, results[0].Err, "result[0] (no UserID) must succeed")
+	assert.True(t, errors.Is(results[1].Err, ErrInvalidMessage),
+		"result[1] (mismatched UserID) must be ErrInvalidMessage, got %v", results[1].Err)
+	assert.NoError(t, results[2].Err, "result[2] (no UserID) must succeed")
+
+	// The mismatched value "bob" must NOT appear in the error string (security R-1).
+	assert.False(t, strings.Contains(results[1].Err.Error(), "bob"),
+		"error must not expose the UserID value, got: %s", results[1].Err)
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Len(t, fake.publishes, 2, "only valid messages must reach the broker")
+}
+
+// TestPublishBatch_DefaultMaxSize_Fallback verifies that publishBatchMaxSize == 0
+// (unset, e.g. direct struct init without the builder) defaults to 1024 internally.
+func TestPublishBatch_DefaultMaxSize_Fallback(t *testing.T) {
+	fake := newFakePubCh(true)
+	// Use maxSize=0 to exercise the internal default-fallback branch.
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 0)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	// 1025 messages must be rejected (default cap is 1024).
+	msgs := make([]Message[testPayload], 1025)
+	for i := range msgs {
+		msgs[i] = Message[testPayload]{Body: &testPayload{Value: "x"}}
+	}
+
+	_, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrBatchTooLarge),
+		"1025 messages with default cap must return ErrBatchTooLarge, got %v", err)
+}
+
+// TestPublishBatch_ExactlyMaxSize verifies that a batch of exactly PublishBatchMaxSize
+// messages is accepted (the cap is exclusive: > maxSize is rejected, == maxSize is OK).
+func TestPublishBatch_ExactlyMaxSize(t *testing.T) {
+	const maxSize = 5
+	fake := newFakePubCh(true)
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, maxSize)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	msgs := make([]Message[testPayload], maxSize)
+	for i := range msgs {
+		msgs[i] = Message[testPayload]{Body: &testPayload{Value: "boundary"}}
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.NoError(t, err, "batch of exactly maxSize must be accepted")
+	require.Len(t, results, maxSize)
+	for i, r := range results {
+		assert.NoError(t, r.Err, "result[%d] must be nil", i)
+	}
+}
+
+// TestPublishBatch_PoolExhausted verifies that when the channel pool is fully
+// occupied, PublishBatch returns nil results and wraps ErrChannelPoolExhausted.
+// The test holds the single pool token before calling PublishBatch to guarantee
+// exhaustion without relying on a non-deterministic context-vs-token race in
+// pool.acquire's select statement.
+func TestPublishBatch_PoolExhausted(t *testing.T) {
+	fake := newFakePubCh(true)
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	// Hold the single pool token so PublishBatch cannot acquire a channel.
+	_, poolRelease, err := pub.pools[0].acquire(context.Background())
+	require.NoError(t, err, "pre-acquiring pool token must succeed")
+	defer poolRelease()
+
+	// Short timeout so the test does not block for long.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	msgs := []Message[testPayload]{{Body: &testPayload{Value: "v"}}}
+	results, err := pub.PublishBatch(ctx, msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrChannelPoolExhausted),
+		"exhausted pool must return ErrChannelPoolExhausted, got %v", err)
+	assert.Nil(t, results, "results must be nil on connection-level error")
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Empty(t, fake.publishes, "no broker publishes expected on pool-exhausted")
+}
+
+// TestPublishBatch_PublishWithContextFailure verifies that when PublishWithContext
+// returns an error for every message, all results carry that error and the overall
+// error wraps ErrPartialBatch.
+func TestPublishBatch_PublishWithContextFailure(t *testing.T) {
+	fake := newFakePubCh(true)
+	fake.mu.Lock()
+	fake.publishErr = errors.New("simulated network error")
+	fake.mu.Unlock()
+
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	const n = 3
+	msgs := make([]Message[testPayload], n)
+	for i := range msgs {
+		msgs[i] = Message[testPayload]{Body: &testPayload{Value: "v"}}
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrPartialBatch),
+		"publish failure must yield ErrPartialBatch, got %v", err)
+	require.Len(t, results, n)
+	for i, r := range results {
+		assert.Error(t, r.Err, "result[%d] must have an error on PublishWithContext failure", i)
+	}
+
+	// PublishWithContext returned error immediately; confirms were never awaited.
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Empty(t, fake.publishes, "publishErr prevents messages from reaching the publish slice")
+}
+
+// TestPublishBatch_ConfirmTimeout_PerMessage verifies that when no broker confirm
+// arrives within ConfirmTimeout, every published message gets ErrConfirmTimeout
+// and the overall error wraps ErrPartialBatch.
+func TestPublishBatch_ConfirmTimeout_PerMessage(t *testing.T) {
+	fake := newFakePubCh(false /* no auto-ack */)
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	// Use a very short timeout so the test runs fast.
+	pub.confirmTimeout = 5 * time.Millisecond
+
+	const n = 3
+	msgs := make([]Message[testPayload], n)
+	for i := range msgs {
+		msgs[i] = Message[testPayload]{Body: &testPayload{Value: "timeout"}}
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrPartialBatch))
+	require.Len(t, results, n)
+	for i, r := range results {
+		assert.True(t, errors.Is(r.Err, ErrConfirmTimeout),
+			"result[%d].Err must be ErrConfirmTimeout, got %v", i, r.Err)
+	}
+}
+
+// TestPublishBatch_Metrics_InFlightAndRecordPublish verifies that PublishBatch
+// calls InFlightAdd(+N) before waiting for confirms, InFlightAdd(-N) after, and
+// RecordPublish once per successfully-confirmed message.
+func TestPublishBatch_Metrics_InFlightAndRecordPublish(t *testing.T) {
+	fake := newFakePubCh(true /* autoAck */)
+	pm := &capturePublisherMetrics{}
+	pub, stopPool := newTestPubBatch[testPayload](fake, pm, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	const n = 4
+	msgs := make([]Message[testPayload], n)
+	for i := range msgs {
+		msgs[i] = Message[testPayload]{Body: &testPayload{Value: "metric"}}
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.NoError(t, err)
+	require.Len(t, results, n)
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	// InFlightAdd must have been called with +n and then -n.
+	require.Len(t, pm.inFlight, 2, "expected exactly 2 InFlightAdd calls (+N and -N)")
+	assert.Equal(t, int64(n), pm.inFlight[0].delta, "first InFlightAdd must be +%d", n)
+	assert.Equal(t, int64(-n), pm.inFlight[1].delta, "second InFlightAdd must be -%d", n)
+
+	// RecordPublish must have been called once per message with outcome "success".
+	require.Len(t, pm.records, n, "expected %d RecordPublish calls", n)
+	for i, rec := range pm.records {
+		assert.Equal(t, "x", rec.exchange, "record[%d] exchange must be 'x'", i)
+		assert.Equal(t, "success", rec.outcome, "record[%d] outcome must be 'success'", i)
+	}
+}
+
+// TestPublishBatch_Metrics_PartialFailure verifies that messages failing at
+// PublishWithContext emit "error" outcome in RecordPublish, while valid confirmed
+// messages emit "success".
+func TestPublishBatch_Metrics_PartialFailure(t *testing.T) {
+	fake := newFakePubCh(false /* manual ack */)
+	pm := &capturePublisherMetrics{}
+	pub, stopPool := newTestPubBatch[testPayload](fake, pm, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	// Use a very short timeout so nacke arrive quickly via timeout.
+	pub.confirmTimeout = 5 * time.Millisecond
+
+	msgs := []Message[testPayload]{
+		{Body: &testPayload{Value: "v"}},
+		{Body: &testPayload{Value: "v"}},
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrPartialBatch))
+	require.Len(t, results, 2)
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	// Both messages should have timed out → "error" outcome.
+	require.Len(t, pm.records, 2)
+	for i, rec := range pm.records {
+		assert.Equal(t, "error", rec.outcome, "record[%d] timed-out message must have outcome 'error'", i)
+	}
+}
+
+// TestPublishBatch_Race verifies that concurrent PublishBatch calls on the same
+// publisher do not trigger the race detector. The -race flag is what makes this
+// test meaningful.
+func TestPublishBatch_Race(t *testing.T) {
+	fake := newFakePubCh(true /* autoAck */)
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	const goroutines = 8
+	const batchSize = 3
+
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			msgs := make([]Message[testPayload], batchSize)
+			for i := range msgs {
+				msgs[i] = Message[testPayload]{Body: &testPayload{Value: "race"}}
+			}
+			_, _ = pub.PublishBatch(context.Background(), msgs)
+		}()
+	}
+	wg.Wait()
 }

@@ -43,7 +43,7 @@ type deliverySub struct {
 // No chanID prefix is needed: each redeliveryCounter instance owns its own sync.Map, so keys are
 // implicitly scoped to the channel that created this instance.
 type redeliveryCounter struct {
-	m sync.Map // key: "mid:<MessageID>" or "dlv:<tag>:<deliveryTag>", value: int64
+	m sync.Map // key: "mid:<MessageID>" or "dlv:<consumerTag>:<deliveryTag>", value: int64
 }
 
 // Consumer receives AMQP messages from a single queue, decodes each payload

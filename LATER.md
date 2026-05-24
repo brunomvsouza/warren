@@ -774,28 +774,27 @@ correta depende de ter o contexto do consumer cancel disponível na goroutine de
 
 ---
 
-### LATER-23 — `PublishBatch` com `Mandatory()` pode mis-correlacionar `basic.return` para tags não-últimas
+### LATER-23 — Suporte a `Mandatory()` em `PublishBatch` (atualmente rejeitado)
 
-**Contexto:** `publisher.go` — `PublishBatch` usa `entry.activeTag` para correlacionar
-`basic.return` frames com delivery tags. O listener goroutine lê `activeTag` ao receber
-um return. Durante um batch, `activeTag` é atualizado a cada publish; quando todos os
-publishes terminam, `activeTag` é zerado. Returns de mensagens mandatory chegam *após*
-todos os publishes, então o listener lê `activeTag = 0` → `MarkReturned` não é chamado
-→ os affected `Wait` retornam `nil` em vez de `ErrUnroutable`.
+**Contexto:** `publisher.go` — `PublishBatch` rejeitou a combinação `Mandatory()` via
+`ErrInvalidOptions` imediatamente (commit de correção pós-ship). A rejeição elimina o risco
+de perda silenciosa de dados documentado originalmente nesta entrada, mas limita o caso de
+uso de mandatory+batch.
 
-**Impacto:** `PublishBatch` com `Mandatory()` e mensagens sem rota retorna `nil` em vez
-de `ErrUnroutable` por mensagem. A mensagem ainda é dead-lettered ou dropada conforme
-policy, mas o caller não sabe que foi não roteada. Afeta apenas o combo `PublishBatch` +
-`Mandatory()` + exchanges sem binding — incomum em produção.
+**Impacto atual:** Zero risco de dados (combinação é impossível). Caso de uso não
+suportado: publicar um batch de mensagens mandatory e receber `ErrUnroutable` por mensagem
+quando o exchange não tem binding.
 
-**Evidência:** Identificado durante T22 (implementação de `PublishBatch`). Não há test de
-verificação para este caso no plan (T22 verify usa `ErrInvalidMessage`, não `ErrUnroutable`).
+**Evidência:** Identificado durante T22; mitigado (rejeição) durante ship review pós-T22.
 
-**Sugestão de solução:** Manter uma fila (slice) de delivery tags publicados em ordem no
-`publisherEntry` durante um batch. O listener goroutine, ao receber um return, drena o
-front da fila para obter o delivery tag correto em vez de usar `activeTag`. Requer:
-(1) campo `batchTagQueue *atomic.Pointer[[]uint64]` em `publisherEntry`; (2) `PublishBatch`
-preenche a fila antes de publicar cada mensagem; (3) goroutine checa a fila.
+**Sugestão de implementação:** Para suportar mandatory+batch corretamente, manter uma fila
+de delivery tags publicados em ordem no `publisherEntry` durante um batch. O listener
+goroutine, ao receber um `basic.return`, drena o front da fila para obter o delivery tag
+correto em vez de usar `activeTag` (que causa mis-correlação). Requer:
+(1) campo `batchTagQueue *atomic.Pointer[[]uint64]` em `publisherEntry`;
+(2) `PublishBatch` preenche a fila antes de cada `PublishWithContext`;
+(3) goroutine drena o front da fila ao receber um return.
 
-**Pré-requisitos:** T22 concluída (base); apenas atacar após T23 (batch consumer) porque
-a rearquitetura do listener pode afetar o fluxo de ack do `BatchConsumer`.
+**Pré-requisitos:** T22 concluída (base). Remover a guard `if p.mandatory` em
+`PublishBatch` junto com a implementação. Adicionar testes de integração com exchange
+sem binding para verificar `ErrUnroutable` por mensagem.
