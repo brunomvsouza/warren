@@ -27,7 +27,7 @@ func wireReturnPool(ch pubChannel, onReturn func(amqp091.Return)) (*publisherCon
 	_ = ch.NotifyPublish(confirmCh)
 	_ = ch.NotifyReturn(returnCh)
 
-	at := new(atomic.Uint64)
+	rtm := new(sync.Map)
 
 	done := make(chan struct{})
 	go func() {
@@ -39,12 +39,15 @@ func wireReturnPool(ch pubChannel, onReturn func(amqp091.Return)) (*publisherCon
 					returnCh = nil
 					continue
 				}
-				tag := at.Load()
-				if tag != 0 {
-					if onReturn != nil {
-						onReturn(ret)
+				// Correlate the return to its delivery tag via MessageID.
+				if ret.MessageId != "" {
+					if v, loaded := rtm.LoadAndDelete(ret.MessageId); loaded {
+						tag := v.(uint64) //nolint:forcetypeassert // only uint64 stored
+						if onReturn != nil {
+							onReturn(ret)
+						}
+						tracker.MarkReturned(tag, ret.ReplyCode)
 					}
-					tracker.MarkReturned(tag, ret.ReplyCode)
 				}
 			case c, ok := <-confirmCh:
 				if !ok {
@@ -61,7 +64,7 @@ func wireReturnPool(ch pubChannel, onReturn func(amqp091.Return)) (*publisherCon
 	}()
 
 	closeCh := ch.NotifyClose(make(chan *amqp091.Error, 1))
-	entry := publisherEntry{ch: ch, tracker: tracker, closeCh: closeCh, activeTag: at}
+	entry := publisherEntry{ch: ch, tracker: tracker, closeCh: closeCh, returnTagMap: rtm}
 
 	pool := newPublisherConnPool(1, func() (publisherEntry, error) {
 		return entry, nil

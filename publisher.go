@@ -36,15 +36,18 @@ type pubChannel interface {
 // NOTE: publisherEntry is copied by value when the pool returns it from acquire.
 // Any field that must be shared between Publish (which holds the copy) and the
 // background goroutine (which holds the original) MUST be a pointer type so
-// that both sides refer to the same memory. activeTag is such a field.
+// that both sides refer to the same memory. returnTagMap is such a field.
 type publisherEntry struct {
 	ch      pubChannel
 	tracker *confirms.Tracker
 	closeCh chan *amqp091.Error
-	// activeTag holds the delivery tag of the in-flight publish (0 if none).
-	// Stored as a pointer so that the copy returned by pool.acquire and the
-	// original entry in the goroutine share the same atomic.
-	activeTag *atomic.Uint64
+	// returnTagMap maps MessageID (string) → delivery-tag (uint64) for in-flight
+	// mandatory messages awaiting a possible basic.return. Stored as a pointer so
+	// that the copy returned by pool.acquire and the original entry in the goroutine
+	// share the same sync.Map. LoadAndDelete is called by the return goroutine when
+	// a basic.return arrives; any entry not consumed by a return is deleted by the
+	// caller after the confirm is received.
+	returnTagMap *sync.Map
 }
 
 // publisherConnPool is a per-publisher-TCP-connection pool of AMQP channels.
@@ -163,10 +166,10 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 	buf := max(poolSize, 8)
 
 	entry := publisherEntry{
-		ch:        ch,
-		tracker:   tracker,
-		closeCh:   closeCh,
-		activeTag: new(atomic.Uint64),
+		ch:           ch,
+		tracker:      tracker,
+		closeCh:      closeCh,
+		returnTagMap: new(sync.Map),
 	}
 
 	confirmCh := ch.NotifyPublish(make(chan amqp091.Confirmation, buf))
@@ -180,12 +183,18 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 					returnCh = nil
 					continue
 				}
-				tag := entry.activeTag.Load() //nolint:gocritic // entry.activeTag is always non-nil here
-				if tag != 0 {
-					if onReturn != nil {
-						onReturn(ret)
+				// Look up the delivery tag that corresponds to this returned message.
+				// returnTagMap is populated by publishOnce and PublishBatch before each
+				// publish; LoadAndDelete removes the entry so it is not double-processed.
+				// The MessageID is always set (applyDefaults stamps a UUIDv7 if empty).
+				if ret.MessageId != "" {
+					if v, loaded := entry.returnTagMap.LoadAndDelete(ret.MessageId); loaded { //nolint:gocritic // always non-nil
+						tag := v.(uint64) //nolint:forcetypeassert // only uint64 is stored
+						if onReturn != nil {
+							onReturn(ret)
+						}
+						tracker.MarkReturned(tag, ret.ReplyCode)
 					}
-					tracker.MarkReturned(tag, ret.ReplyCode)
 				}
 			case c, ok := <-confirmCh:
 				if !ok {
@@ -421,9 +430,13 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 	pub := buildPublishing(msg, body)
 
 	deliveryTag := entry.ch.GetNextPublishSeqNo()
-	if entry.activeTag != nil {
-		entry.activeTag.Store(deliveryTag)
-		defer entry.activeTag.Store(0)
+	// Register MessageID → deliveryTag before publishing so that any concurrent
+	// basic.return arriving for this message can be correlated by the entry's
+	// goroutine. The deferred Delete is a no-op if LoadAndDelete already removed
+	// the entry (i.e. a return arrived before the confirm).
+	if entry.returnTagMap != nil {
+		entry.returnTagMap.Store(msg.MessageID, deliveryTag)
+		defer entry.returnTagMap.Delete(msg.MessageID)
 	}
 
 	if err := entry.tracker.Register(deliveryTag); err != nil {
@@ -458,8 +471,9 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 // PublishBatch returns (nil, ErrBatchTooLarge) immediately without any broker work.
 //
 // Per-message outcomes are in []PublishResult, one slot per input. Result.Err may be:
-//   - nil (broker confirmed)
+//   - nil (broker confirmed and routed)
 //   - ErrInvalidMessage (client-side header validation, nil Body, or encode failure)
+//   - ErrUnroutable (broker returned the message via basic.return — mandatory+no binding)
 //   - ErrPublishNacked (broker sent basic.nack, e.g. overflow=reject-publish)
 //   - ErrChannelClosed (channel died before confirm arrived)
 //   - ErrConfirmTimeout (no confirm received within the configured ConfirmTimeout)
@@ -469,11 +483,14 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 // results is nil and err is the connection-level error — no per-message results are
 // available because no messages were sent to the broker.
 //
-// # Mandatory not supported
+// # Mandatory delivery
 //
-// PublishBatch does not support publishers configured with Mandatory(). Calling
-// PublishBatch on a mandatory publisher returns (nil, ErrInvalidOptions) without any
-// broker work. Use Publish (single-message) for mandatory publishes.
+// PublishBatch fully supports publishers configured with Mandatory(). When a message
+// has no matching binding the broker sends basic.return (before the basic.ack). The
+// result for that slot is ErrUnroutable (wrapped with the broker reply code so
+// AMQPCode can retrieve it). Messages without a routing failure are unaffected.
+// Correlation is performed by MessageID: applyDefaults stamps a UUIDv7 when
+// Message.MessageID is empty, so every message always has a unique key.
 //
 // # PublishTimeout
 //
@@ -499,13 +516,6 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]PublishResult, error) {
 	if len(msgs) == 0 {
 		return nil, nil
-	}
-
-	// Mandatory is unsupported for batches: the activeTag mechanism cannot
-	// correlate basic.return frames across multiple in-flight messages.
-	// Use Publish (single-message) for mandatory publishes.
-	if p.mandatory {
-		return nil, fmt.Errorf("%w: PublishBatch does not support Mandatory() — use Publish for mandatory messages", ErrInvalidOptions)
 	}
 
 	maxSize := p.publishBatchMaxSize
@@ -595,14 +605,12 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 		pub := buildPublishing(e.msg, e.body)
 		deliveryTag := entry.ch.GetNextPublishSeqNo()
 
-		// Set activeTag before publish so that any concurrent basic.return frame
-		// arriving for this message can be correlated to the right delivery tag.
-		// Note: for batches with multiple mandatory messages, returns arrive after
-		// all publishes complete. In that case activeTag reflects the last-published
-		// tag, which may mis-correlate returns with tags. The limitation is
-		// documented (see LATER.md) and only affects mandatory+batch combinations.
-		if entry.activeTag != nil {
-			entry.activeTag.Store(deliveryTag)
+		// Register MessageID → deliveryTag before publishing so that the entry's
+		// goroutine can correlate any basic.return frame to the correct delivery tag.
+		// The goroutine calls LoadAndDelete on return; entries for routed messages
+		// are cleaned up in step 4.5 below.
+		if entry.returnTagMap != nil {
+			entry.returnTagMap.Store(e.msg.MessageID, deliveryTag)
 		}
 
 		if regErr := entry.tracker.Register(deliveryTag); regErr != nil {
@@ -619,11 +627,6 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 		published = append(published, tagIdx{tag: deliveryTag, idx: i})
 	}
 
-	// Clear activeTag after all publishes — no more returns expected for this batch.
-	if entry.activeTag != nil {
-		entry.activeTag.Store(0)
-	}
-
 	// Step 4: wait for confirms on all successfully-published messages and record
 	// per-message metrics so batch publishes are visible to Prometheus/operators.
 	// Each latency sample is measured from the moment Wait begins for that message,
@@ -638,6 +641,18 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 			p.pm.RecordPublish(p.exchange, "error", time.Since(msgStart))
 		} else {
 			p.pm.RecordPublish(p.exchange, "success", time.Since(msgStart))
+		}
+	}
+
+	// Step 4.5: clean up returnTagMap entries for all messages that passed encoding.
+	// basic.return always precedes basic.ack (RabbitMQ wire guarantee), so by the
+	// time Wait returns the goroutine has already called LoadAndDelete for any
+	// unroutable message. Delete on a missing key is a no-op in sync.Map.
+	if entry.returnTagMap != nil {
+		for _, e := range encoded {
+			if e.err == nil {
+				entry.returnTagMap.Delete(e.msg.MessageID)
+			}
 		}
 	}
 

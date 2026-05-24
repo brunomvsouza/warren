@@ -353,10 +353,10 @@ func TestPublishBatch_SingleChannelOrdering(t *testing.T) {
 	assert.Len(t, fake.publishes, n, "all %d messages must go through the single channel", n)
 }
 
-// TestPublishBatch_MandatoryNotSupported verifies that a publisher configured with
-// Mandatory() returns ErrInvalidOptions immediately without any broker work.
-func TestPublishBatch_MandatoryNotSupported(t *testing.T) {
-	fake := newFakePubCh(true)
+// TestPublishBatch_Mandatory_AllRouted verifies that a mandatory batch where all
+// messages are successfully routed returns nil per-message errors and nil overall.
+func TestPublishBatch_Mandatory_AllRouted(t *testing.T) {
+	fake := newFakePubCh(true /* autoAck — no returns, all messages routed */)
 	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
 	defer goleak.VerifyNone(t)
 	defer stopPool()
@@ -364,16 +364,102 @@ func TestPublishBatch_MandatoryNotSupported(t *testing.T) {
 
 	pub.mandatory = true
 
-	msgs := []Message[testPayload]{{Body: &testPayload{Value: "v"}}}
-	results, err := pub.PublishBatch(context.Background(), msgs)
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, ErrInvalidOptions),
-		"Mandatory+PublishBatch must return ErrInvalidOptions, got %v", err)
-	assert.Nil(t, results, "results must be nil on ErrInvalidOptions")
+	const n = 3
+	msgs := make([]Message[testPayload], n)
+	for i := range msgs {
+		msgs[i] = Message[testPayload]{Body: &testPayload{Value: "routed"}}
+	}
 
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.NoError(t, err)
+	require.Len(t, results, n)
+	for i, r := range results {
+		assert.NoError(t, r.Err, "result[%d] must be nil (all messages routed)", i)
+	}
+
+	// All messages must have been published with mandatory=true.
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	assert.Empty(t, fake.publishes, "no broker publishes expected on ErrInvalidOptions")
+	assert.Len(t, fake.publishes, n, "all %d messages must reach the broker", n)
+	for i, m := range fake.mandatories {
+		assert.True(t, m, "publish[%d] must carry mandatory=true", i)
+	}
+}
+
+// TestPublishBatch_Mandatory_SomeUnroutable verifies that when a mandatory batch
+// contains a message with no matching binding the broker returns basic.return for
+// that message, and PublishBatch surfaces ErrUnroutable for that slot while leaving
+// the other slots unaffected.
+func TestPublishBatch_Mandatory_SomeUnroutable(t *testing.T) {
+	const unroutableMsgID = "test-mandatory-batch-unroutable"
+
+	fake := newFakePubCh(true /* autoAck */)
+	fake.returnMsgIDs = map[string]uint16{unroutableMsgID: 312}
+
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	pub.mandatory = true
+
+	msgs := []Message[testPayload]{
+		{Body: &testPayload{Value: "routed-1"}},
+		{Body: &testPayload{Value: "unroutable"}, MessageID: unroutableMsgID},
+		{Body: &testPayload{Value: "routed-2"}},
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrPartialBatch),
+		"overall error must wrap ErrPartialBatch, got %v", err)
+	require.Len(t, results, 3)
+
+	assert.NoError(t, results[0].Err, "result[0] (routed) must succeed")
+	assert.True(t, errors.Is(results[1].Err, ErrUnroutable),
+		"result[1] (unroutable) must be ErrUnroutable, got %v", results[1].Err)
+	assert.NoError(t, results[2].Err, "result[2] (routed) must succeed")
+
+	// All 3 messages must have reached the broker.
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Len(t, fake.publishes, 3, "all 3 messages must reach the broker")
+}
+
+// TestPublishBatch_Mandatory_AllUnroutable verifies that when every message in a
+// mandatory batch is unroutable, all slots carry ErrUnroutable and the overall
+// error wraps ErrPartialBatch.
+func TestPublishBatch_Mandatory_AllUnroutable(t *testing.T) {
+	fake := newFakePubCh(true /* autoAck — sends ack after return */)
+	fake.returnAll = true // all mandatory publishes receive basic.return
+
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	pub.mandatory = true
+
+	const n = 3
+	msgs := make([]Message[testPayload], n)
+	for i := range msgs {
+		msgs[i] = Message[testPayload]{Body: &testPayload{Value: "unroutable"}}
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrPartialBatch),
+		"overall error must wrap ErrPartialBatch, got %v", err)
+	require.Len(t, results, n)
+	for i, r := range results {
+		assert.True(t, errors.Is(r.Err, ErrUnroutable),
+			"result[%d] must be ErrUnroutable, got %v", i, r.Err)
+	}
+
+	// All n messages must have reached the broker.
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Len(t, fake.publishes, n, "all %d messages must reach the broker", n)
 }
 
 // TestPublishBatch_NilBody verifies that a message with a nil Body is rejected

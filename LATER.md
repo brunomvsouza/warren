@@ -774,27 +774,3 @@ correta depende de ter o contexto do consumer cancel disponível na goroutine de
 
 ---
 
-### LATER-23 — Suporte a `Mandatory()` em `PublishBatch` (atualmente rejeitado)
-
-**Contexto:** `publisher.go` — `PublishBatch` rejeitou a combinação `Mandatory()` via
-`ErrInvalidOptions` imediatamente (commit de correção pós-ship). A rejeição elimina o risco
-de perda silenciosa de dados documentado originalmente nesta entrada, mas limita o caso de
-uso de mandatory+batch.
-
-**Impacto atual:** Zero risco de dados (combinação é impossível). Caso de uso não
-suportado: publicar um batch de mensagens mandatory e receber `ErrUnroutable` por mensagem
-quando o exchange não tem binding.
-
-**Evidência:** Identificado durante T22; mitigado (rejeição) durante ship review pós-T22.
-
-**Sugestão de implementação:** Para suportar mandatory+batch corretamente, manter uma fila
-de delivery tags publicados em ordem no `publisherEntry` durante um batch. O listener
-goroutine, ao receber um `basic.return`, drena o front da fila para obter o delivery tag
-correto em vez de usar `activeTag` (que causa mis-correlação). Requer:
-(1) campo `batchTagQueue *atomic.Pointer[[]uint64]` em `publisherEntry`;
-(2) `PublishBatch` preenche a fila antes de cada `PublishWithContext`;
-(3) goroutine drena o front da fila ao receber um return.
-
-**Pré-requisitos:** T22 concluída (base). Remover a guard `if p.mandatory` em
-`PublishBatch` junto com a implementação. Adicionar testes de integração com exchange
-sem binding para verificar `ErrUnroutable` por mensagem.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,11 +25,20 @@ type fakePubChannel struct {
 	mu          sync.Mutex
 	seq         uint64
 	confirmCh   chan amqp091.Confirmation
+	returnCh    chan amqp091.Return // set by wireFakePool / NotifyReturn
 	closedCh    chan *amqp091.Error
 	publishes   []amqp091.Publishing
 	mandatories []bool // tracks the mandatory flag passed per publish
 	autoAck     bool
 	publishErr  error
+	// returnAll, when true, sends a basic.return (reply code 312) for every
+	// mandatory publish before sending the auto-ack. Useful for testing
+	// Mandatory() + Publish / PublishBatch with unroutable messages.
+	returnAll bool
+	// returnMsgIDs maps MessageID → reply-code. A mandatory publish whose
+	// MessageID is present in this map receives a basic.return with that
+	// reply code before the auto-ack. Takes precedence over returnAll.
+	returnMsgIDs map[string]uint16
 }
 
 func newFakePubCh(autoAck bool) *fakePubChannel {
@@ -58,7 +66,12 @@ func (f *fakePubChannel) NotifyPublish(ch chan amqp091.Confirmation) chan amqp09
 	return ch
 }
 
-func (f *fakePubChannel) NotifyReturn(ch chan amqp091.Return) chan amqp091.Return { return ch }
+func (f *fakePubChannel) NotifyReturn(ch chan amqp091.Return) chan amqp091.Return {
+	f.mu.Lock()
+	f.returnCh = ch
+	f.mu.Unlock()
+	return ch
+}
 
 func (f *fakePubChannel) NotifyClose(ch chan *amqp091.Error) chan *amqp091.Error {
 	return f.closedCh
@@ -86,9 +99,31 @@ func (f *fakePubChannel) PublishWithContext(_ context.Context, _, _ string, mand
 	f.mandatories = append(f.mandatories, mandatory)
 	tag := f.seq - 1 // last tag returned by GetNextPublishSeqNo
 	ch := f.confirmCh
+	returnCh := f.returnCh
 	isAutoAck := f.autoAck
+
+	// Determine whether to simulate a basic.return for this message.
+	var replyCode uint16
+	if mandatory {
+		if code, ok := f.returnMsgIDs[msg.MessageId]; ok {
+			replyCode = code
+		} else if f.returnAll {
+			replyCode = 312 // NO_ROUTE
+		}
+	}
 	f.mu.Unlock()
 
+	if replyCode != 0 && returnCh != nil {
+		// Send basic.return BEFORE basic.ack (RabbitMQ wire guarantee).
+		// returnCh is unbuffered (see wireFakePool) so this call blocks until the
+		// pool goroutine reads the return and calls tracker.MarkReturned. That
+		// ensures MarkReturned always precedes the subsequent Ack in the tracker.
+		returnCh <- amqp091.Return{
+			ReplyCode: replyCode,
+			ReplyText: "NO_ROUTE",
+			MessageId: msg.MessageId,
+		}
+	}
 	if isAutoAck && ch != nil {
 		go func() { ch <- amqp091.Confirmation{DeliveryTag: tag, Ack: true} }()
 	}
@@ -166,23 +201,36 @@ func (m *capturePublisherMetrics) RecordRetry(exchange, reason string) {
 func wireFakePool(fake *fakePubChannel) (*publisherConnPool, func()) {
 	tracker := confirms.New()
 	confirmCh := make(chan amqp091.Confirmation, 16)
-	returnCh := make(chan amqp091.Return, 8)
+	// returnCh is intentionally unbuffered: PublishWithContext sends to it
+	// synchronously (blocking until this goroutine reads), which guarantees that
+	// tracker.MarkReturned is always called before the subsequent basic.ack is
+	// processed — mirroring the RabbitMQ wire ordering guarantee.
+	returnCh := make(chan amqp091.Return)
+
+	rtm := new(sync.Map)
 
 	fake.mu.Lock()
 	fake.confirmCh = confirmCh
+	fake.returnCh = returnCh
 	fake.mu.Unlock()
 
-	at := new(atomic.Uint64)
 	goroutineDone := make(chan struct{})
 	go func() {
 		defer close(goroutineDone)
 		for {
 			select {
-			case _, ok := <-returnCh:
+			case ret, ok := <-returnCh:
 				if !ok {
 					returnCh = nil
+					continue
 				}
-				// fakePubChannel never sends returns; drain only.
+				// Correlate the return to its delivery tag via MessageID.
+				if ret.MessageId != "" {
+					if v, loaded := rtm.LoadAndDelete(ret.MessageId); loaded {
+						tag := v.(uint64) //nolint:forcetypeassert // only uint64 stored
+						tracker.MarkReturned(tag, ret.ReplyCode)
+					}
+				}
 			case c, ok := <-confirmCh:
 				if !ok {
 					tracker.CloseAll()
@@ -198,7 +246,7 @@ func wireFakePool(fake *fakePubChannel) (*publisherConnPool, func()) {
 	}()
 
 	pool := newPublisherConnPool(1, func() (publisherEntry, error) {
-		return publisherEntry{ch: fake, tracker: tracker, closeCh: fake.closedCh, activeTag: at}, nil
+		return publisherEntry{ch: fake, tracker: tracker, closeCh: fake.closedCh, returnTagMap: rtm}, nil
 	})
 
 	stop := func() {
@@ -567,49 +615,20 @@ func TestPublisher_Publish_returnsErrConfirmTimeout(t *testing.T) {
 }
 
 func TestPublisher_Publish_returnsErrUnroutable(t *testing.T) {
-	// Use a fresh pool wired directly to a tracker we control so we can call
-	// MarkReturned before the ack arrives (wireFakePool hides the tracker).
+	// returnAll=true causes the fake to send basic.return (via the unbuffered
+	// returnCh) before the auto-ack for every mandatory publish, exercising the
+	// full returnTagMap correlation path in openPublisherEntry's goroutine.
+	fake := newFakePubCh(true /* autoAck — sends ack after return */)
+	fake.returnAll = true
+
+	pub, _, stopPool := newTestPub[testPayload](fake, metrics.NoOpPublisherMetrics{})
 	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
 
-	tracker := confirms.New()
-	confirmCh := make(chan amqp091.Confirmation, 4)
-	fake2 := newFakePubCh(false)
-	fake2.mu.Lock()
-	fake2.confirmCh = confirmCh
-	fake2.mu.Unlock()
+	pub.mandatory = true
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for c := range confirmCh {
-			if c.Ack {
-				tracker.Ack(c.DeliveryTag, false)
-			} else {
-				tracker.Nack(c.DeliveryTag, false)
-			}
-		}
-		tracker.CloseAll()
-	}()
-	defer func() { _ = fake2.Close(); <-done }()
-
-	pool2 := newPublisherConnPool(1, func() (publisherEntry, error) {
-		return publisherEntry{ch: fake2, tracker: tracker, closeCh: fake2.closedCh}, nil
-	})
-
-	pub2 := &Publisher[testPayload]{
-		pools: []*publisherConnPool{pool2}, mcs: []*managedConn{{}},
-		codec: codec.NewJSON(), pm: metrics.NoOpPublisherMetrics{}, exchange: "x",
-		confirmTimeout: 2 * time.Second,
-	}
-
-	go func() {
-		time.Sleep(5 * time.Millisecond)
-		// Mark tag 1 as returned, then send ack.
-		tracker.MarkReturned(1, 312)
-		confirmCh <- amqp091.Confirmation{DeliveryTag: 1, Ack: true}
-	}()
-
-	err := pub2.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
+	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrUnroutable), "expected ErrUnroutable, got %v", err)
 }
