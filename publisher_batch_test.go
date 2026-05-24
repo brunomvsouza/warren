@@ -353,6 +353,71 @@ func TestPublishBatch_SingleChannelOrdering(t *testing.T) {
 	assert.Len(t, fake.publishes, n, "all %d messages must go through the single channel", n)
 }
 
+// TestPublishBatch_Mandatory_OnReturnFires verifies that the OnReturn callback
+// fires exactly once for each unroutable message in a mandatory batch, before the
+// corresponding PublishResult slot is resolved with ErrUnroutable. This exercises
+// the SPEC §5.1 contract: "OnReturn fires for each returned message, before the
+// corresponding slot is resolved."
+func TestPublishBatch_Mandatory_OnReturnFires(t *testing.T) {
+	const unroutableMsgID = "test-on-return-batch-fire"
+
+	fake := newFakePubCh(true /* autoAck — sends ack after return */)
+	fake.returnMsgIDs = map[string]uint16{unroutableMsgID: 312}
+
+	// Capture raw returns from the pool goroutine.
+	var mu sync.Mutex
+	var capturedReturns []amqp091.Return
+	rawOnReturn := func(r amqp091.Return) {
+		mu.Lock()
+		capturedReturns = append(capturedReturns, r)
+		mu.Unlock()
+	}
+
+	// Build the publisher manually so we can pass the callback to wireFakePool
+	// (pub.callOnReturn needs the publisher to exist first).
+	pool, stopPool := wireFakePool(fake, rawOnReturn)
+	mc := &managedConn{}
+	pub := &Publisher[testPayload]{
+		pools:               []*publisherConnPool{pool},
+		mcs:                 []*managedConn{mc},
+		codec:               codec.NewJSON(),
+		pm:                  metrics.NoOpPublisherMetrics{},
+		exchange:            "x",
+		publishBatchMaxSize: 1024,
+		confirmTimeout:      2 * time.Second,
+		mandatory:           true,
+	}
+
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	msgs := []Message[testPayload]{
+		{Body: &testPayload{Value: "routed"}},
+		{Body: &testPayload{Value: "unroutable"}, MessageID: unroutableMsgID},
+		{Body: &testPayload{Value: "routed"}},
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrPartialBatch))
+	require.Len(t, results, 3)
+	assert.NoError(t, results[0].Err, "result[0] (routed) must succeed")
+	assert.True(t, errors.Is(results[1].Err, ErrUnroutable),
+		"result[1] (unroutable) must be ErrUnroutable, got %v", results[1].Err)
+	assert.NoError(t, results[2].Err, "result[2] (routed) must succeed")
+
+	// OnReturn must have fired exactly once, for the one unroutable message,
+	// before PublishBatch returned (the call is synchronous in the goroutine).
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, capturedReturns, 1, "OnReturn must fire exactly once for the unroutable message")
+	assert.Equal(t, uint16(312), capturedReturns[0].ReplyCode,
+		"OnReturn must carry the broker reply code 312")
+	assert.Equal(t, unroutableMsgID, capturedReturns[0].MessageId,
+		"OnReturn must identify the correct message by MessageID")
+}
+
 // TestPublishBatch_Mandatory_AllRouted verifies that a mandatory batch where all
 // messages are successfully routed returns nil per-message errors and nil overall.
 func TestPublishBatch_Mandatory_AllRouted(t *testing.T) {

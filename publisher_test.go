@@ -196,9 +196,18 @@ func (m *capturePublisherMetrics) RecordRetry(exchange, reason string) {
 // the merged confirm+return goroutine. stop() closes the goroutine and waits
 // for it to exit before returning; it must be called before goleak.VerifyNone.
 //
+// The optional onReturn callback is invoked (synchronously, in the goroutine)
+// when a basic.return arrives and before tracker.MarkReturned is called. Pass it
+// to verify that the Publisher's OnReturn handler fires in batch mandatory tests.
+//
 // NOTE: pool size is fixed at 1 so that tests never have concurrent goroutines
 // calling methods on the same fake channel (which would break the seq counter).
-func wireFakePool(fake *fakePubChannel) (*publisherConnPool, func()) {
+func wireFakePool(fake *fakePubChannel, onReturn ...func(amqp091.Return)) (*publisherConnPool, func()) {
+	var returnCallback func(amqp091.Return)
+	if len(onReturn) > 0 {
+		returnCallback = onReturn[0]
+	}
+
 	tracker := confirms.New()
 	confirmCh := make(chan amqp091.Confirmation, 16)
 	// returnCh is intentionally unbuffered: PublishWithContext sends to it
@@ -228,6 +237,9 @@ func wireFakePool(fake *fakePubChannel) (*publisherConnPool, func()) {
 				if ret.MessageId != "" {
 					if v, loaded := rtm.LoadAndDelete(ret.MessageId); loaded {
 						tag := v.(uint64) //nolint:forcetypeassert // only uint64 stored
+						if returnCallback != nil {
+							returnCallback(ret)
+						}
 						tracker.MarkReturned(tag, ret.ReplyCode)
 					}
 				}

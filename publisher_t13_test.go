@@ -23,7 +23,11 @@ import (
 func wireReturnPool(ch pubChannel, onReturn func(amqp091.Return)) (*publisherConnPool, *confirms.Tracker, func()) {
 	tracker := confirms.New()
 	confirmCh := make(chan amqp091.Confirmation, 16)
-	returnCh := make(chan amqp091.Return, 16)
+	// returnCh is intentionally unbuffered (mirrors wireFakePool): the fake's
+	// PublishWithContext sends synchronously, which blocks until this goroutine
+	// reads the return. That guarantees tracker.MarkReturned is always called
+	// before the subsequent basic.ack is processed — no time.Sleep required.
+	returnCh := make(chan amqp091.Return)
 	_ = ch.NotifyPublish(confirmCh)
 	_ = ch.NotifyReturn(returnCh)
 
@@ -752,18 +756,19 @@ func (f *fakePubChUnroutable) PublishWithContext(_ context.Context, _, _ string,
 	confirmCh := f.confirmCh
 	f.mu.Unlock()
 
-	go func() {
-		// Simulate basic.return followed by basic.ack.
-		if returnCh != nil {
-			returnCh <- amqp091.Return{
-				ReplyCode:  312,
-				ReplyText:  "NO_ROUTE",
-				Exchange:   "x",
-				RoutingKey: "rk",
-				MessageId:  msg.MessageId,
-			}
+	// Send basic.return synchronously on the unbuffered returnCh: blocks until
+	// the pool goroutine reads it, guaranteeing MarkReturned precedes the Ack.
+	if returnCh != nil {
+		returnCh <- amqp091.Return{
+			ReplyCode:  312,
+			ReplyText:  "NO_ROUTE",
+			Exchange:   "x",
+			RoutingKey: "rk",
+			MessageId:  msg.MessageId,
 		}
-		time.Sleep(2 * time.Millisecond)
+	}
+	// Send the ack in a goroutine (non-blocking) after the return is processed.
+	go func() {
 		if confirmCh != nil {
 			confirmCh <- amqp091.Confirmation{DeliveryTag: tag, Ack: true}
 		}
@@ -830,17 +835,19 @@ func (f *fakePubChReturnsWithCode) PublishWithContext(_ context.Context, _, _ st
 	code := f.replyCode
 	f.mu.Unlock()
 
-	go func() {
-		if returnCh != nil {
-			returnCh <- amqp091.Return{
-				ReplyCode:  code,
-				ReplyText:  "NO_ROUTE",
-				Exchange:   "x",
-				RoutingKey: "rk",
-				MessageId:  msg.MessageId,
-			}
+	// Send basic.return synchronously on the unbuffered returnCh: blocks until
+	// the pool goroutine reads it, guaranteeing MarkReturned precedes the Ack.
+	if returnCh != nil {
+		returnCh <- amqp091.Return{
+			ReplyCode:  code,
+			ReplyText:  "NO_ROUTE",
+			Exchange:   "x",
+			RoutingKey: "rk",
+			MessageId:  msg.MessageId,
 		}
-		time.Sleep(2 * time.Millisecond)
+	}
+	// Send the ack in a goroutine (non-blocking) after the return is processed.
+	go func() {
 		if confirmCh != nil {
 			confirmCh <- amqp091.Confirmation{DeliveryTag: tag, Ack: true}
 		}

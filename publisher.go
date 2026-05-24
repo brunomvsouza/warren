@@ -187,6 +187,9 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 				// returnTagMap is populated by publishOnce and PublishBatch before each
 				// publish; LoadAndDelete removes the entry so it is not double-processed.
 				// The MessageID is always set (applyDefaults stamps a UUIDv7 if empty).
+				// A broker that omits MessageId in basic.return cannot be correlated;
+				// the subsequent ack resolves with nil (success) rather than ErrUnroutable.
+				// In practice RabbitMQ always echoes message properties in basic.return.
 				if ret.MessageId != "" {
 					if v, loaded := entry.returnTagMap.LoadAndDelete(ret.MessageId); loaded { //nolint:gocritic // always non-nil
 						tag := v.(uint64) //nolint:forcetypeassert // only uint64 is stored
@@ -434,10 +437,8 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 	// basic.return arriving for this message can be correlated by the entry's
 	// goroutine. The deferred Delete is a no-op if LoadAndDelete already removed
 	// the entry (i.e. a return arrived before the confirm).
-	if entry.returnTagMap != nil {
-		entry.returnTagMap.Store(msg.MessageID, deliveryTag)
-		defer entry.returnTagMap.Delete(msg.MessageID)
-	}
+	entry.returnTagMap.Store(msg.MessageID, deliveryTag)
+	defer entry.returnTagMap.Delete(msg.MessageID)
 
 	if err := entry.tracker.Register(deliveryTag); err != nil {
 		p.pm.RecordPublish(exchange, "error", time.Since(start))
@@ -491,6 +492,13 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 // AMQPCode can retrieve it). Messages without a routing failure are unaffected.
 // Correlation is performed by MessageID: applyDefaults stamps a UUIDv7 when
 // Message.MessageID is empty, so every message always has a unique key.
+//
+// Note: each message in the batch must have a unique MessageID. When two messages
+// share an explicit MessageID the second Store silently overwrites the first in the
+// return-correlation map, causing undefined ErrUnroutable attribution for mandatory
+// publishers. The library does not enforce uniqueness at call time; callers are
+// responsible for assigning distinct MessageIDs (or leaving them empty for
+// auto-stamping).
 //
 // # PublishTimeout
 //
@@ -607,13 +615,16 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 
 		// Register MessageID → deliveryTag before publishing so that the entry's
 		// goroutine can correlate any basic.return frame to the correct delivery tag.
-		// The goroutine calls LoadAndDelete on return; entries for routed messages
-		// are cleaned up in step 4.5 below.
-		if entry.returnTagMap != nil {
-			entry.returnTagMap.Store(e.msg.MessageID, deliveryTag)
-		}
+		// The goroutine calls LoadAndDelete on return; entries for successfully-routed
+		// messages (no return ever arrives) are cleaned up in step 4.5 below.
+		entry.returnTagMap.Store(e.msg.MessageID, deliveryTag)
 
 		if regErr := entry.tracker.Register(deliveryTag); regErr != nil {
+			// Channel already closed; no publish will happen, so no return can
+			// arrive. Clean up the returnTagMap entry immediately rather than
+			// relying on step 4.5 — the comment there applies only to messages
+			// that were actually published to the broker.
+			entry.returnTagMap.Delete(e.msg.MessageID)
 			results[i].Err = p.mapConfirmError(regErr)
 			continue
 		}
@@ -644,15 +655,18 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 		}
 	}
 
-	// Step 4.5: clean up returnTagMap entries for all messages that passed encoding.
-	// basic.return always precedes basic.ack (RabbitMQ wire guarantee), so by the
-	// time Wait returns the goroutine has already called LoadAndDelete for any
-	// unroutable message. Delete on a missing key is a no-op in sync.Map.
-	if entry.returnTagMap != nil {
-		for _, e := range encoded {
-			if e.err == nil {
-				entry.returnTagMap.Delete(e.msg.MessageID)
-			}
+	// Step 4.5: clean up returnTagMap entries for all messages that were published
+	// to the broker (i.e. passed encoding and Register). For unroutable messages the
+	// goroutine already called LoadAndDelete when the basic.return arrived — those
+	// entries are gone by the time Wait returns (basic.return always precedes
+	// basic.ack, and Wait only returns after the ack). For successfully-routed
+	// messages no return ever arrives, so their entries remain and must be removed
+	// here. For messages that failed at PublishWithContext, their entries were also
+	// never consumed by a return, so they are cleaned up here too.
+	// Delete on a missing key is a no-op in sync.Map.
+	for _, e := range encoded {
+		if e.err == nil {
+			entry.returnTagMap.Delete(e.msg.MessageID)
 		}
 	}
 
