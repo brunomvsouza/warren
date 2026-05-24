@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
 	"github.com/brunomvsouza/warren/codec"
@@ -32,6 +33,14 @@ type deliverySub struct {
 	done <-chan struct{} // nil when channel-close detection is not needed
 }
 
+// redeliveryCounter holds per-channel in-process redelivery state (counter B).
+// A new instance is created on every channel open so that channel close automatically
+// "drops" the old counts — delivery tags from a previous channel cannot bleed over.
+type redeliveryCounter struct {
+	chanID string   // UUID identifying this channel instance
+	m      sync.Map // key: string (chanID+":"+messageID), value: int64
+}
+
 // Consumer receives AMQP messages from a single queue, decodes each payload
 // to M via the configured codec, and dispatches to a Handler[M] or RawHandler[M].
 //
@@ -48,6 +57,14 @@ type Consumer[M any] struct {
 	prioritySet    bool
 	handlerTimeout time.Duration
 	timeoutVerdict TimeoutVerdict
+
+	// MaxRedeliveries enforcement.
+	// maxRedeliveries == 0 means unbounded (feature disabled).
+	maxRedeliveries  int
+	counterBDisabled bool // true for quorum queues with broker-enforced DeliveryLimit
+	// counterState holds the per-channel in-process counter B map.
+	// Replaced atomically on every channel open so "channel close resets counter B".
+	counterState atomic.Pointer[redeliveryCounter]
 
 	codec  codec.Codec
 	cm     metrics.ConsumerMetrics
@@ -84,22 +101,28 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 	idx := connIndexForTag(tag, numConns)
 	mc := b.conn.ConConnAt(idx)
 
-	return &Consumer[M]{
-		queue:          b.queue,
-		tag:            tag,
-		concurrency:    b.concurrency,
-		prefetch:       b.prefetch,
-		channelQoS:     b.channelQoS,
-		priority:       b.priority,
-		prioritySet:    b.prioritySet,
-		handlerTimeout: b.handlerTimeout,
-		timeoutVerdict: b.timeoutVerdict,
-		codec:          b.c,
-		cm:             b.cm,
-		tracer:         b.tracer,
-		mc:             mc,
-		closedCh:       make(chan struct{}),
+	c := &Consumer[M]{
+		queue:            b.queue,
+		tag:              tag,
+		concurrency:      b.concurrency,
+		prefetch:         b.prefetch,
+		channelQoS:       b.channelQoS,
+		priority:         b.priority,
+		prioritySet:      b.prioritySet,
+		handlerTimeout:   b.handlerTimeout,
+		timeoutVerdict:   b.timeoutVerdict,
+		maxRedeliveries:  b.maxRedeliveries,
+		counterBDisabled: b.counterBDisabled,
+		codec:            b.c,
+		cm:               b.cm,
+		tracer:           b.tracer,
+		mc:               mc,
+		closedCh:         make(chan struct{}),
 	}
+	// Initialise counterState with an empty map and a placeholder chanID.
+	// openDeliveryCh rotates this on every channel open.
+	c.counterState.Store(&redeliveryCounter{chanID: ""})
+	return c
 }
 
 // connIndexForTag returns a stable index in [0, n) for the given consumer tag (FNV-1a).
@@ -208,7 +231,18 @@ func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error {
 
 // openDeliveryCh opens a subscription. Unit tests pre-set deliverySubOverride or
 // deliveryCh to inject deliveries without a live broker; production opens a real AMQP channel.
+//
+// On every call, a fresh redeliveryCounter (counter B state) is installed atomically
+// so that channel close automatically resets all in-process redelivery counts.
 func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
+	// Rotate counter B state regardless of the channel source (real or injected).
+	// This ensures the "channel close resets counter B" contract holds in all paths.
+	chanID := ""
+	if id, err := uuid.NewV7(); err == nil {
+		chanID = id.String()
+	}
+	c.counterState.Store(&redeliveryCounter{chanID: chanID})
+
 	if c.deliverySubOverride != nil {
 		return *c.deliverySubOverride, nil
 	}
@@ -317,6 +351,37 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 
 	d := newDelivery[M](&body, c.queue, raw, c.closedCh)
 
+	// — Counter A (x-death, cross-process) ————————————————————————————
+	// Fires BEFORE calling the handler. Short-circuits without invoking the
+	// handler when the message has already bounced through DLX n+ times.
+	if c.maxRedeliveries > 0 && d.DeathCount() >= c.maxRedeliveries {
+		c.cm.RecordMaxRedeliveries(c.queue, "x-death")
+		c.mc.opts.logger.Warningf(
+			"warren: max redeliveries exceeded for queue %q (cause=x-death, death_count=%d, limit=%d)",
+			c.queue, d.DeathCount(), c.maxRedeliveries,
+		)
+		_ = raw.Nack(false, false)
+		return
+	}
+
+	// — Counter B key (in-process, per channel) ————————————————————————
+	// Capture the current channel's state atomically at dispatch start.
+	// This snapshot is stable for the lifetime of this dispatch goroutine;
+	// if the channel reconnects mid-handler, new dispatches get a fresh
+	// redeliveryCounter while this goroutine still works with the old one.
+	var counterBKey string
+	var cs *redeliveryCounter
+	if c.maxRedeliveries > 0 && !c.counterBDisabled {
+		cs = c.counterState.Load()
+		msgID := raw.MessageId
+		if msgID == "" {
+			// Fallback key when MessageID is absent: (chanID, consumerTag, deliveryTag).
+			// deliveryTag is unique within a channel; chanID prevents cross-channel collision.
+			msgID = fmt.Sprintf("_dlv_%s_%d", c.tag, raw.DeliveryTag)
+		}
+		counterBKey = cs.chanID + ":" + msgID
+	}
+
 	// hCtxBase is the WithCancelCause context used to propagate ErrChannelClosed
 	// to the handler goroutine when the AMQP channel closes mid-handler (timeout path).
 	hCtxBase, cancelCause := context.WithCancelCause(ctx)
@@ -349,8 +414,9 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
 			return // no ack — broker will redeliver
 		}
-		c.cm.RecordHandler(c.queue, handlerOutcome(handlerErr), elapsed)
-		_ = d.AckIf(handlerErr)
+		processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
+		c.cm.RecordHandler(c.queue, handlerOutcome(processedErr), elapsed)
+		_ = d.AckIf(processedErr)
 		return
 	}
 
@@ -376,8 +442,9 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
 			return
 		}
-		c.cm.RecordHandler(c.queue, handlerOutcome(handlerErr), elapsed)
-		_ = d.AckIf(handlerErr)
+		processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
+		c.cm.RecordHandler(c.queue, handlerOutcome(processedErr), elapsed)
+		_ = d.AckIf(processedErr)
 
 	case <-chanDone: // nil channel: never selected when chanDone is nil
 		elapsed := time.Since(start)
@@ -406,6 +473,50 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		cancelCause(nil) // signal handler goroutine before draining
 		<-handlerDone
 	}
+}
+
+// applyCounterB enforces the in-process redelivery counter (counter B).
+//
+// If counterBKey is empty (feature disabled or counter B disabled), the original
+// handlerErr is returned unchanged.
+//
+// Rules:
+//   - If handlerErr is NOT ErrRequeue: delete the counter B entry (Ack or Nack(false) path).
+//   - If handlerErr IS ErrRequeue: check whether incrementing would exceed maxRedeliveries.
+//     If yes: log, record metric, delete entry, and return ErrMaxRedeliveries (rewriting the
+//     verdict to Nack(false)). If no: increment and return the original ErrRequeue.
+func (c *Consumer[M]) applyCounterB(cs *redeliveryCounter, counterBKey string, handlerErr error) error {
+	if counterBKey == "" || cs == nil {
+		return handlerErr
+	}
+
+	if !errors.Is(handlerErr, ErrRequeue) {
+		// Ack or Nack(false): clean up the counter B entry to avoid memory leaks.
+		cs.m.Delete(counterBKey)
+		return handlerErr
+	}
+
+	// Handler returned ErrRequeue: check counter B before incrementing.
+	var currentCount int64
+	if v, ok := cs.m.Load(counterBKey); ok {
+		currentCount = v.(int64)
+	}
+
+	// "Once incrementing it would exceed n" = current + 1 > n = current >= n.
+	if currentCount+1 > int64(c.maxRedeliveries) {
+		// Rewrite verdict: Nack(false) instead of Nack(requeue=true).
+		c.cm.RecordMaxRedeliveries(c.queue, "in-process")
+		c.mc.opts.logger.Warningf(
+			"warren: max redeliveries exceeded for queue %q (cause=in-process, count=%d, limit=%d)",
+			c.queue, currentCount+1, c.maxRedeliveries,
+		)
+		cs.m.Delete(counterBKey)
+		return fmt.Errorf("%w (in-process counter exceeded)", ErrMaxRedeliveries)
+	}
+
+	// Increment and allow Nack(requeue=true) to proceed.
+	cs.m.Store(counterBKey, currentCount+1)
+	return handlerErr
 }
 
 func handlerOutcome(err error) string {

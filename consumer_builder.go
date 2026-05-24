@@ -29,6 +29,9 @@ type ConsumerBuilder[M any] struct {
 	handlerTimeout time.Duration
 	timeoutVerdict TimeoutVerdict
 
+	maxRedeliveries  int
+	counterBDisabled bool // true when quorum queue with DeliveryLimit > 0
+
 	c      codec.Codec
 	cm     metrics.ConsumerMetrics
 	tracer otel.Tracer
@@ -140,8 +143,38 @@ func (b *ConsumerBuilder[M]) Args(_ Headers) *ConsumerBuilder[M] { return b }
 func (b *ConsumerBuilder[M]) OnCancel(_ func(reason string)) *ConsumerBuilder[M] { return b }
 
 // MaxRedeliveries caps the number of times a message can be redelivered before
-// it is dead-lettered. NOTE: full implementation is in T20.
-func (b *ConsumerBuilder[M]) MaxRedeliveries(_ int) *ConsumerBuilder[M] { return b }
+// it is dead-lettered. Default 0 = unbounded.
+//
+// Two complementary counters enforce the ceiling:
+//
+//   - Counter A (cross-process): reads x-death headers; bounds DLX-bounce loops
+//     that survive consumer restarts. Fires before the handler is called.
+//
+//   - Counter B (in-process, process-local): counts consecutive ErrRequeue returns
+//     for the same (channel-instance, MessageID). Resets on channel close.
+//     Fires after the handler returns ErrRequeue.
+//
+// When the source queue is a quorum queue with DeliveryLimit > 0 (declared via
+// TopologyHint), counter B is auto-disabled: the broker is authoritative.
+// Counter A still runs as a safety net. See TopologyHint.
+func (b *ConsumerBuilder[M]) MaxRedeliveries(n int) *ConsumerBuilder[M] {
+	b.maxRedeliveries = n
+	return b
+}
+
+// TopologyHint provides queue metadata that modifies counter B behaviour.
+// Currently used to detect quorum queues with DeliveryLimit > 0, which disable
+// the in-process counter B (broker handles redelivery bounding via x-delivery-limit).
+//
+// Call TopologyHint after MaxRedeliveries so the carve-out takes effect.
+func (b *ConsumerBuilder[M]) TopologyHint(q Queue) *ConsumerBuilder[M] {
+	if q.Type == QueueTypeQuorum && q.DeliveryLimit > 0 {
+		b.counterBDisabled = true
+	} else {
+		b.counterBDisabled = false
+	}
+	return b
+}
 
 // Build constructs and returns a Consumer[M]. Returns an error if
 // the builder state is invalid.

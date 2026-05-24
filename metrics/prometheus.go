@@ -144,14 +144,16 @@ func (m *PrometheusPublisherMetrics) RecordRetry(exchange, reason string) {
 //   - consumer_handler_timeout_total{queue}
 //   - consumer_handler_seconds{queue,outcome}
 //   - consumer_cancelled_total{queue,reason}
+//   - consumer_max_redeliveries_total{queue,cause}
 //   - replier_drop_no_dlx_total{queue}
 type PrometheusConsumerMetrics struct {
-	resubscribedTotal   *prometheus.CounterVec
-	handlerAbortedTotal *prometheus.CounterVec
-	handlerTimeoutTotal *prometheus.CounterVec
-	handlerSeconds      *prometheus.HistogramVec
-	cancelledTotal      *prometheus.CounterVec
-	replierDropNoDLX    *prometheus.CounterVec
+	resubscribedTotal    *prometheus.CounterVec
+	handlerAbortedTotal  *prometheus.CounterVec
+	handlerTimeoutTotal  *prometheus.CounterVec
+	handlerSeconds       *prometheus.HistogramVec
+	cancelledTotal       *prometheus.CounterVec
+	maxRedeliveriesTotal *prometheus.CounterVec
+	replierDropNoDLX     *prometheus.CounterVec
 }
 
 // NewPrometheusConsumerMetrics creates a PrometheusConsumerMetrics and registers all
@@ -189,6 +191,10 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64) 
 			Name: "consumer_cancelled_total",
 			Help: "Total number of broker-initiated consumer cancellations (basic.cancel).",
 		}, []string{"queue", "reason"}),
+		maxRedeliveriesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "consumer_max_redeliveries_total",
+			Help: "Total number of messages that exceeded MaxRedeliveries, by enforcement cause.",
+		}, []string{"queue", "cause"}),
 		replierDropNoDLX: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "replier_drop_no_dlx_total",
 			Help: "Total number of Replier messages dropped due to missing dead-letter exchange.",
@@ -200,6 +206,7 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64) 
 		m.handlerTimeoutTotal,
 		m.handlerSeconds,
 		m.cancelledTotal,
+		m.maxRedeliveriesTotal,
 		m.replierDropNoDLX,
 	} {
 		if err := reg.Register(c); err != nil {
@@ -233,6 +240,11 @@ func (m *PrometheusConsumerMetrics) RecordHandler(queue, outcome string, d time.
 // reason is the consumer tag reported by the broker's basic.cancel frame.
 func (m *PrometheusConsumerMetrics) RecordCancelled(queue, reason string) {
 	m.cancelledTotal.WithLabelValues(queue, reason).Inc()
+}
+
+// RecordMaxRedeliveries increments consumer_max_redeliveries_total for the given queue and cause.
+func (m *PrometheusConsumerMetrics) RecordMaxRedeliveries(queue, cause string) {
+	m.maxRedeliveriesTotal.WithLabelValues(queue, cause).Inc()
 }
 
 // RecordReplierDropNoDLX increments replier_drop_no_dlx_total for the given queue.

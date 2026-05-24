@@ -62,6 +62,7 @@ type PublisherMetrics interface {
 //   - consumer_handler_timeout_total{queue}
 //   - consumer_handler_seconds{queue,outcome}
 //   - consumer_cancelled_total{queue,reason}
+//   - consumer_max_redeliveries_total{queue,cause}
 //   - replier_drop_no_dlx_total{queue}
 type ConsumerMetrics interface {
 	// RecordResubscribed increments the resubscription counter after a reconnect.
@@ -77,6 +78,12 @@ type ConsumerMetrics interface {
 	// reason is the consumer tag reported by basic.cancel; it identifies which
 	// consumer the broker cancelled (useful when multiple consumers share a queue).
 	RecordCancelled(queue, reason string)
+	// RecordMaxRedeliveries increments the max-redeliveries counter.
+	// cause distinguishes the three enforcement paths:
+	//   - "x-death"        counter A: x-death ceiling exceeded (cross-process, DLX bounces)
+	//   - "in-process"     counter B: in-process requeue loop exceeded (process-local)
+	//   - "delivery-limit" broker-enforced on quorum queues (counter B disabled)
+	RecordMaxRedeliveries(queue, cause string)
 	// RecordReplierDropNoDLX increments the counter for Replier messages dropped
 	// because the request queue has no dead-letter exchange configured.
 	RecordReplierDropNoDLX(queue string)

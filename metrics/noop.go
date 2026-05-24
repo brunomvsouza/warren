@@ -50,5 +50,8 @@ func (NoOpConsumerMetrics) RecordHandler(_, _ string, _ time.Duration) {}
 // RecordCancelled discards the broker-initiated cancel counter increment.
 func (NoOpConsumerMetrics) RecordCancelled(_, _ string) {}
 
+// RecordMaxRedeliveries discards the max-redeliveries counter increment.
+func (NoOpConsumerMetrics) RecordMaxRedeliveries(_, _ string) {}
+
 // RecordReplierDropNoDLX discards the Replier drop-no-DLX counter increment.
 func (NoOpConsumerMetrics) RecordReplierDropNoDLX(_ string) {}

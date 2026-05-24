@@ -553,7 +553,7 @@ asserts they all land in the registry).
 - **Files:** edits to `metrics/metrics.go`, `metrics/prometheus.go`, `consumer.go`.
 - **Deps:** T18, T04.
 
-### [ ] T20 — `MaxRedeliveries` enforcement with quorum carve-out · S
+### [x] T20 — `MaxRedeliveries` enforcement with quorum carve-out · S
 SPEC compliance: AMQP 0-9-1 only writes `x-death` on dead-letter
 events (TTL, length limit, `Nack(requeue=false)`) — **not** on
 `Nack(requeue=true)`. Bounding an `ErrRequeue` loop with `x-death`
