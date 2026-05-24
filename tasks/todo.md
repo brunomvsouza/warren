@@ -578,25 +578,25 @@ the consumer-side counter B is auto-disabled.
 - **Files:** edits to `consumer.go`, plus `consumer_maxredeliveries_inproc_integration_test.go`, `consumer_maxredeliveries_quorum_integration_test.go`, `consumer_maxredeliveries_dlx_integration_test.go`, `consumer_maxredeliveries_restart_integration_test.go`, `consumer_maxredeliveries_leak_test.go`.
 - **Deps:** T17, T18.
 
-### [ ] T21 — `ConsumeRaw` + `Delivery.AckIf` polish · S
+### [x] T21 — `ConsumeRaw` + `Delivery.AckIf` polish · S
 - **Acceptance:**
-  - [ ] `Consumer.ConsumeRaw(ctx, RawHandler[M])` available; handler receives `*Delivery[M]`.
-  - [ ] Raw handler is responsible for Ack/Nack — consumer does not auto-ack.
+  - [x] `Consumer.ConsumeRaw(ctx, RawHandler[M])` available; handler receives `*Delivery[M]`.
+  - [x] Raw handler is responsible for Ack/Nack — consumer does not auto-ack.
   - [ ] Integration test exercises `Redelivered()`, `Headers()`, `DeathCount()`.
 - **Verify:** Integration test.
 - **Files:** edits to `consumer.go`, `consumer_raw_integration_test.go`.
 - **Deps:** T18.
 
-### [ ] T21b — Checkpoint example: `examples/consume/main.go` · S
+### [x] T21b — Checkpoint example: `examples/consume/main.go` · S
 Per SPEC §7 "Executable examples at checkpoints" + §10 Rev
 decision 49. Lands together with the rest of the Phase 4
 acceptance to close the checkpoint.
 - **Acceptance:**
-  - [ ] `examples/consume/main.go` is `package main`, reads `AMQP_URL`, declares topology in-process (one exchange + one queue + one DLX), spawns a `PublisherFor[Order]` that publishes 5 messages (good + bad + slow + transient + poison), and runs a `ConsumerFor[Order]` with `Concurrency(4)`, `Prefetch(8)`, `MaxRedeliveries(3)`, `HandlerTimeout(2*time.Second)`, and a payload-first handler that demonstrates each of the three result classes (`nil` → Ack; default error → `Nack(false)`; `errors.Join(err, ErrRequeue)` → `Nack(true)`). The example logs each verdict and exits 0 after observing the expected mix on the source + DLX queues.
-  - [ ] Top-of-file godoc block follows the T13b shape.
-  - [ ] `go build ./examples/...` green on the unit lane.
-  - [ ] Integration test (`examples/consume/example_integration_test.go`, `integration` tag) runs the example as a subprocess against a testcontainer, with `AMQP_URL` injected; asserts (a) exit 0; (b) the source queue is empty after the example exits; (c) one message is observable on the DLX queue (the always-erroring one, after `MaxRedeliveries` exhaustion); (d) `goleak.VerifyNone(t)` clean.
-  - [ ] If T21b lands before T19 (consumer metrics), the example skips the metrics assertion and the integration test marks that section as `t.Skip("metrics arrive in T19")`. (Acceptable because T19 ships in the same phase.)
+  - [x] `examples/consume/main.go` is `package main`, reads `AMQP_URL`, declares topology in-process (one exchange + one queue + one DLX), spawns a `PublisherFor[Order]` that publishes 5 messages (good + bad + slow + transient + poison), and runs a `ConsumerFor[Order]` with `Concurrency(4)`, `Prefetch(8)`, `MaxRedeliveries(3)`, `HandlerTimeout(2*time.Second)`, and a payload-first handler that demonstrates each of the three result classes (`nil` → Ack; default error → `Nack(false)`; `errors.Join(err, ErrRequeue)` → `Nack(true)`). The example logs each verdict and exits 0 after observing the expected mix on the source + DLX queues.
+  - [x] Top-of-file godoc block follows the T13b shape.
+  - [x] `go build ./examples/...` green on the unit lane.
+  - [x] Integration test (`examples/consume/example_integration_test.go`, `integration` tag) runs the example as a subprocess against a testcontainer, with `AMQP_URL` injected; asserts (a) exit 0; (b) the source queue is empty after the example exits; (c) one message is observable on the DLX queue (the always-erroring one, after `MaxRedeliveries` exhaustion); (d) `goleak.VerifyNone(t)` clean.
+  - [x] If T21b lands before T19 (consumer metrics), the example skips the metrics assertion and the integration test marks that section as `t.Skip("metrics arrive in T19")`. (Acceptable because T19 ships in the same phase.)
 - **Verify:** `go build ./examples/...`; `go test -race -tags=integration ./examples/consume/...`; manual subprocess smoke-run.
 - **Files:** `examples/consume/main.go`, `examples/consume/example_integration_test.go`, edits to `README.md`.
 - **Deps:** T18, T20, T21. (Strong pairing — T21b cannot close until T18/T20/T21 land.)
