@@ -16,12 +16,12 @@ func purgeQueues(t *testing.T, url string, queues ...string) {
 	if err != nil {
 		return
 	}
-	defer rc.Close()
+	defer rc.Close() //nolint:errcheck // best-effort cleanup
 	ch, err := rc.Channel()
 	if err != nil {
 		return
 	}
-	defer ch.Close()
+	defer ch.Close() //nolint:errcheck // best-effort cleanup
 	for _, q := range queues {
 		ch.QueuePurge(q, false) //nolint:errcheck
 	}
@@ -34,13 +34,31 @@ func deleteQueues(url string, queues ...string) {
 	if err != nil {
 		return
 	}
-	defer rc.Close()
+	defer rc.Close() //nolint:errcheck // best-effort cleanup
 	ch, err := rc.Channel()
 	if err != nil {
 		return
 	}
-	defer ch.Close()
+	defer ch.Close() //nolint:errcheck // best-effort cleanup
 	for _, q := range queues {
 		ch.QueueDelete(q, false, false, false) //nolint:errcheck
+	}
+}
+
+// deleteExchanges deletes the named exchanges using a fresh raw AMQP connection.
+// Non-existent exchanges are silently ignored.
+func deleteExchanges(url string, exchanges ...string) {
+	rc, err := amqp091.Dial(url)
+	if err != nil {
+		return
+	}
+	defer rc.Close() //nolint:errcheck // best-effort cleanup
+	ch, err := rc.Channel()
+	if err != nil {
+		return
+	}
+	defer ch.Close() //nolint:errcheck // best-effort cleanup
+	for _, ex := range exchanges {
+		ch.ExchangeDelete(ex, false, false) //nolint:errcheck
 	}
 }

@@ -71,8 +71,13 @@ func TestHandlerTimeoutVerdict_NackNoRequeue_integration(t *testing.T) {
 	// Purge any leftover messages from a previous run.
 	purgeQueues(t, url, srcQ, dlqQ)
 
-	// Cleanup: delete queues after the test so future runs start clean.
-	t.Cleanup(func() { deleteQueues(url, srcQ, dlqQ) })
+	// Cleanup: delete queues and exchanges after the test so future runs start clean.
+	// deleteExchanges is called separately because the exchange is declared with
+	// AutoDelete: false and won't be removed when queues are deleted.
+	t.Cleanup(func() {
+		deleteQueues(url, srcQ, dlqQ)
+		deleteExchanges(url, dlxExch)
+	})
 
 	conn, err := warren.Dial(ctx, warren.WithAddr(url))
 	require.NoError(t, err)
@@ -163,18 +168,18 @@ func TestHandlerTimeoutVerdict_NackNoRequeue_integration(t *testing.T) {
 
 	// (1) Handler ctx cancelled near 50ms deadline.
 	elapsed := ctxCancelTime.Sub(handlerStarted)
-	assert.True(t, elapsed >= 30*time.Millisecond,
-		"ctx should be cancelled near the 50ms deadline; elapsed=%v", elapsed)
-	assert.True(t, elapsed < 200*time.Millisecond,
-		"ctx cancelled too late (handler should not run 200ms); elapsed=%v", elapsed)
+	assert.GreaterOrEqual(t, elapsed, 30*time.Millisecond,
+		"ctx should be cancelled near the 50ms deadline")
+	assert.Less(t, elapsed, 200*time.Millisecond,
+		"ctx cancelled too late (handler should not run 200ms)")
 
 	// Open a raw AMQP connection for broker-side assertions (2) and (4).
 	rawConn, err := amqp091.Dial(url)
 	require.NoError(t, err)
-	defer rawConn.Close()
+	defer rawConn.Close() //nolint:errcheck // raw AMQP cleanup — error is non-actionable in defer
 	rawCh, err := rawConn.Channel()
 	require.NoError(t, err)
-	defer rawCh.Close()
+	defer rawCh.Close() //nolint:errcheck // raw AMQP cleanup — error is non-actionable in defer
 
 	// (2) Message landed on DLQ — poll until the broker routes the dead-lettered message.
 	// Using require.Eventually avoids a brittle fixed sleep while bounding the wait.
@@ -283,14 +288,18 @@ func TestHandlerTimeoutVerdict_NackRequeue_integration(t *testing.T) {
 	}
 
 	// (1) Message was redelivered at least once (handler called >= 2 times).
-	assert.GreaterOrEqual(t, deliveryCount.Load(), int64(2),
+	dc := deliveryCount.Load()
+	assert.GreaterOrEqual(t, dc, int64(2),
 		"message must be redelivered at least once (deliveryCount must be >= 2)")
 
 	// (2) All metric outcome labels must be "timeout_nack_requeue".
-	assert.GreaterOrEqual(t, spy.timeoutTotal.Load(), int64(2),
-		"consumer_handler_timeout_total must be >= 2")
+	// Parity: timeoutTotal and len(outcomes) must equal deliveryCount — each delivery
+	// must produce exactly one RecordHandlerTimeout and one RecordHandler call.
+	assert.Equal(t, dc, spy.timeoutTotal.Load(),
+		"consumer_handler_timeout_total must equal deliveryCount")
 	outcomes := spy.outcomes()
-	require.NotEmpty(t, outcomes, "RecordHandler must have been called")
+	assert.Equal(t, int(dc), len(outcomes),
+		"RecordHandler call count must equal deliveryCount")
 	for _, o := range outcomes {
 		assert.Equal(t, "timeout_nack_requeue", o,
 			"all consumer_handler_seconds outcomes must be timeout_nack_requeue")

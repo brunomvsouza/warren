@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
 
       - uses: actions/setup-go@v6
         with:
@@ -52,6 +54,8 @@ jobs:
       AMQP_TEST_URL: amqp://guest:guest@localhost:5672/
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
 
       - uses: actions/setup-go@v6
         with:

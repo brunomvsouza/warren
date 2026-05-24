@@ -637,6 +637,65 @@ func TestConsumer_Consume_TimeoutPath_ChannelClose_AbortsWithoutAck(t *testing.T
 	assert.Equal(t, 1, cm.channelAborts)
 }
 
+func TestConsumer_Consume_TimeoutPath_OuterCtxCancelled_NoAckNoMetric(t *testing.T) {
+	// When the outer ctx is cancelled while the handler goroutine (timeout path) is
+	// blocked — before HandlerTimeout fires — dispatch must pick the default branch
+	// of the hCtx.Done() switch: no ack/nack emitted, no timeout metric recorded.
+	// This covers consumer.go "default: // Outer ctx cancelled; no ack" branch.
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	cm := &countingConsumerMetrics{}
+	consumer, err := ConsumerFor[string](conn).
+		Queue("testq").
+		HandlerTimeout(5 * time.Second). // long: must not fire before outer cancel
+		Metrics(cm).
+		Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ackOrNack := make(chan string, 1)
+	handlerStarted := make(chan struct{})
+
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = consumer.Consume(ctx, func(hCtx context.Context, _ string) error {
+			close(handlerStarted)
+			<-hCtx.Done() // block until outer ctx is cancelled
+			return hCtx.Err()
+		})
+	}()
+
+	deliveryCh <- amqp091.Delivery{
+		Body:        []byte(`"hello"`),
+		ContentType: "application/json",
+		Acknowledger: &fakeAcknowledger{
+			ackFn:  func(_ uint64, _ bool) error { ackOrNack <- "ack"; return nil },
+			nackFn: func(_ uint64, _, _ bool) error { ackOrNack <- "nack"; return nil },
+		},
+	}
+
+	<-handlerStarted
+	cancel() // cancel outer ctx before HandlerTimeout fires
+	<-consumeDone
+
+	// No ack or nack must have been emitted — broker will redeliver.
+	select {
+	case op := <-ackOrNack:
+		t.Fatalf("expected no ack/nack when outer ctx cancelled mid-handler, got %q", op)
+	default:
+	}
+	// No timeout metric must be recorded — this was an outer cancel, not a deadline.
+	assert.Equal(t, 0, cm.handlerTimeouts,
+		"RecordHandlerTimeout must not be called when outer ctx is cancelled")
+}
+
 func TestConsumer_Consume_DeliveryChannelClosed_WaitsForCtxCancel(t *testing.T) {
 	// When cur.ch receives !ok (AMQP channel closed), ConsumeRaw enters the inner
 	// select waiting for resubCh or ctx cancel. Without a resubCh signal, ctx
