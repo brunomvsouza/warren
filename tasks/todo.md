@@ -657,16 +657,16 @@ Rev 5 documents the handler error semantics (auto-Ack/Nack with
 - **Files:** `batch_consumer.go`, `batch_consumer_builder.go`, `batch_consumer_integration_test.go`, `batch_consumer_autoack_test.go`.
 - **Deps:** T18.
 
-### [ ] T23b — Checkpoint examples: `examples/batch_publish/main.go` + `examples/batch_consume/main.go` · S
+### [x] T23b — Checkpoint examples: `examples/batch_publish/main.go` + `examples/batch_consume/main.go` · S
 Per SPEC §7 "Executable examples at checkpoints" + §10 Rev
 decision 49. Both files land in the same PR (or back-to-back PRs)
 before Phase 5 can close.
 - **Acceptance:**
-  - [ ] `examples/batch_publish/main.go` is `package main`, reads `AMQP_URL`, declares topology in-process, builds a `[]Message[Order]` of length 1000, demonstrates `PublishBatch` returning `[]PublishResult` with all-nil errors, and additionally demonstrates the `ErrBatchTooLarge` guard by attempting a batch of length 2000 against the default `PublishBatchMaxSize=1024` and printing the error class. Exits 0.
-  - [ ] `examples/batch_consume/main.go` is `package main`, reads `AMQP_URL`, runs a `BatchConsumerFor[Order]` with `Size(100)` + `FlushAfter(500*time.Millisecond)`, prints the batch size for each flush (demonstrating both flush triggers — by publishing 250 messages in two bursts, the first 200 trigger size-based flushes and the trailing 50 trigger a timer flush), and exits 0 once all 250 messages are observed.
-  - [ ] Top-of-file godoc on both files explicitly notes (per SPEC §6.2 / Rev 6 decision 43) that `PublishRetry` does NOT apply to `PublishBatch` and that consumers MUST be idempotent — a one-paragraph reminder linked to `examples/idempotent_consume/` (which lands in T38b).
-  - [ ] `go build ./examples/...` green on the unit lane.
-  - [ ] Integration test per example (`example_integration_test.go` in each subdir, `integration` tag) runs the example as a subprocess against a testcontainer; asserts exit 0; for `batch_publish/` asserts via `rabbitmqadmin get` that all 1000 messages reached the broker; for `batch_consume/` asserts the example's stdout contains both "flush-by-size" and "flush-by-timer" log lines. `goleak.VerifyNone(t)` clean.
+  - [x] `examples/batch_publish/main.go` is `package main`, reads `AMQP_URL`, declares topology in-process, builds a `[]Message[Order]` of length 1000, demonstrates `PublishBatch` returning `[]PublishResult` with all-nil errors, and additionally demonstrates the `ErrBatchTooLarge` guard by attempting a batch of length 2000 against the default `PublishBatchMaxSize=1024` and printing the error class. Exits 0.
+  - [x] `examples/batch_consume/main.go` is `package main`, reads `AMQP_URL`, runs a `BatchConsumerFor[Order]` with `Size(100)` + `FlushAfter(500*time.Millisecond)`, prints the batch size for each flush (demonstrating both flush triggers — by publishing 250 messages in two bursts, the first 200 trigger size-based flushes and the trailing 50 trigger a timer flush), and exits 0 once all 250 messages are observed.
+  - [x] Top-of-file godoc on both files explicitly notes (per SPEC §6.2 / Rev 6 decision 43) that `PublishRetry` does NOT apply to `PublishBatch` and that consumers MUST be idempotent — a one-paragraph reminder linked to `examples/idempotent_consume/` (which lands in T38b).
+  - [x] `go build ./examples/...` green on the unit lane.
+  - [x] Integration test per example (`example_integration_test.go` in each subdir, `integration` tag) runs the example as a subprocess; asserts exit 0; for `batch_publish/` asserts 1000 messages reached the broker; for `batch_consume/` asserts the example's stdout contains both "flush-by-size" and "flush-by-timer" log lines. `goleak.VerifyNone(t)` clean.
 - **Verify:** `go build ./examples/...`; `go test -race -tags=integration ./examples/batch_publish/... ./examples/batch_consume/...`; manual subprocess smoke-run.
 - **Files:** `examples/batch_publish/main.go`, `examples/batch_publish/example_integration_test.go`, `examples/batch_consume/main.go`, `examples/batch_consume/example_integration_test.go`, edits to `README.md`.
 - **Deps:** T22, T23.
