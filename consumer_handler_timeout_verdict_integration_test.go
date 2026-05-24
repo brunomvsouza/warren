@@ -39,8 +39,9 @@ func (s *spyConsumerMetrics) RecordHandler(_ string, outcome string, _ time.Dura
 	defer s.mu.Unlock()
 	s.handlerOutcomes = append(s.handlerOutcomes, outcome)
 }
-func (s *spyConsumerMetrics) RecordReplierDropNoDLX(_ string) {}
-func (s *spyConsumerMetrics) RecordCancelled(_, _ string)    {}
+func (s *spyConsumerMetrics) RecordReplierDropNoDLX(_ string)      {}
+func (s *spyConsumerMetrics) RecordCancelled(_, _ string)          {}
+func (s *spyConsumerMetrics) RecordMaxRedeliveries(_, _ string)    {}
 
 func (s *spyConsumerMetrics) outcomes() []string {
 	s.mu.Lock()
