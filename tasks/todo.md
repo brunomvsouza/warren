@@ -523,13 +523,13 @@ documented Concurrency-vs-ordering trade-off.
 - **Files:** `consumer.go`, `consumer_builder.go`, `consumer_test.go`, `consumer_integration_test.go`, `consumer_qos_conformance_test.go`, `consumer_resubscribe_integration_test.go`, `consumer_handler_ctx_integration_test.go`, `consumer_handler_timeout_integration_test.go`, `consumer_priority_integration_test.go`.
 - **Deps:** T07b, T07d, T08, T09, T17.
 
-### [ ] T18b — `HandlerTimeoutVerdict` matrix test · S
+### [x] T18b — `HandlerTimeoutVerdict` matrix test · S
 Rev 6 explicit test for the new builder method (T18 ships the
 mechanism; T18b is the dedicated test matrix to make the trade-off
 visible).
 - **Acceptance:**
-  - [ ] Test case A — `TimeoutNackNoRequeue` (default): `HandlerTimeout(50ms)` + handler that `time.Sleep(200ms)`; assert (1) handler ctx cancelled around 50ms; (2) message goes to the configured DLX (via integration with T15 DLX expansion); (3) `consumer_handler_timeout_total{queue, verdict=nack_no_requeue}` == 1; (4) no redelivery on the source queue.
-  - [ ] Test case B — `TimeoutNackRequeue` opt-in: same handler, builder calls `HandlerTimeoutVerdict(TimeoutNackRequeue)`; assert (1) message redelivered up to `MaxRedeliveries` / `x-delivery-limit`; (2) metric label `verdict=nack_requeue`; (3) after the limit, the message is dead-lettered per the configured bound.
+  - [x] Test case A — `TimeoutNackNoRequeue` (default): `HandlerTimeout(50ms)` + handler that `time.Sleep(200ms)`; assert (1) handler ctx cancelled around 50ms; (2) message goes to the configured DLX (via integration with T15 DLX expansion); (3) `consumer_handler_timeout_total{queue, verdict=nack_no_requeue}` == 1; (4) no redelivery on the source queue.
+  - [x] Test case B — `TimeoutNackRequeue` opt-in: same handler, builder calls `HandlerTimeoutVerdict(TimeoutNackRequeue)`; assert (1) message redelivered up to `MaxRedeliveries` / `x-delivery-limit`; (2) metric label `verdict=nack_requeue`; (3) after the limit, the message is dead-lettered per the configured bound.
 - **Verify:** `go test -tags=integration -run TestHandlerTimeoutVerdict ./...` green; `goleak.VerifyNone` clean.
 - **Files:** `consumer_handler_timeout_verdict_integration_test.go`.
 - **Deps:** T18, T15.

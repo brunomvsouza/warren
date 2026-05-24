@@ -633,3 +633,45 @@ Cuidados:
 - Sem hook: zero overhead comparado a antes (bench mostra dentro de ±2%).
 - Documentado como o caminho recomendado para detectar drift em produção sem voltar para
   `NewJSONStrict`.
+
+---
+
+### LATER-20 — `Topology.DeadLetters` expansion não cria o binding entre DLX exchange e DLQ
+
+**Contexto:** `topology.go` (~linha 284–298) — a função `expandDeadLetters` cria
+automaticamente o DLX exchange (`<source>.dlx`, tipo topic, durable) e a DLQ queue
+(`<source>.dlq`, durable), mas **não cria um `Binding`** entre eles. Sem binding, mensagens
+dead-lettered chegam ao DLX exchange mas não são roteadas para nenhuma fila e são descartadas
+silenciosamente pelo broker.
+
+**Impacto:** Qualquer usuário que declare `Topology.DeadLetters` e espere que mensagens
+mortas apareçam na DLQ ficará com a DLQ vazia. O `topo.Declare` não retorna erro (as filas
+e exchanges são criados com sucesso), mas o roteamento é silenciosamente quebrado.
+
+**Evidência:** Descoberto durante T18b (`TestHandlerTimeoutVerdict_NackNoRequeue_integration`)
+quando a verificação `rawCh.Get(dlqQ)` retornou `ok=false` mesmo após o consumer emitir um
+nack-no-requeue. O teste foi adaptado para usar topologia explícita com binding manual como
+workaround; esse LATER registra a correção pendente na expansion.
+
+**Sugestão de solução:**
+Adicionar ao loop de `expandDeadLetters` (após criar o DLQ queue) um `Binding` que liga
+a DLQ ao DLX exchange. Para exchange topic, usar `#` como routing key (captura todos os
+dead letters independente do routing key original). Para exchange fanout (se mudarmos o tipo),
+qualquer routing key serve.
+
+```go
+// Adicionar dentro do if !exists para o dlqName:
+out.Bindings = append(out.Bindings, Binding{
+    Exchange:   dlxName,
+    Queue:      dlqName,
+    RoutingKey: "#", // captura qualquer routing key dead-lettered
+})
+```
+
+Cuidado: o tipo do DLX exchange é atualmente `ExchangeTopic` — `#` funciona corretamente
+com topic. Se o tipo for alterado para `ExchangeFanout`, o routing key no binding é ignorado
+e pode ficar vazio.
+
+**Pré-requisitos:** T15 (Topology.Declare implementado). Adicionar um teste de integração
+em `topology_integration_test.go` que publique uma mensagem, a dead-letter via nack, e
+verifique que aparece na DLQ.
