@@ -19,6 +19,10 @@ import (
 
 // spyConsumerMetrics records handler outcomes for assertion in T18b tests.
 // Implements metrics.ConsumerMetrics.
+//
+// NOTE(T19): when T19 extends the ConsumerMetrics interface (adding methods such as
+// RecordDecodeError, RecordCancelled, InFlightAdd), add stub implementations of those
+// methods here so the spy continues to satisfy the interface.
 type spyConsumerMetrics struct {
 	timeoutTotal    atomic.Int64
 	mu              sync.Mutex
@@ -46,7 +50,7 @@ func (s *spyConsumerMetrics) outcomes() []string {
 }
 
 // TestHandlerTimeoutVerdict_NackNoRequeue_integration (T18b case A):
-//   - HandlerTimeout(50ms) with a 200ms handler (blocks on ctx.Done).
+//   - HandlerTimeout(50ms) with a handler that blocks on ctx.Done.
 //   - Default verdict = TimeoutNackNoRequeue.
 //   - Asserts: (1) handler ctx is cancelled near 50ms; (2) message is
 //     dead-lettered to the configured DLX; (3) consumer_handler_timeout_total
@@ -164,6 +168,28 @@ func TestHandlerTimeoutVerdict_NackNoRequeue_integration(t *testing.T) {
 	assert.True(t, elapsed < 200*time.Millisecond,
 		"ctx cancelled too late (handler should not run 200ms); elapsed=%v", elapsed)
 
+	// Open a raw AMQP connection for broker-side assertions (2) and (4).
+	rawConn, err := amqp091.Dial(url)
+	require.NoError(t, err)
+	defer rawConn.Close()
+	rawCh, err := rawConn.Channel()
+	require.NoError(t, err)
+	defer rawCh.Close()
+
+	// (2) Message landed on DLQ — poll until the broker routes the dead-lettered message.
+	// Using require.Eventually avoids a brittle fixed sleep while bounding the wait.
+	var dlqBody string
+	require.Eventually(t, func() bool {
+		msg, ok, err := rawCh.Get(dlqQ, true)
+		if err != nil || !ok {
+			return false
+		}
+		dlqBody = string(msg.Body)
+		return true
+	}, 3*time.Second, 100*time.Millisecond,
+		"DLQ must contain the dead-lettered message after nack-no-requeue")
+	assert.Equal(t, `"hello-nack"`, dlqBody)
+
 	// (3) consumer_handler_timeout_total incremented; outcome label is nack_no_requeue.
 	assert.Equal(t, int64(1), spy.timeoutTotal.Load(),
 		"consumer_handler_timeout_total must be 1")
@@ -172,29 +198,11 @@ func TestHandlerTimeoutVerdict_NackNoRequeue_integration(t *testing.T) {
 	assert.Equal(t, "timeout_nack_no_requeue", outcomes[0],
 		"consumer_handler_seconds outcome label must be timeout_nack_no_requeue")
 
-	// Give the broker a moment to route the nacked message to the DLQ.
-	time.Sleep(300 * time.Millisecond)
-
-	// Inspect via raw AMQP.
-	rawConn, err := amqp091.Dial(url)
-	require.NoError(t, err)
-	defer rawConn.Close()
-	rawCh, err := rawConn.Channel()
-	require.NoError(t, err)
-	defer rawCh.Close()
-
-	// (2) Message landed on DLQ (dead-lettered via nack-no-requeue).
-	dlqMsg, ok, err := rawCh.Get(dlqQ, true)
-	require.NoError(t, err)
-	assert.True(t, ok, "DLQ must contain the dead-lettered message after nack-no-requeue")
-	if ok {
-		assert.Equal(t, `"hello-nack"`, string(dlqMsg.Body))
-	}
-
 	// (4) Source queue must be empty — no redelivery.
-	_, ok, err = rawCh.Get(srcQ, true)
+	var srcOk bool
+	_, srcOk, err = rawCh.Get(srcQ, true)
 	require.NoError(t, err)
-	assert.False(t, ok, "source queue must be empty: message must not be requeued")
+	assert.False(t, srcOk, "source queue must be empty: message must not be requeued")
 }
 
 // TestHandlerTimeoutVerdict_NackRequeue_integration (T18b case B):
@@ -202,6 +210,9 @@ func TestHandlerTimeoutVerdict_NackNoRequeue_integration(t *testing.T) {
 //   - Explicit HandlerTimeoutVerdict(TimeoutNackRequeue).
 //   - Asserts: (1) message is redelivered at least once (deliveryCount >= 2);
 //     (2) outcome label is "timeout_nack_requeue" for every invocation.
+//
+// NOTE: the x-delivery-limit exhaustion scenario (message dead-lettered after
+// reaching the broker-side delivery cap) is deferred — see LATER-21.
 func TestHandlerTimeoutVerdict_NackRequeue_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -283,42 +294,5 @@ func TestHandlerTimeoutVerdict_NackRequeue_integration(t *testing.T) {
 	for _, o := range outcomes {
 		assert.Equal(t, "timeout_nack_requeue", o,
 			"all consumer_handler_seconds outcomes must be timeout_nack_requeue")
-	}
-}
-
-// purgeQueues removes any leftover messages from the named queues using a
-// raw AMQP connection. Non-existent queues are silently ignored.
-func purgeQueues(t *testing.T, url string, queues ...string) {
-	t.Helper()
-	rc, err := amqp091.Dial(url)
-	if err != nil {
-		return
-	}
-	defer rc.Close()
-	ch, err := rc.Channel()
-	if err != nil {
-		return
-	}
-	defer ch.Close()
-	for _, q := range queues {
-		ch.QueuePurge(q, false) //nolint:errcheck
-	}
-}
-
-// deleteQueues deletes the named queues using a fresh raw AMQP connection.
-// Non-existent queues are silently ignored.
-func deleteQueues(url string, queues ...string) {
-	rc, err := amqp091.Dial(url)
-	if err != nil {
-		return
-	}
-	defer rc.Close()
-	ch, err := rc.Channel()
-	if err != nil {
-		return
-	}
-	defer ch.Close()
-	for _, q := range queues {
-		ch.QueueDelete(q, false, false, false) //nolint:errcheck
 	}
 }

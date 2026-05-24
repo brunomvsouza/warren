@@ -675,3 +675,54 @@ e pode ficar vazio.
 **Pré-requisitos:** T15 (Topology.Declare implementado). Adicionar um teste de integração
 em `topology_integration_test.go` que publique uma mensagem, a dead-letter via nack, e
 verifique que aparece na DLQ.
+
+---
+
+### LATER-21 — Test case B3: `x-delivery-limit` exhaustion em quorum queue
+
+**Contexto:** `consumer_handler_timeout_verdict_integration_test.go` — T18b test case B
+verifica apenas que a mensagem é reenfileirada ao menos duas vezes (`deliveryCount >= 2`).
+Não exercita o cenário de esgotamento de `x-delivery-limit`: após N redeliveries, o broker
+deve dead-letter a mensagem automaticamente para o DLX configurado.
+
+**Impacto:** O caminho de "requeue até o limite → dead-letter" é um contrato importante
+do `TimeoutNackRequeue` (o usuário precisa de um DLX na fila de origem para evitar que
+mensagens travadas circulem para sempre). Sem teste, o comportamento pode regredir sem
+detecção automática.
+
+**Evidência:** Registrado durante revisão de código do commit `23834a7` (T18b). O critério
+original de aceite de T18b (caso B, item 3) previa este cenário, mas foi omitido pois a
+configuração de quorum queue com `x-delivery-limit` ficou fora do escopo imediato.
+
+**Sugestão de solução:**
+Adicionar `TestHandlerTimeoutVerdict_NackRequeue_DeliveryLimit_integration` em
+`consumer_handler_timeout_verdict_integration_test.go`:
+
+```go
+// Topologia: quorum queue com x-delivery-limit: 3 + DLX fanout + binding
+topo := &warren.Topology{
+    Exchanges: []warren.Exchange{
+        {Name: dlxExch, Kind: warren.ExchangeFanout, Durable: false},
+    },
+    Queues: []warren.Queue{
+        {
+            Name:    srcQ,
+            Durable: false,
+            Args: map[string]any{
+                "x-queue-type":          "quorum",
+                "x-delivery-limit":      3,
+                "x-dead-letter-exchange": dlxExch,
+            },
+        },
+        {Name: dlqQ, Durable: false},
+    },
+    Bindings: []warren.Binding{
+        {Exchange: dlxExch, Queue: dlqQ, RoutingKey: ""},
+    },
+}
+// Após 3 timeouts, assert que deliveryCount == 3 e a mensagem aparece na DLQ.
+```
+
+**Pré-requisitos:** LATER-20 (binding DLX/DLQ), RabbitMQ 3.10+ (quorum queue
+`x-delivery-limit` suportado). CI usa `rabbitmq:3-management` que suporta quorum
+queues desde 3.8.

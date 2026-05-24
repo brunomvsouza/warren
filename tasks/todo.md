@@ -528,10 +528,11 @@ Rev 6 explicit test for the new builder method (T18 ships the
 mechanism; T18b is the dedicated test matrix to make the trade-off
 visible).
 - **Acceptance:**
-  - [x] Test case A — `TimeoutNackNoRequeue` (default): `HandlerTimeout(50ms)` + handler that `time.Sleep(200ms)`; assert (1) handler ctx cancelled around 50ms; (2) message goes to the configured DLX (via integration with T15 DLX expansion); (3) `consumer_handler_timeout_total{queue, verdict=nack_no_requeue}` == 1; (4) no redelivery on the source queue.
-  - [x] Test case B — `TimeoutNackRequeue` opt-in: same handler, builder calls `HandlerTimeoutVerdict(TimeoutNackRequeue)`; assert (1) message redelivered up to `MaxRedeliveries` / `x-delivery-limit`; (2) metric label `verdict=nack_requeue`; (3) after the limit, the message is dead-lettered per the configured bound.
+  - [x] Test case A — `TimeoutNackNoRequeue` (default): `HandlerTimeout(50ms)` + handler that blocks on `ctx.Done`; assert (1) handler ctx cancelled around 50ms; (2) message appears in the configured DLX queue (polled, no fixed sleep); (3) `consumer_handler_timeout_total` == 1 and `consumer_handler_seconds{outcome="timeout_nack_no_requeue"}`; (4) no redelivery on the source queue. Uses explicit topology with binding (workaround for LATER-20).
+  - [x] Test case B — `TimeoutNackRequeue` opt-in: builder calls `HandlerTimeoutVerdict(TimeoutNackRequeue)`; assert (1) `deliveryCount >= 2` (at least one redelivery); (2) all `consumer_handler_seconds` outcome labels are `"timeout_nack_requeue"`.
+  - [ ] Test case B3 — `x-delivery-limit` exhaustion (deferred — see LATER-21): declare a quorum queue with `x-delivery-limit: 3`; assert the message is dead-lettered after exactly 3 deliveries.
 - **Verify:** `go test -tags=integration -run TestHandlerTimeoutVerdict ./...` green; `goleak.VerifyNone` clean.
-- **Files:** `consumer_handler_timeout_verdict_integration_test.go`.
+- **Files:** `consumer_handler_timeout_verdict_integration_test.go`, `integration_helpers_test.go`.
 - **Deps:** T18, T15.
 
 ### [ ] T19 — `ConsumerMetrics` + Prometheus + wiring · S
