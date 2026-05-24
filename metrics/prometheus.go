@@ -143,12 +143,14 @@ func (m *PrometheusPublisherMetrics) RecordRetry(exchange, reason string) {
 //   - consumer_handler_aborted_channel_closed_total{queue}
 //   - consumer_handler_timeout_total{queue}
 //   - consumer_handler_seconds{queue,outcome}
+//   - consumer_cancelled_total{queue,reason}
 //   - replier_drop_no_dlx_total{queue}
 type PrometheusConsumerMetrics struct {
 	resubscribedTotal   *prometheus.CounterVec
 	handlerAbortedTotal *prometheus.CounterVec
 	handlerTimeoutTotal *prometheus.CounterVec
 	handlerSeconds      *prometheus.HistogramVec
+	cancelledTotal      *prometheus.CounterVec
 	replierDropNoDLX    *prometheus.CounterVec
 }
 
@@ -178,6 +180,10 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64) 
 			Help:    "Duration in seconds of AMQP consumer handler executions.",
 			Buckets: buckets,
 		}, []string{"queue", "outcome"}),
+		cancelledTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "consumer_cancelled_total",
+			Help: "Total number of broker-initiated consumer cancellations (basic.cancel).",
+		}, []string{"queue", "reason"}),
 		replierDropNoDLX: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "replier_drop_no_dlx_total",
 			Help: "Total number of Replier messages dropped due to missing dead-letter exchange.",
@@ -188,6 +194,7 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64) 
 		m.handlerAbortedTotal,
 		m.handlerTimeoutTotal,
 		m.handlerSeconds,
+		m.cancelledTotal,
 		m.replierDropNoDLX,
 	} {
 		if err := reg.Register(c); err != nil {
@@ -215,6 +222,12 @@ func (m *PrometheusConsumerMetrics) RecordHandlerTimeout(queue string) {
 // RecordHandler records d into the consumer_handler_seconds histogram.
 func (m *PrometheusConsumerMetrics) RecordHandler(queue, outcome string, d time.Duration) {
 	m.handlerSeconds.WithLabelValues(queue, outcome).Observe(d.Seconds())
+}
+
+// RecordCancelled increments consumer_cancelled_total for the given queue and reason.
+// reason is the consumer tag reported by the broker's basic.cancel frame.
+func (m *PrometheusConsumerMetrics) RecordCancelled(queue, reason string) {
+	m.cancelledTotal.WithLabelValues(queue, reason).Inc()
 }
 
 // RecordReplierDropNoDLX increments replier_drop_no_dlx_total for the given queue.

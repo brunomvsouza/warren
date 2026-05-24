@@ -60,6 +60,12 @@ type Consumer[M any] struct {
 	// returns it with done=nil (channel-close detection is not exercised).
 	deliveryCh chan amqp091.Delivery
 
+	// basicCancelCh is a test-injection hook for basic.cancel notifications.
+	// When non-nil and deliveryCh is also set, the goroutine in openDeliveryCh
+	// selects on basicCancelCh to simulate broker-initiated consumer cancellation
+	// and calls cm.RecordCancelled with the received consumer tag.
+	basicCancelCh chan string
+
 	// deliverySubOverride is a full test-injection hook: when non-nil, openDeliveryCh
 	// returns it directly, including the done channel for channel-close detection tests.
 	deliverySubOverride *deliverySub
@@ -168,6 +174,12 @@ func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error {
 		case sub := <-resubCh:
 			cur = sub
 
+		case tag := <-c.basicCancelCh:
+			// Test-injection path: simulates broker-initiated basic.cancel.
+			// Production code uses ch.NotifyCancel inside openDeliveryCh instead.
+			// A nil basicCancelCh is never selected (Go semantics for nil channels).
+			c.cm.RecordCancelled(c.queue, tag)
+
 		case d, ok := <-cur.ch:
 			if !ok {
 				// AMQP channel closed; wait for re-subscribe or ctx cancel.
@@ -201,6 +213,7 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 	}
 	if c.deliveryCh != nil {
 		// done is nil: channel-close detection is not exercised in basic unit tests.
+		// basicCancelCh (when set) is handled in ConsumeRaw's main select loop.
 		return deliverySub{ch: c.deliveryCh, done: nil}, nil
 	}
 
@@ -236,6 +249,7 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 
 	out := make(chan amqp091.Delivery, int(c.prefetch)) //nolint:gosec // G115: prefetch bounded
 	closeCh := ch.NotifyClose(make(chan *amqp091.Error, 1))
+	cancelCh := ch.NotifyCancel(make(chan string, 1))
 
 	// channelDone is closed when the AMQP channel physically closes, not when
 	// the consumer ctx is cancelled. dispatch goroutines watch this to cancel
@@ -259,6 +273,11 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 				case <-ctx.Done():
 					return
 				}
+			case tag := <-cancelCh:
+				// Broker sent basic.cancel for this consumer (e.g. queue deleted,
+				// exclusive lock revoked). Record the metric; the delivery stream
+				// will also close and drive closeChannelDone via the !ok branch above.
+				c.cm.RecordCancelled(c.queue, tag)
 			case <-closeCh:
 				// AMQP channel close frame received.
 				closeChannelDone()

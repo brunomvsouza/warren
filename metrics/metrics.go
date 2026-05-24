@@ -61,6 +61,7 @@ type PublisherMetrics interface {
 //   - consumer_handler_aborted_channel_closed_total{queue}
 //   - consumer_handler_timeout_total{queue}
 //   - consumer_handler_seconds{queue,outcome}
+//   - consumer_cancelled_total{queue,reason}
 //   - replier_drop_no_dlx_total{queue}
 type ConsumerMetrics interface {
 	// RecordResubscribed increments the resubscription counter after a reconnect.
@@ -72,6 +73,10 @@ type ConsumerMetrics interface {
 	RecordHandlerTimeout(queue string)
 	// RecordHandler records a completed handler invocation with its outcome and duration.
 	RecordHandler(queue, outcome string, d time.Duration)
+	// RecordCancelled increments the broker-initiated cancel counter.
+	// reason is the consumer tag reported by basic.cancel; it identifies which
+	// consumer the broker cancelled (useful when multiple consumers share a queue).
+	RecordCancelled(queue, reason string)
 	// RecordReplierDropNoDLX increments the counter for Replier messages dropped
 	// because the request queue has no dead-letter exchange configured.
 	RecordReplierDropNoDLX(queue string)

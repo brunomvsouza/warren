@@ -47,5 +47,8 @@ func (NoOpConsumerMetrics) RecordHandlerTimeout(_ string) {}
 // RecordHandler discards the handler observation.
 func (NoOpConsumerMetrics) RecordHandler(_, _ string, _ time.Duration) {}
 
+// RecordCancelled discards the broker-initiated cancel counter increment.
+func (NoOpConsumerMetrics) RecordCancelled(_, _ string) {}
+
 // RecordReplierDropNoDLX discards the Replier drop-no-DLX counter increment.
 func (NoOpConsumerMetrics) RecordReplierDropNoDLX(_ string) {}

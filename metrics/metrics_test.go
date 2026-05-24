@@ -64,6 +64,7 @@ func TestNoOpConsumerMetrics_zeroAllocs(t *testing.T) {
 		m.RecordHandlerTimeout("orders")
 		m.RecordHandler("orders", "ack", 3*time.Millisecond)
 		m.RecordReplierDropNoDLX("orders")
+		m.RecordCancelled("orders", "broker_initiated")
 	}))
 }
 
@@ -182,6 +183,7 @@ func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
 	m.RecordHandlerTimeout("orders")
 	m.RecordHandler("orders", "ack", 5*time.Millisecond)
 	m.RecordReplierDropNoDLX("requests")
+	m.RecordCancelled("orders", "broker_initiated")
 
 	names := gatherNames(t, reg)
 	assert.Contains(t, names, "consumer_resubscribed_total")
@@ -189,6 +191,7 @@ func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
 	assert.Contains(t, names, "consumer_handler_timeout_total")
 	assert.Contains(t, names, "consumer_handler_seconds")
 	assert.Contains(t, names, "replier_drop_no_dlx_total")
+	assert.Contains(t, names, "consumer_cancelled_total")
 }
 
 // — Prometheus: integration workload ————————————————————————————————————
@@ -222,6 +225,7 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		conm.RecordHandlerTimeout("orders")
 		conm.RecordHandler("orders", "ack", time.Duration(i+1)*time.Millisecond)
 		conm.RecordReplierDropNoDLX("requests")
+		conm.RecordCancelled("orders", "broker_initiated")
 	}
 
 	names := gatherNames(t, reg)
@@ -239,6 +243,7 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		"consumer_handler_timeout_total",
 		"consumer_handler_seconds",
 		"replier_drop_no_dlx_total",
+		"consumer_cancelled_total",
 	}
 	for _, name := range mandatory {
 		assert.Contains(t, names, name, "mandatory metric %q missing from gathered output", name)

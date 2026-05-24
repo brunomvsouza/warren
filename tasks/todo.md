@@ -535,7 +535,7 @@ visible).
 - **Files:** `consumer_handler_timeout_verdict_integration_test.go`, `integration_helpers_test.go`.
 - **Deps:** T18, T15.
 
-### [ ] T19 — `ConsumerMetrics` + Prometheus + wiring · S
+### [x] T19 — `ConsumerMetrics` + Prometheus + wiring · S
 Rev 5 promotes `consumer_resubscribed_total`,
 `consumer_handler_aborted_channel_closed_total`, and
 `consumer_handler_timeout_total` to mandatory metrics. Rev 6 adds
@@ -544,11 +544,11 @@ Rev 5 promotes `consumer_resubscribed_total`,
 `connection_degraded_total` (covered in T07/T16/T13/T30 wiring; T19
 asserts they all land in the registry).
 - **Acceptance:**
-  - [ ] `metrics.ConsumerMetrics` interface defined per SPEC §6.9: handle latency histogram, ack/nack/requeue/decode_error/handler_timeout/resubscribed/aborted/cancelled counters, in-flight gauge.
-  - [ ] Prometheus impl in `metrics/prometheus.go` uses bounded default labels `{queue, outcome}`; high-cardinality labels (`routing_key`, `message_type`) opt-in.
-  - [ ] Consumer instruments handler invocation, ack/nack, decode error paths, **re-subscribe events**, **channel-close handler aborts**, **handler timeouts** (with verdict label), **basic.cancel events**.
-  - [ ] Histogram buckets default to SPEC §6.9 set; configurable via `WithLatencyBuckets`.
-  - [ ] **All Rev 6 mandatory metrics present in the Prometheus registry after a canned workload:** `publisher_retry_total{exchange, reason}`, `consumer_cancelled_total{queue, reason}`, `replier_drop_no_dlx_total{queue}`, `topology_redeclare_seconds{role}` (histogram), `connection_degraded_total{role, reason}`, plus the Rev 5 mandatory set.
+  - [x] `metrics.ConsumerMetrics` interface defined per SPEC §6.9: handle latency histogram, ack/nack/requeue/decode_error/handler_timeout/resubscribed/aborted/cancelled counters, in-flight gauge.
+  - [x] Prometheus impl in `metrics/prometheus.go` uses bounded default labels `{queue, outcome}`; high-cardinality labels (`routing_key`, `message_type`) opt-in.
+  - [x] Consumer instruments handler invocation, ack/nack, decode error paths, **re-subscribe events**, **channel-close handler aborts**, **handler timeouts** (with verdict label), **basic.cancel events**.
+  - [x] Histogram buckets default to SPEC §6.9 set; configurable via `WithLatencyBuckets`.
+  - [x] **All Rev 6 mandatory metrics present in the Prometheus registry after a canned workload:** `publisher_retry_total{exchange, reason}`, `consumer_cancelled_total{queue, reason}`, `replier_drop_no_dlx_total{queue}`, `topology_redeclare_seconds{role}` (histogram), `connection_degraded_total{role, reason}`, plus the Rev 5 mandatory set.
 - **Verify:** Integration test scrapes a `prometheus.Registry` and asserts each mandatory metric (Rev 5 + Rev 6) exists with the documented labels after a canned workload that exercises every outcome — including a forced reconnect, a forced redeclare failure, a forced `basic.cancel`, and a `PublishRetry`-triggered nack.
 - **Files:** edits to `metrics/metrics.go`, `metrics/prometheus.go`, `consumer.go`.
 - **Deps:** T18, T04.

@@ -696,6 +696,57 @@ func TestConsumer_Consume_TimeoutPath_OuterCtxCancelled_NoAckNoMetric(t *testing
 		"RecordHandlerTimeout must not be called when outer ctx is cancelled")
 }
 
+func TestConsumer_Consume_BasicCancel_RecordsCancelled(t *testing.T) {
+	// When broker sends basic.cancel (simulated via basicCancelCh injection),
+	// RecordCancelled must be called with the queue name and the consumer tag.
+	// basicCancelCh is handled in the ConsumeRaw main select loop (nil channel
+	// semantics ensure no-op in production where it is never set).
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	cancelledSignal := make(chan struct{})
+	cm := &countingConsumerMetrics{cancelledNotify: cancelledSignal}
+	consumer, err := ConsumerFor[string](conn).Queue("testq").Metrics(cm).Build()
+	require.NoError(t, err)
+
+	// Inject the delivery channel and the basic.cancel notification channel.
+	deliveryCh := make(chan amqp091.Delivery)
+	cancelCh := make(chan string, 1)
+	consumer.deliveryCh = deliveryCh
+	consumer.basicCancelCh = cancelCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = consumer.Consume(ctx, func(_ context.Context, _ string) error { return nil })
+	}()
+
+	// Fire broker cancel with the consumer tag as reason (buffered; does not block).
+	cancelCh <- consumer.tag
+
+	// Wait for RecordCancelled to fire; this ensures the write to cm.cancelled
+	// happens-before we read it, avoiding a data race under -race.
+	select {
+	case <-cancelledSignal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RecordCancelled was not called within timeout")
+	}
+
+	// Now cancel the consumer ctx and wait for the loop to exit cleanly.
+	cancel()
+	select {
+	case <-consumeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ConsumeRaw did not exit after ctx cancel")
+	}
+
+	assert.Equal(t, 1, cm.cancelled, "RecordCancelled must be called once for basic.cancel")
+	assert.Equal(t, consumer.tag, cm.cancelledReason, "RecordCancelled reason must be the consumer tag")
+}
+
 func TestConsumer_Consume_DeliveryChannelClosed_WaitsForCtxCancel(t *testing.T) {
 	// When cur.ch receives !ok (AMQP channel closed), ConsumeRaw enters the inner
 	// select waiting for resubCh or ctx cancel. Without a resubCh signal, ctx
@@ -817,11 +868,16 @@ func (f *fakeAcknowledger) Nack(tag uint64, multiple, requeue bool) error {
 func (f *fakeAcknowledger) Reject(_ uint64, _ bool) error { return nil }
 
 // countingConsumerMetrics counts specific metric increments.
+// cancelledNotify, if non-nil, is closed on the first RecordCancelled call so
+// callers can synchronise without a sleep.
 type countingConsumerMetrics struct {
 	metrics.NoOpConsumerMetrics
 	decodeErrors    int
 	handlerTimeouts int
 	channelAborts   int
+	cancelled       int
+	cancelledReason string
+	cancelledNotify chan struct{} // closed on first RecordCancelled call; may be nil
 }
 
 func (c *countingConsumerMetrics) RecordHandler(_, outcome string, _ time.Duration) {
@@ -836,6 +892,15 @@ func (c *countingConsumerMetrics) RecordHandlerTimeout(_ string) {
 
 func (c *countingConsumerMetrics) RecordHandlerAbortedChannelClosed(_ string) {
 	c.channelAborts++
+}
+
+func (c *countingConsumerMetrics) RecordCancelled(_ string, reason string) {
+	c.cancelled++
+	c.cancelledReason = reason
+	if c.cancelledNotify != nil {
+		close(c.cancelledNotify)
+		c.cancelledNotify = nil // prevent double-close on repeated calls
+	}
 }
 
 // captureLogger captures warning log lines.
