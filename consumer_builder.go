@@ -148,11 +148,21 @@ func (b *ConsumerBuilder[M]) OnCancel(_ func(reason string)) *ConsumerBuilder[M]
 // Two complementary counters enforce the ceiling:
 //
 //   - Counter A (cross-process): reads x-death headers; bounds DLX-bounce loops
-//     that survive consumer restarts. Fires before the handler is called.
+//     that survive consumer restarts. Fires BEFORE the handler is called.
+//     With MaxRedeliveries(n), counter A short-circuits when death_count >= n,
+//     so the handler is invoked for death_count = 0, 1, …, n-1 (exactly n times).
 //
 //   - Counter B (in-process, process-local): counts consecutive ErrRequeue returns
-//     for the same (channel-instance, MessageID). Resets on channel close.
-//     Fires after the handler returns ErrRequeue.
+//     for the same MessageID on the current channel. Resets on channel close.
+//     Fires AFTER the handler returns ErrRequeue for the (n+1)-th time, rewriting
+//     the verdict to Nack(false). The handler is therefore called n+1 times before
+//     counter B dead-letters the message (one more than counter A, because the
+//     final ErrRequeue return triggers the rewrite after the call).
+//
+// Example with MaxRedeliveries(3):
+//
+//	Counter A: handler called for death_count=0,1,2; short-circuit on death_count=3.
+//	Counter B: handler called 4 times (3 ErrRequeue stored, fires on 4th return).
 //
 // When the source queue is a quorum queue with DeliveryLimit > 0 (declared via
 // TopologyHint), counter B is auto-disabled: the broker is authoritative.

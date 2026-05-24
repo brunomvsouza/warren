@@ -270,6 +270,8 @@ func TestConsumer_MaxRedeliveries_CounterB_MapClearedOnNackNoRequeue(t *testing.
 func TestConsumer_MaxRedeliveries_CounterB_ChannelClose_ResetsCounter(t *testing.T) {
 	// After a channel close (simulated by calling openDeliveryCh again which
 	// rotates counterState), the same MessageID starts at count=0.
+	defer goleak.VerifyNone(t)
+
 	conn := newFakeConsumerConn(t)
 	c, err := ConsumerFor[string](conn).
 		Queue("testq").
@@ -321,16 +323,16 @@ func TestConsumer_MaxRedeliveries_CounterB_ChannelClose_ResetsCounter(t *testing
 	}
 
 	// Verify counter B has count=2 for msgID.
+	// Key is now just the MessageID (chanID prefix removed — each redeliveryCounter
+	// owns its own sync.Map so no cross-channel collision is possible).
 	cs := c.counterState.Load()
-	chanID := cs.chanID
-	key := chanID + ":" + msgID
-	v, ok := cs.m.Load(key)
+	v, ok := cs.m.Load(msgID)
 	require.True(t, ok, "counter B entry must exist for msgID after 2 requeues")
 	assert.Equal(t, int64(2), v.(int64))
 
 	// Simulate channel close: rotate counterState (as openDeliveryCh would do).
-	// We directly set a new counterState here (internal test access).
-	newState := &redeliveryCounter{chanID: "new-chan-id"}
+	// We directly store a new redeliveryCounter here via internal test access.
+	newState := &redeliveryCounter{}
 	c.counterState.Store(newState)
 
 	// Now send another delivery with the same msgID.

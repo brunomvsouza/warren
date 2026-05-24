@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
 	"github.com/brunomvsouza/warren/codec"
@@ -36,9 +35,11 @@ type deliverySub struct {
 // redeliveryCounter holds per-channel in-process redelivery state (counter B).
 // A new instance is created on every channel open so that channel close automatically
 // "drops" the old counts — delivery tags from a previous channel cannot bleed over.
+// The map is keyed by MessageID (or a fallback delivery-tag string when MessageID is absent).
+// No chanID prefix is needed: each redeliveryCounter owns its own sync.Map, so keys are
+// implicitly scoped to the channel that created this instance.
 type redeliveryCounter struct {
-	chanID string   // UUID identifying this channel instance
-	m      sync.Map // key: string (chanID+":"+messageID), value: int64
+	m sync.Map // key: MessageID or "_dlv_<tag>_<deliveryTag>", value: int64
 }
 
 // Consumer receives AMQP messages from a single queue, decodes each payload
@@ -119,9 +120,9 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 		mc:               mc,
 		closedCh:         make(chan struct{}),
 	}
-	// Initialise counterState with an empty map and a placeholder chanID.
-	// openDeliveryCh rotates this on every channel open.
-	c.counterState.Store(&redeliveryCounter{chanID: ""})
+	// Initialise counterState with an empty map; openDeliveryCh rotates this on every
+	// channel open so "channel close resets counter B" holds without explicit cleanup.
+	c.counterState.Store(&redeliveryCounter{})
 	return c
 }
 
@@ -254,12 +255,10 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 // so that channel close automatically resets all in-process redelivery counts.
 func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 	// Rotate counter B state regardless of the channel source (real or injected).
-	// This ensures the "channel close resets counter B" contract holds in all paths.
-	chanID := ""
-	if id, err := uuid.NewV7(); err == nil {
-		chanID = id.String()
-	}
-	c.counterState.Store(&redeliveryCounter{chanID: chanID})
+	// Installing a fresh redeliveryCounter atomically ensures "channel close resets
+	// counter B": old dispatch goroutines hold a reference to the previous instance,
+	// but new dispatches pick up the fresh (empty) one.
+	c.counterState.Store(&redeliveryCounter{})
 
 	if c.deliverySubOverride != nil {
 		return *c.deliverySubOverride, nil
@@ -363,9 +362,12 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 // autoAck=true (Consume path): counter B applied; d.AckIf called with the verdict.
 // autoAck=false (ConsumeRaw path): counter B skipped; handler is responsible for acking.
 func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, raw amqp091.Delivery, h RawHandler[M], autoAck bool) {
+	decodeStart := time.Now()
 	var body M
 	if err := safeDecodeConsumer(c.codec, raw.Body, &body); err != nil {
-		c.cm.RecordHandler(c.queue, "decode_error", 0)
+		// Record actual decode duration so the metric is meaningful even for
+		// large or slow-to-fail payloads (previously hardcoded to 0).
+		c.cm.RecordHandler(c.queue, "decode_error", time.Since(decodeStart))
 		_ = raw.Nack(false, false)
 		return
 	}
@@ -390,17 +392,21 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 	// control their own acking, so counter B cannot safely intercept the verdict.
 	// Capture the current channel's state atomically at dispatch start so that
 	// a mid-handler reconnect does not corrupt the counter map reference.
+	//
+	// Key is MessageID when present (stable across redeliveries → counter accumulates
+	// correctly). Fallback is _dlv_<consumerTag>_<deliveryTag> when MessageID is absent;
+	// delivery tags are unique within a channel but change on redelivery, so counter B
+	// is effectively disabled for those messages (each delivery gets a fresh key).
 	var counterBKey string
 	var cs *redeliveryCounter
 	if autoAck && c.maxRedeliveries > 0 && !c.counterBDisabled {
 		cs = c.counterState.Load()
-		msgID := raw.MessageId
-		if msgID == "" {
-			// Fallback key when MessageID is absent: (chanID, consumerTag, deliveryTag).
-			// deliveryTag is unique within a channel; chanID prevents cross-channel collision.
-			msgID = fmt.Sprintf("_dlv_%s_%d", c.tag, raw.DeliveryTag)
+		counterBKey = raw.MessageId
+		if counterBKey == "" {
+			// No stable MessageID: use delivery tag as a unique-but-non-stable key.
+			// Counter B will not accumulate across redeliveries for these messages.
+			counterBKey = fmt.Sprintf("_dlv_%s_%d", c.tag, raw.DeliveryTag)
 		}
-		counterBKey = cs.chanID + ":" + msgID
 	}
 
 	// hCtxBase is the WithCancelCause context used to propagate ErrChannelClosed
@@ -529,7 +535,11 @@ func (c *Consumer[M]) applyCounterB(cs *redeliveryCounter, counterBKey string, h
 	// Handler returned ErrRequeue: check counter B before incrementing.
 	var currentCount int64
 	if v, ok := cs.m.Load(counterBKey); ok {
-		currentCount = v.(int64)
+		if n, ok := v.(int64); ok {
+			currentCount = n
+		}
+		// A non-int64 value would indicate a programming error; treat it as zero
+		// (safe default: let the delivery proceed rather than crash).
 	}
 
 	// "Once incrementing it would exceed n" = current + 1 > n = current >= n.

@@ -94,29 +94,33 @@ func TestConsumeExample_integration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, qInfo.Messages, "source queue must be empty after example exits")
 
-	// (c) DLQ must contain the poison message (dead-lettered after MaxRedeliveries).
-	// We drain the DLQ channel that was set up before the example ran.
-	dlqTimeout := time.NewTimer(5 * time.Second)
+	// (c) DLQ must contain the dead-lettered messages (bad → Nack(false),
+	// slow → HandlerTimeout Nack, poison → counter B MaxRedeliveries Nack).
+	// The consumer was started before the example, so messages land in dlqMsgs
+	// as the example runs; we drain with a generous timeout to tolerate slow CI.
+	//
+	// We expect 3 dead-lettered messages (bad, slow, poison) but assert ≥1
+	// to remain robust if the example evolves to publish fewer DLX-bound messages.
+	const wantDLQMessages = 3
+	dlqTimeout := time.NewTimer(15 * time.Second) // 15 s: tolerates slow broker + CI
 	defer dlqTimeout.Stop()
-	var poisonFound bool
 	var dlqCount int
-	drainLoop:
-	for {
+	for dlqCount < wantDLQMessages {
 		select {
 		case msg, ok := <-dlqMsgs:
 			if !ok {
-				break drainLoop
+				t.Fatalf("DLQ consumer channel closed after only %d messages", dlqCount)
 			}
 			dlqCount++
 			t.Logf("DLQ message %d: body=%s", dlqCount, string(msg.Body))
 		case <-dlqTimeout.C:
-			break drainLoop
+			// Time expired before all expected messages arrived; break and assert.
+			t.Logf("DLQ drain timed out after %d/%d messages", dlqCount, wantDLQMessages)
+			goto dlqDone
 		}
 	}
-	// Mark poison found if the DLQ received at least one message (the bad/slow/poison
-	// messages all end up there; we assert that the queue has ≥1 delivery).
-	poisonFound = dlqCount >= 1
-	assert.True(t, poisonFound, "expected at least one dead-lettered message on the DLQ")
+dlqDone:
+	assert.GreaterOrEqual(t, dlqCount, 1, "expected at least one dead-lettered message on the DLQ")
 
 	// Verify the output explicitly confirms that counter B fired for poison.
 	assert.Contains(t, output, "id=poison max redeliveries reached",

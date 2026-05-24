@@ -172,12 +172,14 @@ func run() error {
 			return nil
 
 		case "poison":
-			// Always returns ErrRequeue. After MaxRedeliveries(3), counter B rewrites
-			// the verdict to Nack(false) and the message is dead-lettered.
+			// Always returns ErrRequeue. Counter B (in-process) fires after the
+			// (maxRedeliv+1)-th ErrRequeue return, rewriting the verdict to
+			// Nack(false) → dead-lettered. See ConsumerBuilder.MaxRedeliveries for
+			// the exact semantics of counter B vs counter A (x-death).
 			n := poisonCount.Add(1)
 			log.Printf("handler: id=poison attempt=%d → ErrRequeue", n)
 			if n == int64(maxRedeliv)+1 {
-				// This is the call where counter B fires; signal finalization.
+				// Counter B fires after this return; signal finalization.
 				log.Printf("handler: id=poison max redeliveries reached — dead-lettering")
 				finalized <- "poison"
 			}
