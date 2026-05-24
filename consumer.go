@@ -266,6 +266,15 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 			case d, ok := <-deliveries:
 				if !ok {
 					// basic.cancel or broker closed delivery stream.
+					// Drain cancelCh non-blockingly: both cancelCh and deliveries
+					// may become ready simultaneously; Go picks non-deterministically,
+					// so the !ok branch can win before the cancelCh case is selected.
+					// This ensures RecordCancelled is always called on every basic.cancel.
+					select {
+					case tag := <-cancelCh:
+						c.cm.RecordCancelled(c.queue, tag)
+					default:
+					}
 					closeChannelDone()
 					return
 				}
@@ -277,7 +286,7 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 			case tag := <-cancelCh:
 				// Broker sent basic.cancel for this consumer (e.g. queue deleted,
 				// exclusive lock revoked). Record the metric; the delivery stream
-				// will also close and drive closeChannelDone via the !ok branch above.
+				// will also close and drive closeChannelDone via the !ok drain above.
 				c.cm.RecordCancelled(c.queue, tag)
 			case <-closeCh:
 				// AMQP channel close frame received.

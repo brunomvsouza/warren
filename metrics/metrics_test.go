@@ -194,6 +194,42 @@ func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
 	assert.Contains(t, names, "consumer_cancelled_total")
 }
 
+func TestPrometheusConsumerMetrics_cancelledTotalIncrement(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m, err := metrics.NewPrometheusConsumerMetrics(reg, nil)
+	require.NoError(t, err)
+
+	m.RecordCancelled("orders", "ctag-abc")
+	m.RecordCancelled("orders", "ctag-abc")
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+
+	var found bool
+	for _, mf := range mfs {
+		if mf.GetName() != "consumer_cancelled_total" {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			var q, r string
+			for _, lp := range metric.GetLabel() {
+				switch lp.GetName() {
+				case "queue":
+					q = lp.GetValue()
+				case "reason":
+					r = lp.GetValue()
+				}
+			}
+			if q == "orders" && r == "ctag-abc" {
+				assert.InDelta(t, 2.0, metric.GetCounter().GetValue(), 0.001,
+					"consumer_cancelled_total{queue=orders,reason=ctag-abc} must be 2")
+				found = true
+			}
+		}
+	}
+	assert.True(t, found, "consumer_cancelled_total{queue=orders,reason=ctag-abc} not found")
+}
+
 // — Prometheus: integration workload ————————————————————————————————————
 
 func TestPrometheus_integrationWorkload(t *testing.T) {
@@ -282,5 +318,6 @@ func BenchmarkNoOpConsumerMetrics(b *testing.B) {
 		m.RecordHandlerTimeout("orders")
 		m.RecordHandler("orders", "ack", 3*time.Millisecond)
 		m.RecordReplierDropNoDLX("orders")
+		m.RecordCancelled("orders", "ctag-test")
 	}
 }

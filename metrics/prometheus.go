@@ -158,6 +158,11 @@ type PrometheusConsumerMetrics struct {
 // mandatory collectors into reg. If buckets is nil, DefaultHistogramBuckets() is used
 // (a fresh slice per call so callers cannot corrupt shared state).
 // Returns an error if any collector is already registered.
+//
+// Cardinality note: consumer_cancelled_total uses the consumer tag as the "reason"
+// label. Auto-generated tags (ctag-<uuidv7>) create one new time series per
+// cancellation event; in high-churn environments this can cause unbounded Prometheus
+// cardinality. See LATER-22 for the planned remediation in T36.
 func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64) (*PrometheusConsumerMetrics, error) {
 	if buckets == nil {
 		buckets = DefaultHistogramBuckets()

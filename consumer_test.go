@@ -745,6 +745,7 @@ func TestConsumer_Consume_BasicCancel_RecordsCancelled(t *testing.T) {
 	}
 
 	assert.Equal(t, 1, cm.cancelled, "RecordCancelled must be called once for basic.cancel")
+	assert.Equal(t, "testq", cm.cancelledQueue, "RecordCancelled queue must be the consumer queue")
 	assert.Equal(t, consumer.tag, cm.cancelledReason, "RecordCancelled reason must be the consumer tag")
 }
 
@@ -877,6 +878,7 @@ type countingConsumerMetrics struct {
 	handlerTimeouts int
 	channelAborts   int
 	cancelled       int
+	cancelledQueue  string
 	cancelledReason string
 	cancelledOnce   sync.Once
 	cancelledNotify chan struct{} // closed on first RecordCancelled call; may be nil
@@ -896,8 +898,9 @@ func (c *countingConsumerMetrics) RecordHandlerAbortedChannelClosed(_ string) {
 	c.channelAborts++
 }
 
-func (c *countingConsumerMetrics) RecordCancelled(_ string, reason string) {
+func (c *countingConsumerMetrics) RecordCancelled(queue, reason string) {
 	c.cancelled++
+	c.cancelledQueue = queue
 	c.cancelledReason = reason
 	if c.cancelledNotify != nil {
 		c.cancelledOnce.Do(func() { close(c.cancelledNotify) })
