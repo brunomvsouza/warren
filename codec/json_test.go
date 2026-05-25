@@ -53,6 +53,15 @@ func TestNewJSON_Decode_invalidJSON_returnsErrInvalidMessage(t *testing.T) {
 	assert.True(t, errors.Is(err, codec.ErrInvalidMessage))
 }
 
+func TestNewJSON_Decode_trailingData_returnsErrInvalidMessage(t *testing.T) {
+	c := codec.NewJSON()
+	var o order
+	err := c.Decode([]byte(`{"id":1}{"id":2}`), &o)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, codec.ErrInvalidMessage), "expected codec.ErrInvalidMessage, got: %v", err)
+	assert.ErrorContains(t, err, "trailing data")
+}
+
 // NewJSONStrict — opt-in DisallowUnknownFields
 
 func TestNewJSONStrict_ContentType(t *testing.T) {
@@ -74,6 +83,15 @@ func TestNewJSONStrict_Decode_unknownField_returnsErrInvalidMessage(t *testing.T
 	err := c.Decode([]byte(`{"id":1,"name":"test","extra":true}`), &o)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, codec.ErrInvalidMessage), "expected codec.ErrInvalidMessage, got: %v", err)
+}
+
+func TestNewJSONStrict_Decode_trailingData_returnsErrInvalidMessage(t *testing.T) {
+	c := codec.NewJSONStrict()
+	var o order
+	err := c.Decode([]byte(`{"id":1,"name":"test"}{"id":2}`), &o)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, codec.ErrInvalidMessage), "expected codec.ErrInvalidMessage, got: %v", err)
+	assert.ErrorContains(t, err, "trailing data")
 }
 
 // Encode error case

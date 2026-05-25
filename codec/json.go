@@ -52,6 +52,9 @@ func (c *jsonCodec) Decode(data []byte, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
+	if dec.More() {
+		return fmt.Errorf("%w: payload contains trailing data after first JSON value", ErrInvalidMessage)
+	}
 	return nil
 }
 
