@@ -428,12 +428,7 @@ func (c *BatchConsumer[M]) applyBatchCounterB(batch *Batch[M], handlerErr error)
 	if len(batch.deliveries) == 1 {
 		d := batch.deliveries[0]
 		key := batchCounterBKey(c.tag, d.raw.MessageId, d.raw.DeliveryTag)
-		var count int64
-		if v, ok := cs.m.Load(key); ok {
-			if n, ok2 := v.(int64); ok2 {
-				count = n
-			}
-		}
+		count := cs.load(key)
 		if count+1 > int64(c.maxRedeliveries) { //nolint:gosec // G115: maxRedeliveries is int; count+1 cannot overflow int64 in practice
 			c.cm.RecordMaxRedeliveries(c.queue, "in-process")
 			c.mc.opts.logger.Warningf(
@@ -457,12 +452,7 @@ func (c *BatchConsumer[M]) applyBatchCounterB(batch *Batch[M], handlerErr error)
 	pairs := make([]kv, 0, len(batch.deliveries))
 	for _, d := range batch.deliveries {
 		key := batchCounterBKey(c.tag, d.raw.MessageId, d.raw.DeliveryTag)
-		var count int64
-		if v, ok := cs.m.Load(key); ok {
-			if n, ok2 := v.(int64); ok2 {
-				count = n
-			}
-		}
+		count := cs.load(key)
 		if count+1 > int64(c.maxRedeliveries) { //nolint:gosec // G115: maxRedeliveries is int; count+1 cannot overflow int64 in practice
 			// At least one delivery exceeds the limit: rewrite the whole batch to Nack(false).
 			c.cm.RecordMaxRedeliveries(c.queue, "in-process")

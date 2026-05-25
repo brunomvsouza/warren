@@ -46,6 +46,18 @@ type redeliveryCounter struct {
 	m sync.Map // key: "mid:<MessageID>" or "dlv:<consumerTag>:<deliveryTag>", value: int64
 }
 
+// load returns the current redelivery count for key, or 0 if absent.
+// A non-int64 value in the map indicates a programming error; 0 is the safe default
+// (allows the delivery to proceed rather than crash or enter an infinite loop).
+func (cs *redeliveryCounter) load(key string) int64 {
+	if v, ok := cs.m.Load(key); ok {
+		if n, ok2 := v.(int64); ok2 {
+			return n
+		}
+	}
+	return 0
+}
+
 // Consumer receives AMQP messages from a single queue, decodes each payload
 // to M via the configured codec, and dispatches to a Handler[M] or RawHandler[M].
 //
@@ -543,14 +555,7 @@ func (c *Consumer[M]) applyCounterB(cs *redeliveryCounter, counterBKey string, h
 	}
 
 	// Handler returned ErrRequeue: check counter B before incrementing.
-	var currentCount int64
-	if v, ok := cs.m.Load(counterBKey); ok {
-		if n, ok := v.(int64); ok {
-			currentCount = n
-		}
-		// A non-int64 value would indicate a programming error; treat it as zero
-		// (safe default: let the delivery proceed rather than crash).
-	}
+	currentCount := cs.load(counterBKey)
 
 	// "Once incrementing it would exceed n" = current + 1 > n = current >= n.
 	if currentCount+1 > int64(c.maxRedeliveries) {
