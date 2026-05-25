@@ -18,10 +18,10 @@ func FuzzCodecJSON(f *testing.F) {
 	f.Add([]byte(`{"id":1,"name":"test","extra":true}`))
 	f.Add([]byte(`{"id":2,"name":"foo","unknown_field":"bar","another":42}`))
 	// adversarial inputs
-	f.Add([]byte(strings.Repeat("[", 500)))                       // deeply nested array
-	f.Add([]byte(`{"id":` + strings.Repeat("9", 100) + `}`))     // large integer
-	f.Add([]byte("\xff\xfe"))                                     // invalid UTF-8
-	f.Add([]byte(`{"id":1` + strings.Repeat(`,`, 1000) + `}`))  // many commas
+	f.Add([]byte(strings.Repeat("[", 500)))                    // deeply nested array
+	f.Add([]byte(`{"id":` + strings.Repeat("9", 100) + `}`))   // large integer
+	f.Add([]byte("\xff\xfe"))                                  // invalid UTF-8
+	f.Add([]byte(`{"id":1` + strings.Repeat(`,`, 1000) + `}`)) // many commas
 
 	// fuzzOrder has two known fields; the lax codec must silently accept extra fields.
 	type fuzzOrder struct {
@@ -54,9 +54,9 @@ func FuzzCodecJSONStrict(f *testing.F) {
 	f.Add([]byte(``))
 	f.Add([]byte("   "))
 	// adversarial inputs
-	f.Add([]byte(strings.Repeat("[", 500)))                    // deeply nested array
+	f.Add([]byte(strings.Repeat("[", 500)))                  // deeply nested array
 	f.Add([]byte(`{"id":` + strings.Repeat("9", 100) + `}`)) // large integer
-	f.Add([]byte("\xff\xfe"))                                  // invalid UTF-8
+	f.Add([]byte("\xff\xfe"))                                // invalid UTF-8
 
 	// fuzzStrictTarget has two known fields; unknown fields must be rejected by
 	// NewJSONStrict (DisallowUnknownFields has no effect on interface{}).
