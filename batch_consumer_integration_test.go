@@ -72,9 +72,13 @@ func TestBatchConsumer_SizeFlush_integration(t *testing.T) {
 	}
 
 	// Consume via BatchConsumer with Size(100).
+	// Prefetch must be >= Size to avoid a deadlock: with prefetch < size the
+	// broker stops sending after prefetch unacked messages, the batch never
+	// reaches Size, and the consumer stalls until the context is cancelled.
 	bc, err := warren.BatchConsumerFor[batchPayload](conn).
 		Queue(queueName).
 		Size(batchSize).
+		Prefetch(uint16(batchSize)).
 		Build()
 	require.NoError(t, err)
 
@@ -232,9 +236,12 @@ func TestBatchConsumer_AutoAck_NilReturn_integration(t *testing.T) {
 	}
 
 	// Consume in a single batch of 100. Handler returns nil → all messages acked.
+	// Prefetch must be >= Size (100) to prevent the broker from halting delivery
+	// at 64 (default) and never reaching the flush threshold.
 	bc, err := warren.BatchConsumerFor[batchPayload](conn).
 		Queue(queueName).
 		Size(total).
+		Prefetch(uint16(total)).
 		Build()
 	require.NoError(t, err)
 
@@ -287,8 +294,13 @@ func TestBatchConsumer_AutoNack_ErrRequeue_integration(t *testing.T) {
 	deleteQueues(url, queueName)
 	t.Cleanup(func() { deleteQueues(url, queueName) })
 
+	// AutoDelete must be false here: after consumerCancel() the consumer
+	// unsubscribes and an AutoDelete queue would be immediately deleted by the
+	// broker, making countBatchMessagesInQueue return 0 because ch.Get fails on
+	// a non-existent queue. Non-auto-delete keeps the queue (and the requeued
+	// messages) visible until the explicit t.Cleanup delete runs.
 	top := &warren.Topology{
-		Queues: []warren.Queue{{Name: queueName, Durable: false, AutoDelete: true}},
+		Queues: []warren.Queue{{Name: queueName, Durable: false, AutoDelete: false}},
 	}
 	require.NoError(t, top.Declare(ctx, conn))
 
@@ -337,6 +349,11 @@ func TestBatchConsumer_AutoNack_ErrRequeue_integration(t *testing.T) {
 	// Give broker time to requeue before we cancel and check.
 	time.Sleep(200 * time.Millisecond)
 	consumerCancel()
+
+	// Explicitly close the connection to release all AMQP channels and any
+	// unacknowledged messages back to the broker, so countBatchMessagesInQueue
+	// can see them.
+	_ = conn.Close(context.Background())
 
 	// Messages must be back in the queue (requeue=true).
 	count := countBatchMessagesInQueue(t, url, queueName, total)

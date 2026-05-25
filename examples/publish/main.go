@@ -16,8 +16,8 @@
 //   - AMQP_URL: broker URL (default: amqp://guest:guest@localhost:5672/)
 //
 // Topology side-effects on the broker:
-//   - Creates exchange "warren.examples" (topic, non-durable, auto-delete)
-//   - Creates queue "warren.examples.orders" (non-durable, auto-delete)
+//   - Creates exchange "warren.examples.pub" (topic, non-durable, auto-delete)
+//   - Creates queue "warren.examples.pub.orders" (non-durable, auto-delete)
 //   - Binds queue to exchange with routing key "order.#"
 //
 // The example exits 0 on successful publish and non-zero on any error.
@@ -67,7 +67,7 @@ func run() error {
 	topo := &warren.Topology{
 		Exchanges: []warren.Exchange{
 			{
-				Name:       "warren.examples",
+				Name:       "warren.examples.pub",
 				Kind:       warren.ExchangeTopic,
 				Durable:    false,
 				AutoDelete: true,
@@ -75,15 +75,15 @@ func run() error {
 		},
 		Queues: []warren.Queue{
 			{
-				Name:       "warren.examples.orders",
+				Name:       "warren.examples.pub.orders",
 				Durable:    false,
 				AutoDelete: true,
 			},
 		},
 		Bindings: []warren.Binding{
 			{
-				Exchange:   "warren.examples",
-				Queue:      "warren.examples.orders",
+				Exchange:   "warren.examples.pub",
+				Queue:      "warren.examples.pub.orders",
 				RoutingKey: "order.#",
 			},
 		},
@@ -94,7 +94,7 @@ func run() error {
 
 	var returned bool
 	pub, err := warren.PublisherFor[Order](conn).
-		Exchange("warren.examples").
+		Exchange("warren.examples.pub").
 		RoutingKey("order.created").
 		Mandatory().
 		OnReturn(func(r warren.Return) {

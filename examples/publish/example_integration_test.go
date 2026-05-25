@@ -47,10 +47,10 @@ func TestPublishExample_integration(t *testing.T) {
 
 	// The example declares the queue as auto-delete, so we just need to bind a
 	// consumer to it before the example runs.
-	_, err = ch.QueueDeclare("warren.examples.orders", false, true, false, false, nil)
+	_, err = ch.QueueDeclare("warren.examples.pub.orders", false, true, false, false, nil)
 	require.NoError(t, err)
 
-	msgs, err := ch.Consume("warren.examples.orders", "test-consumer", true, false, false, false, nil)
+	msgs, err := ch.Consume("warren.examples.pub.orders", "test-consumer", true, false, false, false, nil)
 	require.NoError(t, err)
 
 	// Run the example as a subprocess.
