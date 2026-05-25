@@ -163,6 +163,10 @@ func (b *BatchConsumerBuilder[M]) Build() (*BatchConsumer[M], error) {
 	cfg := *b
 	cfg.applyDefaults()
 
+	if cfg.prefetch < uint16(cfg.size) {
+		return nil, fmt.Errorf("%w: prefetch count (%d) must be greater than or equal to size (%d) to avoid deadlocks", ErrInvalidOptions, cfg.prefetch, cfg.size)
+	}
+
 	tag := b.tag
 	if tag == "" {
 		id, err := uuid.NewV7()
@@ -204,7 +208,11 @@ func (b *BatchConsumerBuilder[M]) applyDefaults() {
 		b.size = 100
 	}
 	if b.prefetch == 0 {
-		b.prefetch = 64
+		if b.size > 64 {
+			b.prefetch = uint16(b.size)
+		} else {
+			b.prefetch = 64
+		}
 	}
 	if b.c == nil {
 		b.c = codec.NewJSON()

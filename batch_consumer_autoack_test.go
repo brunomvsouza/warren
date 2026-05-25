@@ -324,7 +324,7 @@ func TestBatchConsumerBuilder_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "q", bc.queue)
 	assert.Equal(t, uint(100), bc.size, "default batch size must be 100")
-	assert.Equal(t, uint16(64), bc.prefetch, "default prefetch must be 64")
+	assert.Equal(t, uint16(100), bc.prefetch, "default prefetch must be scaled to at least size to avoid deadlocks")
 	assert.NotNil(t, bc.codec)
 	assert.NotNil(t, bc.cm)
 }
@@ -340,6 +340,14 @@ func TestBatchConsumerBuilder_EmptyQueue_Error(t *testing.T) {
 	_, err := BatchConsumerFor[string](conn).Build()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+func TestBatchConsumerBuilder_PrefetchLessThanSize_Error(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	_, err := BatchConsumerFor[string](conn).Queue("q").Size(100).Prefetch(50).Build()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+	assert.Contains(t, err.Error(), "prefetch count")
 }
 
 func TestBatchConsumerBuilder_LastWins_Size(t *testing.T) {
