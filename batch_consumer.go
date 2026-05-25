@@ -435,12 +435,12 @@ func (c *BatchConsumer[M]) applyBatchCounterB(batch *Batch[M], handlerErr error)
 			}
 		}
 		if count+1 > int64(c.maxRedeliveries) { //nolint:gosec // G115: maxRedeliveries is int; count+1 cannot overflow int64 in practice
-			cs.m.Delete(key)
 			c.cm.RecordMaxRedeliveries(c.queue, "in-process")
 			c.mc.opts.logger.Warningf(
 				"warren: max redeliveries exceeded for queue %q (cause=in-process, count=%d, limit=%d)",
 				c.queue, count+1, c.maxRedeliveries,
 			)
+			cs.m.Delete(key)
 			return fmt.Errorf("%w (in-process counter exceeded)", ErrMaxRedeliveries)
 		}
 		cs.m.Store(key, count+1)
@@ -465,14 +465,14 @@ func (c *BatchConsumer[M]) applyBatchCounterB(batch *Batch[M], handlerErr error)
 		}
 		if count+1 > int64(c.maxRedeliveries) { //nolint:gosec // G115: maxRedeliveries is int; count+1 cannot overflow int64 in practice
 			// At least one delivery exceeds the limit: rewrite the whole batch to Nack(false).
-			for _, d2 := range batch.deliveries {
-				cs.m.Delete(batchCounterBKey(c.tag, d2.raw.MessageId, d2.raw.DeliveryTag))
-			}
 			c.cm.RecordMaxRedeliveries(c.queue, "in-process")
 			c.mc.opts.logger.Warningf(
 				"warren: max redeliveries exceeded for queue %q (cause=in-process, count=%d, limit=%d)",
 				c.queue, count+1, c.maxRedeliveries,
 			)
+			for _, d2 := range batch.deliveries {
+				cs.m.Delete(batchCounterBKey(c.tag, d2.raw.MessageId, d2.raw.DeliveryTag))
+			}
 			return fmt.Errorf("%w (in-process counter exceeded)", ErrMaxRedeliveries)
 		}
 		pairs = append(pairs, kv{key, count})

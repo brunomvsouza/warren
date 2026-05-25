@@ -444,3 +444,39 @@ funções chamá-la. Alternativamente, colapsar `wireReturnPool` em `wireFakePoo
 
 ---
 
+### LATER-33 — `MessageId` sem limite de comprimento como chave do `sync.Map` em `applyBatchCounterB`
+
+**Contexto:** `batch_consumer.go:batchCounterBKey` — constrói a chave do `sync.Map` do counter B
+como `"mid:" + msgID` quando `MessageId` não é vazio, sem nenhuma validação de comprimento. Um
+broker comprometido ou produtor malicioso pode enviar mensagens com `MessageId` de comprimento
+arbitrário (ex: 1 MB), causando acúmulo de strings longas no map. O problema é idêntico ao
+mapeado em LATER-24 para `returnTagMap`, mas ocorre na instância `counterState` do
+`BatchConsumer`.
+
+**Impacto:** Amplificação de memória dentro de uma sessão de canal (antes do próximo reconnect que
+cria um novo `redeliveryCounter`). Com prefetch padrão de 100 e `MessageId` de 1 MB, a exposição
+é ~100 MB por consumidor por ciclo de canal. Não é explorável remotamente sem acesso ao broker;
+não há risco de vazamento de dados.
+
+**Evidência:** `/ship` security-auditor — LOW finding (2026-05-25, post-LATER-32 review).
+OWASP A05:2021 — Security Misconfiguration (resource exhaustion, defence-in-depth gap). Ver
+relatório completo em `batch_consumer.go:applyBatchCounterB`.
+
+**Sugestão de solução:** Truncar `msgID` em `batchCounterBKey` antes de usá-lo como chave:
+
+```go
+const maxMsgIDKeyLen = 512
+if len(msgID) > maxMsgIDKeyLen {
+    msgID = msgID[:maxMsgIDKeyLen]
+}
+```
+
+Aplicar a mesma lógica em `consumer.go:counterBKey` para consistência. Considerar extrair a
+lógica de key construction para `internal/headers` ou um helper compartilhado.
+
+**Pré-requisitos:** [[LATER-24]] (sync.Map memory retention) — agrupar as correções de memória
+do `sync.Map` no mesmo PR para revisão coesa. T37 (amqptest) pode facilitar um teste de
+integração que verifique o bound.
+
+---
+

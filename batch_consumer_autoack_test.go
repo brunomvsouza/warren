@@ -1624,6 +1624,88 @@ func TestBatchConsumer_MaxRedeliveries_CounterB_EmitsWarning(t *testing.T) {
 	assert.Contains(t, warnings[0], `"warnq"`, "warning must include the queue name")
 }
 
+// TestBatchConsumer_MaxRedeliveries_CounterB_MultiDelivery_EmitsWarning verifies the general
+// path of applyBatchCounterB (len(batch.deliveries) > 1). With Size(2) each flush produces a
+// two-delivery batch, which bypasses the single-delivery fast-path and exercises the []kv
+// general loop including its Warningf call.
+func TestBatchConsumer_MaxRedeliveries_CounterB_MultiDelivery_EmitsWarning(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 20)
+
+	conn := newFakeConsumerConn(t)
+	var logMu sync.Mutex
+	var warnings []string
+	conn.opts.logger = &captureLogger{onWarning: func(msg string) {
+		logMu.Lock()
+		warnings = append(warnings, msg)
+		logMu.Unlock()
+	}}
+
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("multiq").
+		Size(2).
+		MaxRedeliveries(1).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	var mu sync.Mutex
+	var nackCalls int
+	fa := &fakeAcknowledger{
+		nackFn: func(_ uint64, _ bool, _ bool) error {
+			mu.Lock()
+			nackCalls++
+			mu.Unlock()
+			return nil
+		},
+		ackFn: func(_ uint64, _ bool) error { return nil },
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+			return ErrRequeue // always request requeue → accumulates counter B
+		})
+	}()
+
+	// Batch 1: two deliveries with distinct MessageIDs (general path, len==2).
+	// counter B reaches 1 per key — under maxRedeliveries=1 (limit fires at count+1 > 1).
+	deliveryCh <- amqp091.Delivery{DeliveryTag: 1, MessageId: "multi-A", Acknowledger: fa, Body: []byte(`"p"`)}
+	deliveryCh <- amqp091.Delivery{DeliveryTag: 2, MessageId: "multi-B", Acknowledger: fa, Body: []byte(`"p"`)}
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return nackCalls >= 1
+	}, 2*time.Second, 10*time.Millisecond, "expected nack for batch 1")
+
+	// Batch 2: same MessageIDs → counter reaches 2 > maxRedeliveries=1 → Warningf must fire
+	// via the general path (first delivery in the loop triggers the limit check).
+	deliveryCh <- amqp091.Delivery{DeliveryTag: 3, MessageId: "multi-A", Acknowledger: fa, Body: []byte(`"p"`)}
+	deliveryCh <- amqp091.Delivery{DeliveryTag: 4, MessageId: "multi-B", Acknowledger: fa, Body: []byte(`"p"`)}
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return nackCalls >= 2
+	}, 2*time.Second, 10*time.Millisecond, "expected 2 nacks total (one per batch)")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	logMu.Lock()
+	defer logMu.Unlock()
+	require.Len(t, warnings, 1, "exactly one warning must be emitted via the general multi-delivery path")
+	assert.Contains(t, warnings[0], "cause=in-process", "warning must identify cause=in-process")
+	assert.Contains(t, warnings[0], `"multiq"`, "warning must include the queue name")
+}
+
 // TestBatchConsumer_HandlerTimeout_CtxCancelledDuringHandler_NoFrame verifies that when
 // the parent ctx is cancelled while a HandlerTimeout-guarded handler is running, no
 // ack/nack frame is emitted. hCtx (child of ctx) fires with Canceled (not
