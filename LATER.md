@@ -880,28 +880,6 @@ covers the residual audit and tooling-based prevention.
 
 ---
 
-### LATER-29 — `TopologyHint` has 0% test coverage
-
-**Context:** `batch_consumer_builder.go:120-127` — the `TopologyHint(q Queue)` builder method is
-never invoked in any test. Neither the "quorum queue with delivery limit → disables counter B" path
-nor the "non-quorum → keeps counter B enabled" path is exercised.
-
-**Impact:** `counterBDisabled` can be set incorrectly without any test catching it. A regression
-that always disables (or always enables) counter B for quorum queues would silently pass the suite.
-
-**Evidence:** `/ship` test-engineer — Important gap 7 (2026-05-24, post-T23 review).
-
-**Suggested solution:**
-- `TestBatchConsumerBuilder_TopologyHint_QuorumWithLimit_DisablesCounterB` — asserts
-  `counterBDisabled == true` after `TopologyHint(Queue{Type: QueueTypeQuorum, DeliveryLimit: 5})`.
-- `TestBatchConsumerBuilder_TopologyHint_QuorumNoLimit_KeepsCounterBEnabled` — asserts
-  `counterBDisabled == false` after `TopologyHint(Queue{Type: QueueTypeQuorum, DeliveryLimit: 0})`.
-- `TestBatchConsumerBuilder_TopologyHint_ClassicQueue_KeepsCounterBEnabled` — non-quorum queue.
-
-**Prerequisites:** None.
-
----
-
 ### LATER-30 — `ackAll` / `nackAll` error paths have 0 test hits
 
 **Context:** `batch_consumer.go:113-115` and `125-127` — the branches that handle an error returned

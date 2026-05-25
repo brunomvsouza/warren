@@ -993,6 +993,62 @@ func TestBatchConsumer_HandlerTimeout_TimeoutNackRequeue(t *testing.T) {
 	assert.True(t, nackCalls[0].requeue, "TimeoutNackRequeue verdict must requeue")
 }
 
+// — BatchConsumerBuilder TopologyHint tests ——————————————————————————————————
+
+// TestBatchConsumerBuilder_TopologyHint_QuorumWithLimit_DisablesCounterB verifies
+// that a quorum queue with DeliveryLimit > 0 sets counterBDisabled = true.
+func TestBatchConsumerBuilder_TopologyHint_QuorumWithLimit_DisablesCounterB(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		MaxRedeliveries(5).
+		TopologyHint(Queue{Type: QueueTypeQuorum, DeliveryLimit: 5}).
+		Build()
+	require.NoError(t, err)
+	assert.True(t, bc.counterBDisabled, "quorum queue with DeliveryLimit > 0 must disable counter B")
+}
+
+// TestBatchConsumerBuilder_TopologyHint_QuorumNoLimit_KeepsCounterBEnabled verifies
+// that a quorum queue with DeliveryLimit == 0 leaves counterBDisabled = false.
+func TestBatchConsumerBuilder_TopologyHint_QuorumNoLimit_KeepsCounterBEnabled(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		MaxRedeliveries(5).
+		TopologyHint(Queue{Type: QueueTypeQuorum, DeliveryLimit: 0}).
+		Build()
+	require.NoError(t, err)
+	assert.False(t, bc.counterBDisabled, "quorum queue with DeliveryLimit=0 must keep counter B enabled")
+}
+
+// TestBatchConsumerBuilder_TopologyHint_ClassicQueue_KeepsCounterBEnabled verifies
+// that a classic queue leaves counterBDisabled = false.
+func TestBatchConsumerBuilder_TopologyHint_ClassicQueue_KeepsCounterBEnabled(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		MaxRedeliveries(5).
+		TopologyHint(Queue{Type: QueueTypeClassic, DeliveryLimit: 0}).
+		Build()
+	require.NoError(t, err)
+	assert.False(t, bc.counterBDisabled, "classic queue must keep counter B enabled")
+}
+
+// TestBatchConsumerBuilder_TopologyHint_LastWins_Reset verifies that calling
+// TopologyHint twice applies last-wins: a classic queue after a quorum+limit re-enables
+// counter B.
+func TestBatchConsumerBuilder_TopologyHint_LastWins_Reset(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		MaxRedeliveries(5).
+		TopologyHint(Queue{Type: QueueTypeQuorum, DeliveryLimit: 5}).  // disables counter B
+		TopologyHint(Queue{Type: QueueTypeClassic, DeliveryLimit: 0}). // re-enables counter B
+		Build()
+	require.NoError(t, err)
+	assert.False(t, bc.counterBDisabled, "last TopologyHint (classic) must re-enable counter B")
+}
+
 // TestBatchConsumerBuilder_LastWins_HandlerTimeoutVerdict verifies last-wins for
 // HandlerTimeoutVerdict.
 func TestBatchConsumerBuilder_LastWins_HandlerTimeoutVerdict(t *testing.T) {
