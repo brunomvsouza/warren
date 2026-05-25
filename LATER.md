@@ -480,3 +480,44 @@ integração que verifique o bound.
 
 ---
 
+### LATER-34 — Synchronous-confirm throughput ceiling / async publish API (architecture decision)
+
+**Context:** `publisher.go` — `Publish` acquires a channel from the per-connection pool,
+publishes, **blocks on its own confirm**, and only then returns the channel (SPEC §6.1/§6.2).
+A single in-flight publish therefore holds a whole channel for a full broker round-trip, so
+per-`Publish` throughput is bounded by `(channels × connections) / RTT_confirm`. Rev 6 decision
+31 deliberately rejected a sliding in-flight window; `PublishBatch` is the only pipelining path,
+and it is itself synchronous (blocks until the whole batch's confirms or `ConfirmTimeout`).
+Surfaced by the Rev 10 specialist re-review (2026-05-25) as finding **P1.1 / R10-18**.
+
+**Impact:**
+- The §9 throughput targets (≥30k/s single-conn, ≥100k/s multi-conn) hold only at sub-millisecond
+  RTT (local broker). Against a remote broker at 2–5 ms RTT the achievable single-`Publish` rate
+  drops by the same factor, and the SPEC does not state this honestly.
+- **Cliff under confirm-latency spikes.** If broker confirm latency rises (GC pause, disk pressure,
+  quorum failover), the same fixed channel pool yields far fewer msg/s and the overflow surfaces as
+  `ErrChannelPoolExhausted` — confirm latency converts directly into publish unavailability. This
+  is a classic on-call cascade and is invisible in the current design's stated guarantees.
+
+**Evidence:** Rev 10 AMQP/SRE specialist re-review, finding P1.1 (2026-05-25). Recorded in SPEC §10
+"Rev 10" as R10-18, deferred here because it is an owner architecture decision, not a defect.
+
+**Suggested solution (decision required, then a design task):**
+1. **Document the ceiling honestly now (cheap):** add a SPEC §6.2 note that single-`Publish`
+   throughput is `pool/RTT`, that confirm-latency spikes cause `ErrChannelPoolExhausted`, and that
+   `PublishBatch` is the high-throughput path.
+2. **Decide on an async API (reverses Rev 6 decision 31):** evaluate either
+   - `PublishAsync(ctx, msg) (<-chan error)` backed by a per-channel confirm-tracking goroutine that
+     pipelines many publishes on one channel with a **bounded in-flight window** for backpressure; or
+   - a streaming publisher handle with an explicit in-flight budget and confirm callbacks.
+   Either decouples throughput from RTT and removes the pool-exhaustion cliff, at the cost of API
+   surface and the duplicate-budget bookkeeping the async path implies (still at-least-once;
+   consumers dedupe by `MessageID` per §6.2.1).
+
+**Pré-requisitos:** Owner decision on reopening Rev 6 decision 31. Builds on T11
+(`internal/confirms`) and T12/T13 (publisher). If accepted, it becomes a new task (likely a
+Phase 11 follow-on) with its own SPEC amendment; if rejected, item 1 (the honesty note) lands and
+this entry is closed.
+
+---
+

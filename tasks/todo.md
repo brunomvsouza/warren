@@ -1153,6 +1153,141 @@ SPEC §8 + §9 reliability bar: credential leakage is a defect.
 - **Files:** `codec/json.go`, `codec/json_test.go`.
 - **Deps:** T09.
 
+## Phase 11 — AMQP/SRE Specialist Re-review (Rev 10)
+
+Closes the Rev 10 specialist findings (SPEC §10 "Rev 10"). SPEC
+corrections R10-1..R10-4 are already applied inline; these tasks make
+code/validation/tests/observability match. **Reconnect trio T61→T62→T63
+shares the supervisor — sequence, do not parallelize.**
+
+### [ ] T57 — Delayed-exchange durability godoc/warning [P0] · XS
+- **Acceptance:**
+  - [ ] Godoc on `Message.Delay` and `ExchangeKindDelayed` mirrors the SPEC §6.5 warning: scheduled messages live in a non-replicated node-local table and are lost on node failure; recommends durable-queue + `x-message-ttl` + DLX.
+  - [ ] (Optional) `Topology.Declare` emits a one-time warning log when an `ExchangeDelayed` is declared.
+- **Verify:** `go doc` shows the warning; unit test asserts the warning log fires once per delayed-exchange declare.
+- **Files:** `message.go`, `topology.go`, `types.go`.
+- **Deps:** T10, T14, T31. **(R10-1, P0.1)**
+
+### [ ] T58 — Quorum `DeliveryLimit==0` default-20 warning [P0] · XS
+- **Acceptance:**
+  - [ ] `Topology.validate()` logs a warning when `Type=QueueTypeQuorum && DeliveryLimit==0` (RabbitMQ 4.x applies a broker default of 20, not unbounded).
+  - [ ] SPEC §9 poison-loop wording aligned with the corrected §6.3/§6.6.
+- **Verify:** Table test: quorum + `DeliveryLimit==0` → warning; quorum + `DeliveryLimit>0` → no warning; classic → no warning.
+- **Files:** `topology.go`, `topology_test.go`.
+- **Deps:** T14, T15, T20. **(R10-2, P0.2)** — coordinate with T64 (same `validate()`).
+
+### [ ] T59 — Return/ack ordering invariant regression test [P0] · S
+- **Acceptance:**
+  - [ ] Test fails if the `basic.return` notify channel is made buffered, or if confirm/return demux is split across two goroutines.
+  - [ ] Under concurrent mandatory-unroutable publishes, every publish resolves `ErrUnroutable` (zero false successes); asserts `MarkReturned` precedes the ack resolution.
+- **Verify:** Run with `-race -count=100`; a deliberately-buffered return channel variant in the test makes it red.
+- **Files:** `internal/confirms/tracker_test.go`, `publisher_test.go`.
+- **Deps:** T11, T13. **(R10-3, P0.3)**
+
+### [ ] T60 — Single-delivery double-verdict idempotency guard [P0] · S
+- **Acceptance:**
+  - [ ] `Delivery[M]` has a resolved-once guard (mirrors `Batch[M]`): the second of any `Ack`/`Nack`/`AckIf`, or a handler-timeout verdict followed by a late handler verdict, is a no-op returning a sentinel (e.g. `ErrAlreadyClosed`-class), never a wire frame.
+  - [ ] Channel stays open after the double call.
+- **Verify:** Integration test: `HandlerTimeout` fires, handler later returns `nil`; assert no second frame, channel not closed, no `PRECONDITION_FAILED`. Unit test: double `Delivery.Ack` via `ConsumeRaw` is a no-op.
+- **Files:** `delivery.go`, `consumer.go`, `delivery_test.go`, `consumer_test.go`.
+- **Deps:** T18, T19. **(R10-5, P0.4)**
+
+### [ ] T61 — Channel-level recovery (distinct from TCP reconnect) [P1] · M
+- **Acceptance:**
+  - [ ] A consumer whose channel closes while the TCP connection stays up (404/406/ack-error) reopens its channel and re-`basic.qos` + re-`basic.consume` without waiting for a TCP reconnect.
+  - [ ] `consumer_resubscribed_total{queue}` increments; consumer does not return silently.
+- **Verify:** Integration test forces a channel-only exception (e.g. passive-declare a missing queue on the consumer channel) and asserts the consumer recovers and keeps consuming.
+- **Files:** `connection.go`, `consumer.go`, `consumer_integration_test.go`.
+- **Deps:** T07, T07d, T18. **(R10-6, P1.4)** — sequence with T62/T63.
+
+### [ ] T62 — Reconnect topology-redeclare de-amplification [P1] · M
+- **Acceptance:**
+  - [ ] Broker-global topology is redeclared **once per recovery event** at the `*Connection` level, not once per pooled `managedConn`.
+  - [ ] `basic.consume`/`basic.qos` reissue stays per consumer connection.
+- **Verify:** Integration/chaos test with `WithPublisherConnections(4)+WithConsumerConnections(4)` and an instrumented declare counter (or broker-side `queue.declare` count) asserts declares == topology size, not 8×.
+- **Files:** `connection.go`, `topology.go`, `connection_internal_test.go`.
+- **Deps:** T07, T16. **(R10-7, P1.2)** — sequence with T61/T63.
+
+### [ ] T63 — Reconnect barrier max-duration cap [P1] · S
+- **Acceptance:**
+  - [ ] The synchronous redeclare barrier is bounded by a configurable max duration; on cap, blocked `Publish` calls return `ErrReconnecting` rather than stalling indefinitely.
+- **Verify:** Unit test with a mock channel whose redeclare blocks longer than the cap asserts `Publish` returns `ErrReconnecting` at the cap (with `PublishTimeout=0` + `context.Background()`).
+- **Files:** `connection.go`, `options_connection.go`, `connection_internal_test.go`.
+- **Deps:** T07, T62. **(R10-8, P1.6)** — sequence with T61/T62.
+
+### [ ] T64 — Quorum-queue structural validation + MaxPriority fix [P1] · S
+- **Acceptance:**
+  - [ ] `Topology.validate()` returns `ErrInvalidOptions` for a quorum queue that is non-`Durable`, `Exclusive`, `AutoDelete`, or carries `x-max-priority`.
+  - [ ] The existing "MaxPriority" validation reference is reconciled to inspect `Args["x-max-priority"]` (no such struct field exists).
+- **Verify:** Table-driven test covering each rejected quorum combination + a valid quorum queue passing.
+- **Files:** `topology.go`, `topology_test.go`.
+- **Deps:** T14, T15. **(R10-9, P1.5)** — coordinate with T58 (same `validate()`).
+
+### [ ] T65 — DLQ durability/bounds + Consumer missing-DLX parity [P1] · M
+- **Acceptance:**
+  - [ ] Auto-declared `<source>.dlq` is `Durable` (quorum-capable) with configurable bounds (`x-max-length`/`x-max-length-bytes`).
+  - [ ] A `Consumer` with `MaxRedeliveries>0` and a wired `Topology` lacking a DLX for the source queue warns at `Build` and increments a drop metric (parity with `Replier`'s `replier_drop_no_dlx_total`).
+- **Verify:** Integration: nacked-poison lands in a durable bounded DLQ. Unit: consumer `Build` warns + metric increments when no DLX.
+- **Files:** `topology.go`, `consumer.go`, `consumer_builder.go`, `metrics/`.
+- **Deps:** T15, T47, T18, T30. **(R10-10, P1.3)**
+
+### [ ] T66 — `WithAddrs` shuffle + reconnect rotation [P2] · S
+- **Acceptance:**
+  - [ ] The address list is shuffled per connection at `Dial`; reconnect rotates to the next address rather than always retrying index 0.
+- **Verify:** Unit test asserts N connections start from a distribution of addresses; reconnect picks a different address.
+- **Files:** `connection.go`, `options_connection.go`, `connection_internal_test.go`.
+- **Deps:** T07, T07d. **(R10-11, P2.1)**
+
+### [ ] T67 — `Dial` partial-pool-connect policy [P2] · S
+- **Acceptance:**
+  - [ ] Policy recorded in SPEC §6.1 and implemented: `Dial` succeeds if ≥1 connection per role connects (supervisor reconnects the rest) — or fail-fast, per the decision.
+- **Verify:** Integration test where a subset of pooled connections cannot connect asserts the chosen behaviour deterministically.
+- **Files:** `connection.go`, SPEC §6.1, `connection_integration_test.go`.
+- **Deps:** T07, T07d. **(R10-12, P2.2)**
+
+### [ ] T68 — Alternate-exchange support [P2] · S
+- **Acceptance:**
+  - [ ] `x-alternate-exchange` declarable on an `Exchange` (server-side catch-all for unroutable messages), complementing `Mandatory()`+`OnReturn`.
+- **Verify:** Integration: publish (non-mandatory) to no matching binding with an AE configured → message arrives on the AE-bound queue.
+- **Files:** `topology.go`, `topology_test.go`, `topology_integration_test.go`.
+- **Deps:** T14, T15. **(R10-13, P2.4)**
+
+### [ ] T69 — Exchange-to-exchange bindings [P2] · S
+- **Acceptance:**
+  - [ ] `Binding` (or a typed variant) supports an exchange destination (`exchange.bind`) for layered fan-out.
+- **Verify:** Integration: bind exchange→exchange, publish to source, assert delivery via the destination exchange's bound queue (`rabbitmqctl list_bindings`).
+- **Files:** `topology.go`, `topology_test.go`, `topology_integration_test.go`.
+- **Deps:** T14, T15. **(R10-14, P2.3)**
+
+### [ ] T70 — Graceful-shutdown completeness [P2] · M
+- **Acceptance:**
+  - [ ] `Close` handles prefetched-but-undispatched deliveries deterministically (drain or nack-requeue), documented in SPEC §6.1.
+  - [ ] `BatchConsumer` flushes its pending partial batch on `Close`/final `FlushAfter`.
+- **Verify:** Integration: prefetch N, dispatch < N, `Close`; assert undispatched are nack-requeued (redelivered), not silently dropped. Batch partial flush asserted with `goleak` clean.
+- **Files:** `connection.go`, `consumer.go`, `batch_consumer.go`, SPEC §6.1/§6.4.
+- **Deps:** T18, T22. **(R10-15, P2.5)**
+
+### [ ] T71 — Observability gaps: pool-wait, in-flight, redelivered [P2] · M
+- **Acceptance:**
+  - [ ] Channel-pool acquire-wait/saturation metric exposed.
+  - [ ] `consumer_in_flight{queue}` gauge (active handlers) exposed.
+  - [ ] `consumer_redelivered_total{queue}` counter increments on `Redelivered()==true` deliveries.
+- **Verify:** Unit/integration assert each metric moves under the relevant condition (pool saturation, busy handlers, a forced redelivery).
+- **Files:** `metrics/`, `channelpool.go`, `consumer.go`.
+- **Deps:** T04, T08, T18. **(R10-16, P2.6)** — coordinates with T50/T52/T53.
+
+### [ ] T72 — TCP keepalive / dialer hardening [P2] · XS
+- **Acceptance:**
+  - [ ] Default `net.Dialer` sets a keepalive; `TCP_USER_TIMEOUT` documented where available, so a write to a half-open socket fails promptly.
+- **Verify:** Unit test asserts the default dialer carries keepalive; documented in SPEC §6.1 heartbeat/partition section.
+- **Files:** `options_connection.go`, `connection.go`, SPEC §6.1.
+- **Deps:** T07. **(R10-17, P2.7)**
+
+### Checkpoint — Phase 11 (Rev 10) closed
+- [ ] All T57–T72 acceptance criteria ticked; `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane green; `goleak.VerifyNone` clean.
+- [ ] Reconnect trio (T61/T62/T63) landed in sequence with chaos coverage.
+- [ ] Each per-task SPEC amendment landed in the same PR as its code; SPEC §10 "Rev 10" stays the source of record.
+
 ### Checkpoint — v0.1.0 shipped
 - [ ] Every SPEC §9 success criterion ticked.
 - [ ] `v0.1.0` tag on `main`.
@@ -1162,9 +1297,9 @@ SPEC §8 + §9 reliability bar: credential leakage is a defect.
 ---
 
 ## Quick stats
-- Total tasks: **65** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience).
-- Phases: **10**.
-- Estimated sizing: 5× XS · 31× S · 18× M · 0× L (none too big).
+- Total tasks: **81** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review).
+- Phases: **11**.
+- Estimated sizing: 8× XS · 39× S · 23× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.
 - Bench gates (T44b): ≥ 30k msg/s single-conn, ≥ 100k msg/s with `WithPublisherConnections(4)+WithChannelPoolSize(16)`, `PublishBatch` ≥ 5× `Publish`.

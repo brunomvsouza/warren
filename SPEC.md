@@ -735,6 +735,15 @@ publish only the reference.
   worse failure mode for operators to diagnose.
 - OAuth2 (via the `rabbitmq_auth_backend_oauth2` plugin) is out of
   scope for v0.1; planned for v0.2.
+- **TLS and client-properties hygiene.** The library passes
+  `WithTLSConfig(*tls.Config)` through verbatim — it never overrides
+  your verification settings. For production `amqps://`, set
+  `tls.Config.ServerName` to the broker hostname and do **not** set
+  `InsecureSkipVerify` (it disables certificate validation and defeats
+  EXTERNAL's identity guarantees). Anything placed in
+  `WithClientProperties` is visible broker-side via
+  `rabbitmqctl list_connections client_properties` — never put secrets
+  there.
 
 ### 6.2 Publisher
 
@@ -843,7 +852,21 @@ Semantics:
   confirm tracker correlates the two frames by `delivery-tag`: when an
   ack arrives for a `delivery-tag` that already saw a return, `Publish`
   resolves with `ErrUnroutable` rather than success. The `OnReturn`
-  callback fires synchronously before `Publish` unblocks. For
+  callback fires synchronously before `Publish` unblocks.
+  **Ordering invariant (load-bearing, see §10 Rev 10).** This
+  correlation is only correct if the return is *recorded* before the
+  ack is *processed*. `amqp091-go` delivers returns and confirms on two
+  **separate** Go channels, so the wire ordering (return-then-ack) is
+  NOT preserved across them — a naïve two-goroutine drain, or a
+  buffered return channel, lets the ack win the race and silently
+  resolves an unroutable publish as success (~50% of the time under
+  load). The library therefore demuxes both notify channels from a
+  **single goroutine** and registers the `basic.return` channel
+  **unbuffered**, so `amqp091-go`'s single reader blocks on the return
+  send until `MarkReturned` runs and only then dispatches the ack.
+  Buffering the return channel or splitting the drain across goroutines
+  reintroduces the silent-loss race and is a breaking change to this
+  contract. For
   **`PublishBatch`** with `Mandatory()`, multiple `basic.return` frames
   can arrive for different messages before any ack is processed; the
   library correlates each return to its delivery-tag via `MessageID`
@@ -858,7 +881,9 @@ Semantics:
   consumers as idempotent (dedupe by `MessageID`).
 - `PublishBatch` pipelines all N publishes on a **single channel**
   (preserving input order per RabbitMQ's per-channel ordering
-  guarantee), waits one confirm window, returns per-message
+  guarantee), waits up to `ConfirmTimeout` for the batch's confirms
+  (any delivery-tag still outstanding when the window elapses resolves
+  as `ErrConfirmTimeout` in its slot), returns per-message
   `PublishResult` and (if any failed) a non-nil error wrapping
   `ErrPartialBatch`. Per-message error values include
   `ErrPublishNacked`, `ErrUnroutable`, `ErrChannelClosed` (if the
@@ -1172,8 +1197,10 @@ goroutines may finish in a different order than they started.
 dispatcher pattern for concurrency. The AMQP channel reader loop
 does not block waiting for a free handler goroutine slot; this
 prevents head-of-line blocking on the AMQP connection and ensures
-vital broker frames (like `basic.cancel` or `basic.return`) are
-processed promptly even if all `n` handlers are currently busy.
+vital consumer-side broker frames (like `basic.cancel` and
+channel-close notifications) are processed promptly even if all `n`
+handlers are currently busy. (`basic.return` is a publisher-side
+frame and never arrives on a consumer channel.)
 
 For strict per-queue ordering with redundancy, the canonical setup
 is `Concurrency(1)` plus `Queue.SingleActiveConsumer=true` on the
@@ -1208,6 +1235,18 @@ already doing the bounding, and a second in-process counter only
 adds skew. Metrics still surface `ErrMaxRedeliveries` when the
 broker dead-letters; the consumer reads `x-death` to attribute the
 drop.
+
+**RabbitMQ 4.x default (load-bearing).** A quorum queue with
+`DeliveryLimit == 0` is **not** unbounded on RabbitMQ 4.x: the broker
+applies a default `x-delivery-limit` of **20**, dead-lettering (or
+dropping, if no DLX is configured) on the 21st delivery. So the
+combination "`DeliveryLimit:0` + `MaxRedeliveries(0)`", which reads as
+"unbounded on both sides", actually drops the message at 20
+broker-side — exactly the kind of silent drop §1 forbids. `Topology`
+declares emit a warning for `Type=QueueTypeQuorum && DeliveryLimit==0`
+(see §6.6). To genuinely disable the broker cap, set `DeliveryLimit`
+to a very large value explicitly; always pair a quorum queue with a
+DLX so the 21st-delivery message is preserved.
 
 #### Poison protection — fallback path: consumer-side counters
 
@@ -1255,6 +1294,15 @@ across processes.
 Metric and log fields distinguish the cause: `cause=delivery-limit`
 (quorum-broker), `cause=x-death` (counter A), or `cause=in-process`
 (counter B).
+
+**Interaction with RabbitMQ's own cycle detection.** Independently of
+the counters above, RabbitMQ drops a dead-lettered message that would
+cycle back to a queue already present in its `x-death` with the same
+reason. So a DLX-back-to-source binding may see the broker discard a
+message *before* counter A's `DeathCount()` reaches `MaxRedeliveries`;
+do not assume the consumer always observes exactly `n` redeliveries
+before the drop on cyclic topologies. This is a broker behaviour, not
+a library one, and is surfaced (when observed) as `cause=x-death`.
 
 #### `basic.cancel` (consumer cancellation notification)
 
@@ -1386,7 +1434,7 @@ type Message[M any] struct {
     DeliveryMode    DeliveryMode   // default (zero): Persistent
 
     // RabbitMQ extensions
-    Delay           time.Duration  // requires rabbitmq_delayed_message_exchange plugin
+    Delay           time.Duration  // requires rabbitmq_delayed_message_exchange plugin; NOT durable across node failure — see Delay note below
 }
 
 type DeliveryMode uint8
@@ -1437,6 +1485,16 @@ type Headers map[string]any  // AMQP field-table; see typing note below
   - SASL EXTERNAL connections expose the identity via
     `(*Connection).AuthenticatedUser()` so this check works
     transparently regardless of mechanism.
+  - **Caveat — auth backends that rewrite the username.** The
+    client-side check compares against the credential the client
+    presented (URI/`WithAuth` user, or the cert principal under
+    EXTERNAL). If the broker is configured with an auth backend that
+    *maps* that principal to a different internal username (some LDAP /
+    OAuth2 / `auth_backend_http` setups), the client-side value can
+    disagree with the broker's notion of the user — producing a false
+    `ErrInvalidMessage` reject, or letting a value through that the
+    broker then 406s. In those deployments, leave `UserID` empty (the
+    common case) so neither side stamps it.
 
 - **`Headers` typing.** The AMQP 0-9-1 field-table supports a fixed set
   of value types, matched 1:1 to Go via `amqp091-go`'s encoder:
@@ -1458,6 +1516,24 @@ type Headers map[string]any  // AMQP field-table; see typing note below
   surprise. Any other Go type (channels, structs, function values,
   pointers, named types not in this list) returns `ErrInvalidMessage`
   at publish time.
+
+- **`Delay` (durability warning — load-bearing).** `Delay` routes the
+  message through a `rabbitmq_delayed_message_exchange` exchange
+  (§6.6 `ExchangeDelayed`). **The plugin stores scheduled messages in
+  a node-local Mnesia/ETS table that is NOT replicated and NOT a
+  quorum/durable queue.** A publisher confirm for a delayed message
+  means "the broker accepted it for scheduling", **not** "it will be
+  delivered" — if the owning node fails before the delay elapses, the
+  scheduled message is **lost silently**, even with `Durable` topology
+  and confirms on. This is the one path in the library where a
+  confirmed publish can still be lost, so it stands **outside the §1
+  "no silent message loss" bar**. For delays that must survive node
+  failure, prefer the durable pattern: publish to a normal durable
+  (ideally quorum) queue with `x-message-ttl` and a DLX that routes
+  the expired message onward — TTL + DLX is fully replicated. Use the
+  delayed-message plugin only when occasional loss of a scheduled
+  message is acceptable (e.g. best-effort retries, non-critical
+  reminders).
 
 `Persistent` is the zero-value default. Any user constructing a
 `Message[M]{}` literally gets durable delivery without thinking. A
@@ -1492,7 +1568,7 @@ const (
     ExchangeFanout  ExchangeKind = "fanout"
     ExchangeTopic   ExchangeKind = "topic"
     ExchangeHeaders ExchangeKind = "headers"
-    ExchangeDelayed ExchangeKind = "x-delayed-message" // requires plugin
+    ExchangeDelayed ExchangeKind = "x-delayed-message" // requires plugin; scheduled messages are NOT durable across node failure — see Message.Delay note (§6.5)
 )
 
 type Queue struct {
@@ -1511,7 +1587,15 @@ type Queue struct {
     // and supersedes the in-process counter B of MaxRedeliveries (see §6.3).
     // Classic queues do not honour this argument as of RabbitMQ 4.x and
     // require the consumer-side MaxRedeliveries mechanism instead.
-    // Zero = unbounded (broker default).
+    // Zero leaves x-delivery-limit UNSET by this library. WARNING: on
+    // RabbitMQ 4.x a quorum queue with no explicit limit receives a
+    // broker-applied DEFAULT delivery-limit of 20 — it is NOT unbounded.
+    // The message dead-letters (or is dropped, if no DLX) on the 21st
+    // delivery. To truly disable the cap, set a very large value
+    // explicitly; to bound tighter, set DeliveryLimit > 0. Classic
+    // queues ignore the argument entirely. See §6.3 poison-protection.
+    // Topology.validate() warns when Type=QueueTypeQuorum && DeliveryLimit==0
+    // so this default is never a surprise.
     DeliveryLimit        int
 
     // SingleActiveConsumer enables the x-single-active-consumer queue
@@ -1671,6 +1755,21 @@ Uses RabbitMQ `direct reply-to` pseudo-queue
 auto-delete reply queue when the builder calls
 `UseExclusiveReplyQueue()`. `ctx` deadline maps to per-call timeout
 (returns `ErrCallTimeout`).
+
+**Channel/connection ownership (relative to the §6.1 pool).** Because
+`amq.rabbitmq.reply-to` is channel-scoped — replies are delivered only
+on the channel that issued the `basic.consume` for the pseudo-queue —
+a `Caller[Req,Resp]` does **not** acquire request-publish channels from
+the rotating publisher channel pool. It holds **one dedicated channel**
+(on one of the pool's TCP connections, pinned like a consumer) that
+both consumes `amq.rabbitmq.reply-to` and publishes the requests, so
+the reply routes back to it. Concurrent `Call`s share that channel and
+are demultiplexed by `CorrelationID`. If that channel closes (reconnect),
+in-flight calls resolve with `ErrChannelClosed`; the `Caller` reopens
+and re-`basic.consume`s for subsequent calls. `UseExclusiveReplyQueue()`
+swaps the pseudo-queue for a real exclusive auto-delete queue owned by
+the same dedicated channel, which restores `Prefetch` and survives more
+failure modes at the cost of one extra declare per `Caller`.
 
 **Auto-population:** `Caller[Req,Resp]` automatically stamps a
 `CorrelationID` (e.g., UUIDv7) and the appropriate `ReplyTo` address
@@ -2856,3 +2955,131 @@ spec amendment.
     reference for any feature that had landed but not yet been cut.
     See §7 "Executable examples at checkpoints" for the policy and
     §8 Always for the enforcement bullet.
+
+### Rev 10 — AMQP/SRE specialist re-review (2026-05-25)
+
+A fresh "act as a battle-hardened AMQP091/RabbitMQ/SRE specialist"
+pass over the whole spec surfaced four correctness/factual defects and
+a family of reliability-bar gaps that survived Rev 6/9. The
+**corrections (R10-1..R10-4) are applied inline in this SPEC**; the
+**behaviour changes (R10-5..R10-17) are tracked as Phase 11 tasks
+T57–T72 in `tasks/plan.md`** and amend the relevant section when each
+lands; **R10-18 is deferred to `LATER.md` (LATER-34)** because it is an
+architecture decision, not a defect. Reopening any of these needs a
+fresh spec amendment.
+
+**Corrections applied in this revision:**
+
+- **R10-1 — `Message.Delay` / `ExchangeDelayed` are NOT durable across
+  node failure.** The `rabbitmq_delayed_message_exchange` plugin stores
+  scheduled messages in a node-local, non-replicated Mnesia/ETS table.
+  A confirm means "accepted for scheduling", not "will be delivered";
+  losing the owning node before the delay elapses loses the message
+  silently — so delayed messages stand *outside* the §1 no-loss bar.
+  §6.5/§6.6 now carry the warning and recommend durable-queue + TTL +
+  DLX for delays that must survive node failure. Godoc + an optional
+  declare-time warning are tracked by **T57**.
+- **R10-2 — Quorum `DeliveryLimit == 0` is not unbounded on RabbitMQ
+  4.x.** The broker applies a **default delivery-limit of 20**; the old
+  "Zero = unbounded" wording was factually wrong and made
+  "`DeliveryLimit:0` + `MaxRedeliveries(0)`" a silent drop at the 21st
+  delivery. §6.3/§6.6 corrected. `Topology.validate()` warning for
+  `Quorum && DeliveryLimit==0` is tracked by **T58**.
+- **R10-3 — Return/ack correlation depends on a load-bearing ordering
+  invariant.** `amqp091-go` delivers returns and confirms on two
+  separate channels; a buffered return channel or a two-goroutine drain
+  lets the ack win the race and resolves an unroutable mandatory publish
+  as success. The library demuxes from a single goroutine with an
+  **unbuffered** return channel. §6.2 now states this as a contract; a
+  regression test that locks it is tracked by **T59**.
+- **R10-4 — Minor protocol/clarity fixes (applied):** `PublishBatch`
+  confirm window is bounded by `ConfirmTimeout` (§6.2);
+  `basic.return` is publisher-side, not a consumer dispatcher frame
+  (§6.3); `UserID` client-side check caveat for username-rewriting auth
+  backends (§6.5); TLS/`client_properties` hygiene note (§6.1);
+  `Caller` RPC channel/connection ownership relative to the pool
+  (§6.7); RabbitMQ native dead-letter cycle-detection interaction with
+  the two-counter design (§6.3).
+
+**Behaviour changes (Phase 11 — amend SPEC on landing):**
+
+- **R10-5 — Single-delivery double-verdict idempotency guard (T60).**
+  A handler-timeout verdict followed by a late handler `Ack`/`Nack`
+  (or any double call on `Delivery.Ack/Nack/AckIf` via `ConsumeRaw`)
+  must be a no-op, never a second frame: a duplicate ack/nack is a
+  channel-closing `PRECONDITION_FAILED` that takes down every in-flight
+  handler on that channel. `Delivery[M]` gains an idempotent
+  resolved-once guard mirroring `Batch[M]`.
+- **R10-6 — Channel-level recovery, distinct from TCP reconnect (T61).**
+  A 404/406/ack-error closes only the channel while the TCP connection
+  stays up; the supervisor watches the connection, so the consumer can
+  die silently on its closed channel. The consumer must observe its own
+  channel close and reopen + re-`basic.qos` + re-`basic.consume`,
+  incrementing `consumer_resubscribed_total`, without waiting for a TCP
+  reconnect.
+- **R10-7 — Reconnect topology-redeclare de-amplification (T62).**
+  `AttachTo` registers the redeclare hook on every pooled connection
+  (`topology.go`), so a broker restart triggers N×(pool size) declares
+  of broker-global topology against a just-recovered broker. Redeclare
+  topology once per recovery event at the `*Connection` level; keep
+  only `basic.consume`/`basic.qos` reissue per consumer connection.
+- **R10-8 — Reconnect barrier max-duration cap (T63).** The synchronous
+  redeclare barrier has no upper bound; a "half-alive" broker (accepts
+  the socket, stalls on `queue.declare`) plus the default
+  `PublishTimeout=0` and `context.Background()` stalls publishers
+  indefinitely — the very silent-stall mode `ConfirmTimeout=30s` was
+  added to prevent. Bound the barrier and surface `ErrReconnecting`
+  when the cap is hit.
+- **R10-9 — Quorum-queue structural validation + `MaxPriority` fix
+  (T64).** `Topology.validate()` validates streams but not quorum
+  queues, which the broker requires to be `Durable` and forbids from
+  being `Exclusive`/`AutoDelete` or carrying `x-max-priority`. Reject
+  these locally as `ErrInvalidOptions`. Also reconcile the validation's
+  reference to "MaxPriority" (no such struct field) to check
+  `Args["x-max-priority"]`.
+- **R10-10 — DLQ durability/bounds + Consumer missing-DLX parity
+  (T65).** The auto-declared `<source>.dlq` has unspecified
+  type/durability and no bounds — an unbounded DLQ fills disk and
+  triggers a broker-wide disk alarm. Declare it durable (quorum-capable)
+  with configurable bounds. And mirror the `Replier` missing-DLX
+  validation on the `Consumer`: when `MaxRedeliveries>0` and the wired
+  `Topology` has no DLX for the source queue, warn at `Build` and emit
+  a drop metric (poison drops are currently silent there).
+- **R10-11 — `WithAddrs` shuffle + reconnect rotation (T66).** Cluster
+  failover must shuffle the address list per connection and rotate on
+  reconnect, or every client stampedes the same node on recovery.
+- **R10-12 — `Dial` partial-pool-connect policy (T67).** Define and
+  implement what happens when some of the 2+2 pooled connections fail
+  at boot (succeed-if-≥1-per-role with supervised reconnect of the
+  rest, vs fail-fast) — currently unspecified.
+- **R10-13 — Alternate-exchange support (T68).** Expose
+  `x-alternate-exchange` so unroutable messages have a server-side
+  catch-all, complementing per-publish `Mandatory()`+`OnReturn`.
+- **R10-14 — Exchange-to-exchange bindings (T69).** `Binding` only
+  binds exchange→queue; add exchange→exchange (`exchange.bind`) for
+  layered fan-out topologies (a real RabbitMQ extension).
+- **R10-15 — Graceful-shutdown completeness (T70).** Specify and handle
+  prefetched-but-undispatched deliveries on `Close` (drain or
+  nack-requeue, documented), and flush a `BatchConsumer`'s pending
+  partial batch on `Close`/final `FlushAfter`.
+- **R10-16 — Observability gaps (T71).** Add the leading-indicator
+  metrics the cliffs above need: channel-pool acquire-wait/saturation,
+  a `consumer_in_flight{queue}` gauge, and a `consumer_redelivered_total`
+  counter (redelivery ratio is the #1 instability signal). Coordinates
+  with Phase 10 T50/T52/T53.
+- **R10-17 — TCP keepalive / dialer hardening (T72).** AMQP heartbeats
+  cover read-side partition detection; add `net.Dialer` keepalive (and
+  document `TCP_USER_TIMEOUT` where available) so a write to a
+  half-open socket fails promptly instead of relying on
+  `ConfirmTimeout` as the only backstop.
+
+**Deferred (architecture decision):**
+
+- **R10-18 — Sync-confirm throughput ceiling / async publish API
+  (LATER-34).** `Publish` holds a pooled channel for a full confirm
+  round-trip, so per-`Publish` throughput is `pool/RTT` and a confirm-
+  latency spike cascades into `ErrChannelPoolExhausted`. The §9
+  30k/100k targets hold only at sub-ms (local-broker) RTT. Whether to
+  add an async/streaming publish API with a bounded in-flight window
+  (reversing Rev-6 decision 31) vs documenting the ceiling honestly is
+  an owner decision, tracked in `LATER.md` as LATER-34.

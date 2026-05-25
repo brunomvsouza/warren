@@ -935,6 +935,51 @@ Goal: Address gaps identified in the SRE assessment (operability at scale, memor
 - **T55** `consumer_builder.go`: Create native `WithDedupe(store, ttl)` middleware, abstracting LRU/Redis cache from the handler and ensuring correct commits.
 - **T56** `codec/json.go`: Add `WithUnknownFieldObserver(func(path string))` to lax `NewJSON`, emitting the `codec_unknown_fields_total` metric to monitor silent schema drift.
 
+### Phase 11 — AMQP/SRE Specialist Re-review (Rev 10)
+
+Goal: close the correctness defects and reliability-bar gaps found in
+the Rev 10 specialist pass (SPEC §10 "Rev 10"). The SPEC corrections
+(R10-1..R10-4) are already applied inline; these tasks make the code,
+validation, tests, and observability match the corrected contract.
+Vertical slices: each task carries its SPEC touch-up (if any) + code +
+test in one path. **The reconnect-path trio (T61→T62→T63) shares the
+supervisor and MUST be sequenced, not parallelized.** R10-18
+(async-publish ceiling) is deferred to `LATER.md` LATER-34.
+
+- **T57** `message.go` + `topology.go`: godoc on `Message.Delay` and `ExchangeKindDelayed` mirroring the SPEC §6.5 durability warning (scheduled messages lost on node failure; recommend durable-queue + TTL + DLX); optional declare-time warning when an `ExchangeDelayed` is declared. **(R10-1, P0.1)**
+- **T58** `topology.go`: `validate()` warning when `Type=QueueTypeQuorum && DeliveryLimit==0` (RabbitMQ 4.x applies a broker default of 20 — not unbounded). Align §9 poison-loop wording. **(R10-2, P0.2)**
+- **T59** `internal/confirms` / `publisher_test.go`: regression test that locks the return/ack ordering invariant — fails if the `basic.return` notify channel is buffered or the demux is split across goroutines (assert `MarkReturned` precedes `Ack` resolution for a mandatory-unroutable publish under load). **(R10-3, P0.3)**
+- **T60** `delivery.go` + `consumer.go`: idempotent resolved-once guard on `Delivery[M]` (mirrors `Batch[M]`). A handler-timeout verdict followed by a late handler `Ack`/`Nack`, or a double `Delivery.Ack/Nack/AckIf` via `ConsumeRaw`, is a no-op — never a second frame that channel-closes with `PRECONDITION_FAILED`. **(R10-5, P0.4)**
+- **T61** `connection.go` + `consumer.go`: channel-level recovery distinct from TCP reconnect. Consumer observes its own channel close (404/406/ack-error with the TCP connection still up) and reopens + re-`basic.qos` + re-`basic.consume`, incrementing `consumer_resubscribed_total`, without a full reconnect. **(R10-6, P1.4)** — *sequence with T62/T63.*
+- **T62** `connection.go` + `topology.go`: redeclare broker-global topology **once per recovery event** at the `*Connection` level instead of per pooled `managedConn` (today `AttachTo` registers the hook on every conn → N×pool declares on broker restart). Keep `basic.consume`/`basic.qos` reissue per consumer connection. **(R10-7, P1.2)** — *sequence with T61/T63.*
+- **T63** `connection.go`: bound the synchronous reconnect barrier with a max duration; on cap, blocked publishers get `ErrReconnecting` instead of stalling indefinitely behind a half-alive broker (matters most with `PublishTimeout=0` + `context.Background()`). **(R10-8, P1.6)** — *sequence with T61/T62.*
+- **T64** `topology.go`: quorum-queue structural validation in `validate()` — reject non-`Durable`, `Exclusive`, `AutoDelete`, or `x-max-priority` quorum queues with `ErrInvalidOptions`. Reconcile the existing "MaxPriority" validation reference (no such struct field) to check `Args["x-max-priority"]`. **(R10-9, P1.5)** — *coordinate with T58 (same `validate()`).*
+- **T65** `topology.go` + `consumer.go` + `metrics/`: auto-declared `<source>.dlq` becomes durable (quorum-capable) with configurable bounds; Consumer mirrors the `Replier` missing-DLX validation — when `MaxRedeliveries>0` and the wired `Topology` has no DLX for the source queue, warn at `Build` and emit a drop metric so poison drops are observable. **(R10-10, P1.3)** — *builds on T47 (DLX binding), T52 (`dlq_depth`).*
+- **T66** `connection.go` + `options_connection.go`: shuffle the `WithAddrs` list per connection and rotate addresses on reconnect, to avoid every client stampeding the same node on broker recovery. **(R10-11, P2.1)**
+- **T67** `connection.go`: define + implement `Dial` partial-pool-connect policy (succeed if ≥1 connection per role connects, supervisor reconnects the rest; or fail-fast — decision recorded in SPEC §6.1). **(R10-12, P2.2)**
+- **T68** `topology.go` + `publisher_builder.go`: expose `x-alternate-exchange` (server-side catch-all for unroutable messages) on `Exchange`/topology, complementing per-publish `Mandatory()`+`OnReturn`. **(R10-13, P2.4)**
+- **T69** `topology.go`: exchange-to-exchange bindings (`exchange.bind`) — extend `Binding` (or add a typed variant) so an exchange can be a binding destination, for layered fan-out topologies. **(R10-14, P2.3)**
+- **T70** `connection.go` + `consumer.go` + `batch_consumer.go`: graceful-shutdown completeness — specify + handle prefetched-but-undispatched deliveries on `Close` (drain or nack-requeue, documented), and flush a `BatchConsumer`'s pending partial batch on `Close`/final `FlushAfter`. **(R10-15, P2.5)**
+- **T71** `metrics/` + `channelpool.go` + `consumer.go`: add channel-pool acquire-wait/saturation metric, a `consumer_in_flight{queue}` gauge, and a `consumer_redelivered_total{queue}` counter (redelivery ratio = leading instability signal). Coordinates with Phase 10 T50/T52/T53. **(R10-16, P2.6)**
+- **T72** `options_connection.go` + `connection.go`: `net.Dialer` keepalive on the default dialer (document `TCP_USER_TIMEOUT` where available) so a write to a half-open socket fails promptly rather than relying on `ConfirmTimeout` as the only backstop. **(R10-17, P2.7)**
+
+**Checkpoint Phase 11:**
+- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` and the integration lane pass; `goleak.VerifyNone` clean.
+- [ ] `Message.Delay`/`ExchangeKindDelayed` godoc carries the durability warning; SPEC §6.5/§6.6 reference a durable alternative (T57).
+- [ ] Declaring a `QueueTypeQuorum` with `DeliveryLimit==0` logs the RabbitMQ-4.x-default-20 warning (T58).
+- [ ] A regression test fails if the `basic.return` channel is buffered or the confirm/return demux is split across goroutines (T59).
+- [ ] Handler timeout followed by a late `Ack`, and a double `Delivery.Ack` via `ConsumeRaw`, issue **no** second frame and do not close the channel (T60).
+- [ ] Forcing a consumer-channel-only close (404/406, TCP still up) reopens + re-`basic.consume`s; `consumer_resubscribed_total` increments; consumer does not die silently (T61).
+- [ ] A broker restart with an N-connection pool issues topology declares **once per recovery**, not N×pool (asserted via declare instrumentation/broker counters) (T62).
+- [ ] Against an injected slow-`queue.declare` broker, a blocked `Publish` returns `ErrReconnecting` at the barrier cap instead of stalling past it (T63).
+- [ ] Quorum queue that is non-`Durable`/`Exclusive`/`AutoDelete`/`x-max-priority` returns `ErrInvalidOptions` at `Declare`; "MaxPriority" validation reference reconciled (T64).
+- [ ] Auto-declared DLQ is durable with bounds; a `Consumer` with `MaxRedeliveries>0` and no DLX in the wired `Topology` warns at `Build` and increments the drop metric (T65).
+- [ ] `WithAddrs` order is shuffled per connection and rotates on reconnect (T66); `Dial` partial-pool policy behaves per SPEC §6.1 (T67).
+- [ ] `x-alternate-exchange` (T68) and exchange-to-exchange bindings (T69) declare correctly (verified via `rabbitmqctl`/integration).
+- [ ] `Close` drains/nack-requeues prefetched-but-undispatched deliveries; `BatchConsumer` flushes a partial batch on `Close` (T70).
+- [ ] New observability metrics present and exercised (T71); default dialer sets keepalive (T72).
+- [ ] SPEC §10 "Rev 10" decisions reflected; any per-task SPEC amendment landed in the same PR as its code.
+
 ## Out of scope (tracked for v0.2)
 
 - Native stream-protocol consume (`x-stream-offset`,
