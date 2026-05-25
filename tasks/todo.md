@@ -18,6 +18,11 @@ Replier missing-DLX validation, `x-death` reason filter, SASL
 EXTERNAL fail-closed, `errorlint`, `basic.cancel` surfacing. See
 `plan.md` "Revision history" Rev 6 for full rationale.
 
+**Rev 9 — SRE & AMQP 0-9-1 specialist review.** Five surface changes:
+`Topology.Declare` auto-injects `x-dead-letter-strategy: at-least-once` for quorum queues (T15);
+`Connection.Close` graceful cascade (T07); `Concurrency(n)` non-blocking dispatcher requirement (T18);
+`Caller[Req,Resp]` auto-stamps `CorrelationID` and `ReplyTo` (T29); `BatchConsumer` OTel span creates Links for all incoming trace contexts (T28).
+
 **Rev 7 — cross-check tightening pass (no structural changes).** Six
 acceptance criteria sharpened so they live on the producing task
 instead of the T40 godoc sweep: **T07** (`AuthenticatedUser()`
@@ -159,8 +164,8 @@ T07 keeps the per-socket lifecycle focused.
   - [ ] **`(*Connection).AuthenticatedUser() string`** exported for `Publisher` client-side `UserID` validation (T12/T13).
   - [ ] **`AuthenticatedUser()` populated by `Dial` before it returns** (Rev 7): the field is set from the SASL outcome on the underlying `amqp091-go` connection so any `Publisher` built *after* `Dial` returns observes a non-empty value. Unit test matrix: (a) PLAIN auth with `WithAuth("alice", "…")` → returns `"alice"`; (b) SASL EXTERNAL with a client cert whose subject is `CN=svc-orders,UID=42` → returns the broker-side resolved identity (typically the CN); (c) on a connection in degraded state, the field is still readable (frozen at last successful authentication).
   - [ ] **`(*Connection).ForceReconnect() error`** exported operator helper for recovering from degraded state without restarting the process.
-  - [ ] `Connection.Health(ctx)` opens a temporary channel and closes it.
-  - [ ] `Connection.Close(ctx)` drains in-flight work up to the context deadline.
+  - [ ] `Connection.Health(ctx)` opens a temporary channel, declares a passive queue, and closes it (verifies socket+topology).
+  - [ ] `Connection.Close(ctx)` implements graceful cascade: cancel all active consumers, wait for handlers to finish, wait for publisher confirms, close TCP sockets.
   - [ ] `WithOnBlocked` callback fires when broker sends `connection.blocked`.
   - [ ] While the connection is broker-blocked, publishes wait until unblock or `ctx.Done()`; on ctx cancel, return `ErrConnectionBlocked` (wrapping `ctx.Err()`).
   - [ ] **Synchronous reconnect barrier.** On every reconnect, run channel re-open → `Topology.AttachTo` redeclare → consumer re-`basic.consume` + re-`basic.qos` → user `WithOnReconnect` synchronously, in that order. `Publisher.Publish` routed to a reconnecting connection blocks on a per-conn `sync.Cond` until step 2 completes; on `ctx` cancel returns `ErrReconnecting` (transient, wrapping `ctx.Err()`). Mandatory metric `topology_redeclare_seconds{role}` (histogram) records the barrier duration per cycle.
@@ -425,6 +430,7 @@ stays untouched.
     - For every queue with `DeliveryLimit > 0`: injects `x-delivery-limit=<n>`.
     - For every queue with `SingleActiveConsumer == true`: injects `x-single-active-consumer=true`.
     - For every queue with `Type != ""`: injects `x-queue-type=<value>`.
+    - For every queue with `Type == QueueTypeQuorum`: injects `x-dead-letter-strategy=at-least-once`.
     A unit test snapshots the in-memory `Topology` before and after the pre-pass and asserts the expected mutations. A second unit test asserts the caller's original `Topology` value is **unchanged** after `Declare` returns.
   - [ ] **Step 2 (broker):** `Declare` opens a temporary channel and emits frames in the order **exchanges → queues → bindings**. Order is asserted by intercepting AMQP calls (e.g., wrapping the channel with a recorder) in a unit test. The source queue is declared **exactly once**, carrying its full arg set from step 1.
   - [ ] Conflicting `Durable` / args returns `ErrTopologyMismatch`, which itself wraps `ErrPreconditionFailed` (so `errors.Is(err, ErrPreconditionFailed)` is also true).
@@ -505,7 +511,7 @@ documented Concurrency-vs-ordering trade-off.
   - [ ] `Consumer.Consume(ctx, Handler[M])` decodes payload via codec, calls handler with decoded value.
   - [ ] Error mapping: `nil` → Ack; default error → `Nack(false)`; `errors.Is(err, ErrRequeue)` → `Nack(true)`.
   - [ ] Decode failure → `Nack(false)` (poison protection by default) + ConsumerMetrics counter increment (`outcome=decode_error`).
-  - [ ] Concurrency: `Concurrency(n)` runs up to N handlers in parallel.
+  - [ ] Concurrency: `Concurrency(n)` runs up to N handlers in parallel using a **non-blocking dispatcher** that drops to sequential mode when all worker slots are full to enforce `prefetch_count` correctly.
   - [ ] **Re-subscribe loop.** After a successful reconnect of the consumer connection that hosts this `Consumer[M]`, the consumer reopens its channel, reapplies `basic.qos` (with the configured `ChannelQoS` flag and prefetch), and reissues `basic.consume`. The consumer-tag is preserved across reconnects. Metric `consumer_resubscribed_total{queue}` increments exactly once per re-subscribe. A small bounded jitter (50–250ms) staggers parallel resubscribes after a broker restart to avoid storms.
   - [ ] **Handler ctx cancel on channel close.** When the consumer's channel closes mid-handler, the handler's `context.Context` is cancelled with cause `ErrChannelClosed`. Metric `consumer_handler_aborted_channel_closed_total{queue}` increments. The original message will be redelivered by the broker (the ack was never received).
   - [ ] Broker-originated errors during consume (channel close 404, 405, etc.) are translated via `internal/amqperror` and surface as wraps of the right sentinel.
@@ -722,7 +728,7 @@ Per SPEC §6.9 "Tracing continuity post-mortem" + §10 #51 (Rev 8 item M).
 Per SPEC §6.9 "Tracing continuity post-mortem" + §10 #51 (Rev 8 item M).
 - **Acceptance:**
   - [ ] Consumer extracts the parent context from AMQP headers (`traceparent`/`tracestate`) before invoking the handler — works on **direct deliveries and DLQ deliveries alike** (DLX preserves headers verbatim per SPEC §6.6).
-  - [ ] A `<queue> process` span wraps each handler invocation with messaging attributes from OTel semantic conventions.
+  - [ ] A `<queue> process` span wraps each handler invocation with messaging attributes from OTel semantic conventions. **For `BatchConsumer`, the span creates OTel Links to all incoming message contexts**.
   - [ ] Span attributes for receive/process paths match SPEC §6.9 (`messaging.operation.type` receive | process as documented for those spans).
   - [ ] **Span outcome contract.** On handler return, set `messaging.rabbitmq.outcome` to one of `ack` (nil), `nack_requeue` (`ErrRequeue`), `nack_no_requeue` (any other error / `ErrPoison`), `max_redeliveries` (when the two-counter ceiling fires), `timeout` (HandlerTimeout exceeded), `handler_aborted_channel_closed` (mid-handler channel close). Set OTel status to `Ok` on `nil`, `Error` on every failure class. Call `Span.RecordError(err)` with the handler's error; set `error.type` to the sentinel name (e.g. `"ErrRequeue"`, `"ErrPoison"`, `"ErrMaxRedeliveries"`, `"ErrChannelClosed"`).
   - [ ] **The library does NOT strip, rewrite, or normalise message headers** on the consume path. A symbol-presence test in the consumer (`grep -L 'delete(.*Headers' consumer*.go`) plus a unit test that publishes a message with a marker header `x-trace-marker=42` and asserts the value is present in `Delivery.Headers` exactly as published.
@@ -744,7 +750,7 @@ Per SPEC §6.9 "Tracing continuity post-mortem" + §10 #51 (Rev 8 item M).
 ### [ ] T29 — RPC `Caller[Req,Resp]` · M
 - **Acceptance:**
   - [ ] `CallerFor[Req,Resp](conn).Build()` returns a configured caller.
-  - [ ] `Call(ctx, req)` uses RabbitMQ direct reply-to (`amq.rabbitmq.reply-to`) by default; reply consumer is declared **before** the request is published; consumer auto-enables `no-ack` (required by the pseudo-queue protocol).
+  - [ ] `Call(ctx, req)` uses RabbitMQ direct reply-to (`amq.rabbitmq.reply-to`) by default; reply consumer is declared **before** the request is published; consumer auto-enables `no-ack` (required by the pseudo-queue protocol). Auto-stamps `CorrelationID` and `ReplyTo` on the request message if empty.
   - [ ] `UseExclusiveReplyQueue()` builder method switches to a real exclusive auto-delete reply queue per Caller, with regular ack semantics.
   - [ ] `ctx` deadline maps to per-call timeout → `ErrCallTimeout`.
   - [ ] Concurrent calls return the right response (`CorrelationID` matching).

@@ -470,8 +470,8 @@ criteria.
 type Connection struct { /* … */ }
 
 func Dial(ctx context.Context, opts ...ConnectionOption) (*Connection, error)
-func (c *Connection) Close(ctx context.Context) error    // drains in-flight work
-func (c *Connection) Health(ctx context.Context) error
+func (c *Connection) Close(ctx context.Context) error    // gracefully shuts down components in sequence
+func (c *Connection) Health(ctx context.Context) error   // verifies TCP socket and topology state
 
 // SASLMechanism selects the SASL mechanism for the AMQP 0-9-1
 // connection.start-ok handshake. Default is PLAIN. EXTERNAL uses the
@@ -637,8 +637,18 @@ internally via `Concurrency(n)`.
   never received. The metric
   `consumer_handler_aborted_channel_closed_total` increments per
   such event.
-- `Close(ctx)` drains in-flight publishes/handlers up to the context
-  deadline, then closes every TCP connection in the pool.
+- `Close(ctx)` gracefully shuts down the connection and its managed
+  components in a strict cascade to prevent message loss:
+  1. Issues `basic.cancel` to all active consumers (stopping broker delivery).
+  2. Waits for active consumer handlers to finish and send their ack/nacks.
+  3. Waits for in-flight publishes to receive their confirms from the broker.
+  4. Closes every TCP connection in the pool.
+  This entire cascade runs up to the `ctx` deadline; if exceeded,
+  connections are closed forcefully.
+- `Health(ctx)` verifies that the connection pool has at least one
+  healthy TCP socket and that the connection is not in a degraded
+  topology state. It opens and closes a temporary channel to
+  validate broker responsiveness.
 - A no-op `otel.Tracer` is baked in by default so instrumentation code
   paths run uniformly. `WithTracer` swaps in a real tracer; there is no
   "tracing-disabled" code branch.
@@ -822,6 +832,10 @@ Semantics:
   (classified `ErrTransient`). For `reject-publish-dlx`, the broker
   also dead-letters the message; the publisher caller still sees
   `ErrPublishNacked` so the application can re-publish or back off.
+- **`multiple=true` resolution.** The confirm tracker handles `basic.ack`
+  and `basic.nack` frames with `multiple=true` efficiently, resolving all
+  outstanding `delivery-tags` up to and including the given tag in a single
+  pass. This is critical for high-throughput batching against RabbitMQ 4.x.
 - **`basic.return` / `basic.ack` correlation for mandatory publishes.**
   For an unroutable mandatory publish, RabbitMQ sends `basic.return`
   *first*, then `basic.ack` (the broker acks because *it* handled the
@@ -1127,6 +1141,10 @@ even though they have capacity. The builder logs a warning at
   Prefetch = 4 × Concurrency  (typical latency, want some buffering)
   Prefetch = 8 × Concurrency  (high latency, want maximum throughput)
 
+**Queue Type Nuance:**
+- For **Classic Queues**, the rules above apply directly.
+- For **Quorum Queues**, RabbitMQ reads from disk and delivers in batches to the channel. A prefetch that is too small prevents the broker from batching efficiently. The absolute minimum for a quorum queue should be `16`, regardless of `Concurrency`, to allow the broker-side read-ahead to engage. The default `Prefetch=64` is well-suited for quorum queues under typical workloads.
+
 The default `Prefetch=64, Concurrency=1` is conservative and fits
 development workloads. For sustained > 1k msg/s/consumer against a
 remote broker, raise both. Note the trade-off: a large `Prefetch`
@@ -1149,6 +1167,13 @@ guarantees in-order delivery **on the wire** for a single channel,
 but parallel dispatch breaks ordering at the handler boundary — two
 goroutines may finish in a different order than they started.
 **Concurrency > 1 means you have given up per-queue ordering.**
+
+**Non-blocking dispatcher:** The library implements a non-blocking
+dispatcher pattern for concurrency. The AMQP channel reader loop
+does not block waiting for a free handler goroutine slot; this
+prevents head-of-line blocking on the AMQP connection and ensures
+vital broker frames (like `basic.cancel` or `basic.return`) are
+processed promptly even if all `n` handlers are currently busy.
 
 For strict per-queue ordering with redundancy, the canonical setup
 is `Concurrency(1)` plus `Queue.SingleActiveConsumer=true` on the
@@ -1349,7 +1374,7 @@ type Message[M any] struct {
     MessageID       string         // default: UUID v7 (RFC 9562)
     CorrelationID   string
     ReplyTo         string
-    Type            string         // application-defined "kind" of the message
+    Type            string         // application-defined "kind" of the message (basic.properties.type, NOT x-queue-type)
     AppID           string
     UserID          string         // see UserID note below — RabbitMQ closes the channel if this disagrees with the connection user
     ContentType     string         // MIME — default: codec.ContentType()
@@ -1437,6 +1462,9 @@ type Headers map[string]any  // AMQP field-table; see typing note below
 `Persistent` is the zero-value default. Any user constructing a
 `Message[M]{}` literally gets durable delivery without thinking. A
 user who explicitly wants transient sets `DeliveryMode: DeliveryModeTransient`.
+**Note on wire mapping:** The library maps its zero-value (`0`) to the AMQP
+wire value `2` (persistent), and `DeliveryModeTransient` (`1`) to the wire
+value `1`.
 
 ### 6.6 Topology
 
@@ -1514,6 +1542,7 @@ type Binding struct {
 // DeadLetter expands to x-dead-letter-exchange, x-dead-letter-routing-key,
 // x-message-ttl, x-max-length, x-max-length-bytes, x-overflow args on the
 // source queue, declaring the target exchange and queue as well.
+// For quorum queues, it also implicitly sets x-dead-letter-strategy: at-least-once.
 type DeadLetter struct {
     Source         string          // source queue name
     Exchange       string          // DLX name (declared if absent in Exchanges)
@@ -1642,6 +1671,11 @@ Uses RabbitMQ `direct reply-to` pseudo-queue
 auto-delete reply queue when the builder calls
 `UseExclusiveReplyQueue()`. `ctx` deadline maps to per-call timeout
 (returns `ErrCallTimeout`).
+
+**Auto-population:** `Caller[Req,Resp]` automatically stamps a
+`CorrelationID` (e.g., UUIDv7) and the appropriate `ReplyTo` address
+on the request `Message[M]` if those fields are left empty by the
+user.
 
 **`direct reply-to` constraints** (per RabbitMQ documentation):
 - The reply consumer must be configured with no-ack (`AutoAck`); the
@@ -1956,6 +1990,11 @@ value.
     The span is `End()`ed in every termination path (including
     panics — wrapped in `recover` per the codec panic-safety
     contract) so there are never open spans after a handler dies.
+  - **BatchConsumer Links.** A `BatchConsumer[M]` processes multiple
+    messages at once, each potentially carrying a different `traceparent`.
+    Instead of adopting a single parent context, the `<queue> process_batch`
+    span adds OTel **Links** pointing to the `traceparent` of every message
+    in the batch. This models the fan-in correctly.
   - **Publisher span lifecycle on failure.** `Publish` mirrors the
     consumer contract for the `<exchange> publish` span: every
     `ErrUnroutable`, `ErrConfirmTimeout`, `ErrPublishNacked`,
@@ -2398,6 +2437,19 @@ the next reader so the rationale survives the conversation:
    interfaces. Methods can be added in minor releases without
    breaking implementers. Tests use `amqpmock.NewDelivery[M](…)` /
    `amqpmock.NewBatch[M](…)` constructors.
+
+10. **Quorum Queue `x-dead-letter-strategy: at-least-once` (Rev 9)** —
+    Implicitly injected by `Topology.Declare` for Quorum queues with DLXs
+    to guarantee message preservation during dead-lettering, removing the
+    need for the user to specify it manually.
+
+11. **Strict Shutdown Cascade (Rev 9)** — `Close(ctx)` cancels consumers
+    *before* draining publishes, and drains publishes *before* closing
+    sockets. The order is load-bearing.
+
+12. **BatchConsumer OTel Links (Rev 9)** — A single batch span receives
+    `Link` entries for every incoming message's `traceparent` rather than
+    attempting to adopt a single parent.
 
 10. **AMQP 0-9-1 compliance fixes** applied after a dedicated review
     (see the `Note on AMQP 0-9-1 vs RabbitMQ` at the head of §6).
