@@ -56,6 +56,64 @@ func newTestBatch(deliveries []*Delivery[string]) *Batch[string] {
 	return b
 }
 
+// TestBatch_Ack_EmptyBatch_NoFrame verifies that Batch.Ack on an empty batch returns
+// nil without calling the acknowledger.
+func TestBatch_Ack_EmptyBatch_NoFrame(t *testing.T) {
+	var ackCalled bool
+	fa := &fakeAcknowledger{
+		ackFn: func(_ uint64, _ bool) error {
+			ackCalled = true
+			return nil
+		},
+	}
+	_ = fa // acknowledger never used for empty batch
+	batch := newTestBatch([]*Delivery[string]{})
+	require.NoError(t, batch.Ack(), "empty batch Ack must return nil")
+	assert.False(t, ackCalled, "no ack frame must be emitted for empty batch")
+}
+
+// TestBatch_Nack_EmptyBatch_NoFrame verifies that Batch.Nack on an empty batch returns
+// nil without calling the acknowledger.
+func TestBatch_Nack_EmptyBatch_NoFrame(t *testing.T) {
+	var nackCalled bool
+	fa := &fakeAcknowledger{
+		nackFn: func(_ uint64, _ bool, _ bool) error {
+			nackCalled = true
+			return nil
+		},
+	}
+	_ = fa
+	batch := newTestBatch([]*Delivery[string]{})
+	require.NoError(t, batch.Nack(false), "empty batch Nack must return nil")
+	assert.False(t, nackCalled, "no nack frame must be emitted for empty batch")
+}
+
+// TestBatch_AckAll_AcknowledgerError_ReturnsError verifies that when the underlying
+// acknowledger returns an error, Batch.Ack propagates it.
+func TestBatch_AckAll_AcknowledgerError_ReturnsError(t *testing.T) {
+	ackErr := errors.New("channel closed")
+	fa := &fakeAcknowledger{
+		ackFn: func(_ uint64, _ bool) error { return ackErr },
+	}
+	d1 := makeFakeDelivery(1, "m", fa)
+	batch := newTestBatch([]*Delivery[string]{d1})
+	err := batch.Ack()
+	require.Error(t, err, "Batch.Ack must return the acknowledger error")
+}
+
+// TestBatch_NackAll_AcknowledgerError_ReturnsError verifies that when the underlying
+// acknowledger returns an error, Batch.Nack propagates it.
+func TestBatch_NackAll_AcknowledgerError_ReturnsError(t *testing.T) {
+	nackErr := errors.New("channel closed")
+	fa := &fakeAcknowledger{
+		nackFn: func(_ uint64, _ bool, _ bool) error { return nackErr },
+	}
+	d1 := makeFakeDelivery(1, "m", fa)
+	batch := newTestBatch([]*Delivery[string]{d1})
+	err := batch.Nack(false)
+	require.Error(t, err, "Batch.Nack must return the acknowledger error")
+}
+
 // TestBatch_Ack_MultipleTrue verifies that Batch.Ack emits a single
 // basic.ack with multiple=true on the highest delivery-tag.
 func TestBatch_Ack_MultipleTrue(t *testing.T) {

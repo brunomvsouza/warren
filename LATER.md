@@ -880,29 +880,6 @@ covers the residual audit and tooling-based prevention.
 
 ---
 
-### LATER-30 — `ackAll` / `nackAll` error paths have 0 test hits
-
-**Context:** `batch_consumer.go:113-115` and `125-127` — the branches that handle an error returned
-by `h.raw.Ack` / `h.raw.Nack` inside `ackAll` and `nackAll` are never exercised. All current tests
-use a `fakeAcknowledger` with `ackFn`/`nackFn` returning `nil`.
-
-**Impact:** If the error-handling logic in these branches regresses (e.g., wrong error wrapping,
-missing return), no test would catch it.
-
-**Evidence:** `/ship` test-engineer — Important gap 8 (2026-05-24, post-T23 review).
-
-**Suggested solution:**
-- `TestBatch_AckAll_AcknowledgerError_ReturnsWrappedErr` — `fakeAcknowledger.ackFn` returns
-  `errors.New("channel closed")`; assert that `batch.Ack()` returns a non-nil error.
-- `TestBatch_NackAll_AcknowledgerError_ReturnsWrappedErr` — same for `nackFn`.
-- `TestBatch_Ack_EmptyBatch_NoFrame` / `TestBatch_Nack_EmptyBatch_NoFrame` — create a `Batch[string]`
-  with no deliveries and verify that `Ack()`/`Nack()` return `nil` without calling the acknowledger
-  (`highest()` returns nil → ackAll/nackAll short-circuit at the nil check on lines 110/122).
-
-**Prerequisites:** None.
-
----
-
 ### LATER-31 — `applyBatchCounterB` reads each sync.Map key twice per delivery
 
 **Context:** `batch_consumer.go:415-442` — the check loop (lines 415-430) and the increment loop
