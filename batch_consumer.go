@@ -441,6 +441,10 @@ func (c *BatchConsumer[M]) applyBatchCounterB(batch *Batch[M], handlerErr error)
 				cs.m.Delete(batchCounterBKey(c.tag, d2.raw.MessageId, d2.raw.DeliveryTag))
 			}
 			c.cm.RecordMaxRedeliveries(c.queue, "in-process")
+			c.mc.opts.logger.Warningf(
+				"warren: max redeliveries exceeded for queue %q (cause=in-process, count=%d, limit=%d)",
+				c.queue, count+1, c.maxRedeliveries,
+			)
 			return fmt.Errorf("%w (in-process counter exceeded)", ErrMaxRedeliveries)
 		}
 		pairs = append(pairs, kv{key, count})

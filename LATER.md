@@ -880,26 +880,6 @@ covers the residual audit and tooling-based prevention.
 
 ---
 
-### LATER-32 — `BatchConsumer` counter B does not emit a warning log when max redeliveries is hit
-
-**Context:** `batch_consumer.go:428` — `Consumer[M].applyCounterB` emits a `logger.Warningf`
-(`"warren: max redeliveries exceeded…"`) when counter B fires. `BatchConsumer[M]` silently records
-the metric (`c.cm.RecordMaxRedeliveries`) without any log output. The `mc` field on `BatchConsumer`
-carries the managed connection (which has `opts.logger`) but the warning is missing.
-
-**Impact:** Operational asymmetry: a `Consumer[M]` emits a warning that appears in log aggregators
-when counter B fires; a `BatchConsumer[M]` does not, making the event invisible unless the operator
-is actively scraping the `RecordMaxRedeliveries` metric.
-
-**Evidence:** `/ship` code-reviewer — Suggestion (2026-05-24, post-T23 review).
-
-**Suggested solution:** Add a `Warningf` call in `applyBatchCounterB` immediately before
-`return fmt.Errorf("%w ...", ErrMaxRedeliveries)`, mirroring `Consumer[M]`'s log line.
-
-**Prerequisites:** None.
-
----
-
 ### LATER-26 — `wireReturnPool` e `wireFakePool` são near-duplicatas
 
 **Contexto:** `publisher_t13_test.go:wireReturnPool` e `publisher_test.go:wireFakePool` —
