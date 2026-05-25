@@ -985,3 +985,94 @@ func TestConsumer_counterBKey_emptyMessageId_usesFallback(t *testing.T) {
 	assert.Contains(t, key, "42",
 		"fallback key must embed the deliveryTag; got %q", key)
 }
+
+// TestConsumer_counterBKey_continuationBytesMessageId_doesNotCollide verifies
+// that a MessageId composed entirely of UTF-8 continuation bytes (invalid UTF-8)
+// does not produce the degenerate "mid:" key that would collapse all such
+// messages onto a single sync.Map slot, corrupting the redelivery counter.
+func TestConsumer_counterBKey_continuationBytesMessageId_doesNotCollide(t *testing.T) {
+	// Bytes 0x80-0xBF are UTF-8 continuation bytes. A string of them is invalid
+	// UTF-8 but is a legal Go string. truncateAtRuneBoundary walks back to n=0,
+	// so without the empty-result guard, counterBKeyForMsgID would return "mid:".
+	invalidUTF8 := strings.Repeat("\x80", maxMsgIDKeyLen+1)
+	key := counterBKeyForMsgID(invalidUTF8)
+	assert.NotEqual(t, "mid:", key,
+		"pure continuation bytes must not collapse to the bare 'mid:' key")
+}
+
+// TestConsumer_counterBKeyForDeliveryTag_longConsumerTag_isTruncated verifies
+// that a consumerTag longer than maxConsumerTagKeyLen bytes is truncated before
+// being embedded in the dlv: key, bounding per-key memory in the sync.Map.
+func TestConsumer_counterBKeyForDeliveryTag_longConsumerTag_isTruncated(t *testing.T) {
+	longTag := strings.Repeat("t", maxConsumerTagKeyLen+100)
+	key := counterBKeyForDeliveryTag(longTag, 1)
+	assert.True(t, strings.HasPrefix(key, "dlv:"),
+		"dlv: prefix must be preserved; got %q", key)
+	// The key must not be longer than "dlv:" + maxConsumerTagKeyLen + ":" + digits.
+	// The rough bound is: 4 + maxConsumerTagKeyLen + 1 + 20 (max uint64 decimal).
+	maxExpected := len("dlv:") + maxConsumerTagKeyLen + 1 + 20
+	assert.LessOrEqual(t, len(key), maxExpected,
+		"counterBKeyForDeliveryTag must truncate consumerTag to maxConsumerTagKeyLen bytes")
+}
+
+// TestTruncateAtRuneBoundary verifies edge cases of the helper directly:
+// n=0, n exactly at a rune boundary, and an all-continuation-bytes input.
+func TestTruncateAtRuneBoundary(t *testing.T) {
+	cases := []struct {
+		name     string
+		s        string
+		n        int
+		wantLen  int // expected byte length of result
+		wantUTF8 bool
+	}{
+		{
+			name:     "n=0 returns empty",
+			s:        "hello",
+			n:        0,
+			wantLen:  0,
+			wantUTF8: true,
+		},
+		{
+			name:     "n >= len(s) returns full string",
+			s:        "hi",
+			n:        100,
+			wantLen:  2,
+			wantUTF8: true,
+		},
+		{
+			name:     "cut exactly on ASCII rune boundary (loop does not walk back)",
+			s:        "abcde",
+			n:        3,
+			wantLen:  3,
+			wantUTF8: true,
+		},
+		{
+			name:     "cut in middle of 3-byte CJK rune walks back to rune start",
+			s:        "中文", // 6 bytes: E4 B8 AD E6 96 87
+			n:        4,    // lands on 0x96 (continuation byte of 文)
+			wantLen:  3,    // backs up to start of 文 then further to end of 中 = 3
+			wantUTF8: true,
+		},
+		{
+			name:     "all continuation bytes walks back to n=0 → empty",
+			s:        strings.Repeat("\x80", 10),
+			n:        5,
+			wantLen:  0,
+			wantUTF8: true,
+		},
+		{
+			name:     "4-byte emoji cut at byte 3 backs up to start",
+			s:        "\xf0\x9f\x98\x80", // U+1F600 😀
+			n:        3,
+			wantLen:  0, // walks back past all 3 continuation bytes to n=0
+			wantUTF8: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateAtRuneBoundary(tc.s, tc.n)
+			assert.Equal(t, tc.wantLen, len(got), "unexpected byte length")
+			assert.Equal(t, tc.wantUTF8, utf8.ValidString(got), "UTF-8 validity mismatch")
+		})
+	}
+}

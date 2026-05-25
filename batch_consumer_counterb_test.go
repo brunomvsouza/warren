@@ -47,3 +47,17 @@ func TestBatchCounterBKey_multibyteMessageId_truncatesAtRuneBoundary(t *testing.
 	assert.LessOrEqual(t, len(key), len("mid:")+maxMsgIDKeyLen,
 		"truncated key must not exceed the length bound")
 }
+
+// TestBatchCounterBKey_continuationBytesMessageId_doesNotCollide verifies that
+// a MessageId composed entirely of UTF-8 continuation bytes does not produce
+// the degenerate "mid:" key, which would collapse all such messages onto a
+// single sync.Map slot and corrupt the redelivery counter.
+func TestBatchCounterBKey_continuationBytesMessageId_doesNotCollide(t *testing.T) {
+	invalidUTF8 := strings.Repeat("\x80", maxMsgIDKeyLen+1)
+	key := batchCounterBKey("ctag-abc", invalidUTF8, 42)
+	assert.NotEqual(t, "mid:", key,
+		"pure continuation bytes must not collapse to the bare 'mid:' key")
+	// Must fall back to a dlv: key instead.
+	assert.True(t, strings.HasPrefix(key, "dlv:"),
+		"must fall back to dlv: family when truncation produces empty MessageId; got %q", key)
+}

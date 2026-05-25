@@ -210,6 +210,22 @@ func TestMessage_validateHeaders_coercesIntAndUintInSlice(t *testing.T) {
 	assert.Equal(t, "unchanged", s[2], "string element must not be modified")
 }
 
+// TestMessage_validateHeaders_coercesIntInHeadersInsideSlice verifies that
+// int values nested inside a Headers map that is itself inside a []any element
+// are also coerced in-place to int64. This exercises the recursive delegation
+// in validateHeaderValue's default branch.
+func TestMessage_validateHeaders_coercesIntInHeadersInsideSlice(t *testing.T) {
+	inner := Headers{"x": int(5)}
+	s := []any{inner}
+	m := Message[struct{}]{Headers: Headers{"k": s}}
+	require.NoError(t, m.validateHeaders())
+	// inner["x"] must have been coerced to int64 in-place.
+	got, ok := inner["x"]
+	require.True(t, ok)
+	assert.IsType(t, int64(0), got, "int in Headers inside []any must be coerced to int64")
+	assert.EqualValues(t, int64(5), got)
+}
+
 func TestMessage_validateHeaders_rejectsExcessiveNesting(t *testing.T) {
 	// Build a Headers nested maxHeaderDepth+2 levels deep to exceed the limit.
 	deepest := Headers{"leaf": "value"}

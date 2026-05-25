@@ -497,7 +497,13 @@ func (c *BatchConsumer[M]) applyBatchCounterB(batch *Batch[M], handlerErr error)
 //   - "dlv:<consumerTag>:<deliveryTag>" otherwise (unique but not stable; counter resets on redeliver).
 func batchCounterBKey(consumerTag, msgID string, deliveryTag uint64) string {
 	if msgID != "" {
-		return counterBKeyForMsgID(msgID)
+		// counterBKeyForMsgID returns "" when truncation produces an empty result
+		// (e.g. a MessageId composed entirely of UTF-8 continuation bytes). Fall
+		// through to the delivery-tag fallback in that case to avoid collapsing
+		// distinct messages onto the degenerate "mid:" sync.Map slot.
+		if key := counterBKeyForMsgID(msgID); key != "" {
+			return key
+		}
 	}
 	return counterBKeyForDeliveryTag(consumerTag, deliveryTag)
 }

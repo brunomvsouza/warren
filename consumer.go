@@ -53,13 +53,30 @@ type redeliveryCounter struct {
 // per in-flight delivery, regardless of the original MessageId length.
 const maxMsgIDKeyLen = 512
 
+// maxConsumerTagKeyLen is the maximum number of bytes of a consumerTag embedded
+// in the "dlv:" fallback key. The AMQP 0-9-1 shortstr limit is 255 bytes; we
+// use 256 as a round ceiling that covers any conforming tag plus one spare byte.
+// Truncating here applies the same memory-bound principle as maxMsgIDKeyLen.
+const maxConsumerTagKeyLen = 256
+
 // counterBKeyForMsgID builds the "mid:<MessageId>" sync.Map key for redelivery
 // counter B, truncating MessageId to maxMsgIDKeyLen bytes when necessary.
 // Truncation is done at a UTF-8 rune boundary so the resulting key is always
 // valid UTF-8, which is safe to log, trace, or export.
+//
+// Returns "" when truncation reduces msgID to an empty string (e.g., a MessageId
+// composed entirely of UTF-8 continuation bytes). Callers must treat "" as
+// "absent MessageId" and fall back to counterBKeyForDeliveryTag to avoid
+// collapsing distinct messages onto the same sync.Map slot.
 func counterBKeyForMsgID(msgID string) string {
 	if len(msgID) > maxMsgIDKeyLen {
 		msgID = truncateAtRuneBoundary(msgID, maxMsgIDKeyLen)
+	}
+	if msgID == "" {
+		// Truncation produced an empty result (e.g. all continuation bytes).
+		// Return "" so the call site falls back to the delivery-tag key,
+		// preventing all such messages from sharing the degenerate "mid:" slot.
+		return ""
 	}
 	return "mid:" + msgID
 }
@@ -79,8 +96,13 @@ func truncateAtRuneBoundary(s string, n int) string {
 }
 
 // counterBKeyForDeliveryTag builds the "dlv:<consumerTag>:<deliveryTag>" key
-// used as a fallback when MessageId is empty.
+// used as a fallback when MessageId is absent or produces an empty truncation
+// result. consumerTag is truncated to maxConsumerTagKeyLen bytes to bound the
+// memory cost of in-flight deliveries in the sync.Map.
 func counterBKeyForDeliveryTag(consumerTag string, deliveryTag uint64) string {
+	if len(consumerTag) > maxConsumerTagKeyLen {
+		consumerTag = truncateAtRuneBoundary(consumerTag, maxConsumerTagKeyLen)
+	}
 	return fmt.Sprintf("dlv:%s:%d", consumerTag, deliveryTag)
 }
 
@@ -459,9 +481,13 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		if raw.MessageId != "" {
 			// Stable key: MessageID persists across redeliveries → counter accumulates correctly.
 			// counterBKeyForMsgID truncates to maxMsgIDKeyLen to bound memory usage.
+			// It returns "" when the truncated result is empty (e.g. all continuation bytes);
+			// in that case we fall through to the delivery-tag fallback below.
 			counterBKey = counterBKeyForMsgID(raw.MessageId)
-		} else {
-			// No stable MessageID: use delivery tag as a unique-but-non-stable key.
+		}
+		if counterBKey == "" {
+			// No stable MessageID (or truncation produced empty result):
+			// use delivery tag as a unique-but-non-stable key.
 			// Counter B will not accumulate across redeliveries for these messages.
 			counterBKey = counterBKeyForDeliveryTag(c.tag, raw.DeliveryTag)
 		}
