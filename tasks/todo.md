@@ -1067,6 +1067,86 @@ SPEC §8 + §9 reliability bar: credential leakage is a defect.
 - **Files:** none (tag operation).
 - **Deps:** T38, T38b, T38c, T39–T45b.
 
+### [ ] T47 — DLX Binding in Topology Expansion [P0] · XS
+- **Acceptance:**
+  - [ ] `expandDeadLetters` in `topology.go` appends a `Binding` between the expanded DLX exchange and DLQ queue with `RoutingKey: "#"`.
+- **Verify:** Integration test declaring a queue with DLX args, publishing a message, nacking it (no-requeue), and asserting it arrives in the DLQ.
+- **Files:** `topology.go`, `topology_integration_test.go`.
+- **Deps:** T15.
+
+### [ ] T48 — Strict JSON Codec & Trailing Data [P0] · XS
+- **Acceptance:**
+  - [ ] `codec.NewJSON()` and `codec.NewJSONStrict()` evaluates `dec.More()` after first decode and returns `ErrInvalidMessage` if true.
+  - [ ] `FuzzCodecJSONStrict` target added to `json_fuzz_test.go`.
+- **Verify:** Decodes `{"id":1}{"id":2}` return `ErrInvalidMessage`. Fuzz target runs without panics.
+- **Files:** `codec/json.go`, `codec/json_test.go`, `codec/json_fuzz_test.go`.
+- **Deps:** T09.
+
+### [ ] T49 — Consumer Tag Cardinality Explosion [P1] · S
+- **Acceptance:**
+  - [ ] The Prometheus metric `consumer_cancelled_total` uses a static string (enum) for the `reason` label instead of the raw UUID consumer-tag.
+  - [ ] Reason mapping: checks if queue exists via `QueueInspect`; if missing → `"queue_deleted"`, else → `"exclusive_revoked"`, default `"unknown"`.
+- **Verify:** Unit test asserting `reason` label is one of the enums, not a `ctag-` UUID.
+- **Files:** `metrics/prometheus.go`, `consumer.go`.
+- **Deps:** T19, T36.
+
+### [ ] T50 — In-Flight Memory Guardrail [P1] · M
+- **Acceptance:**
+  - [ ] `ConsumerBuilder.MaxInFlightBytes(n int64)` implemented.
+  - [ ] Sits before handler execution; blocks/pauses new deliveries if `sum(len(Delivery.Body))` exceeds `n`. Decrements when handler returns.
+  - [ ] Emits `consumer_inflight_bytes{queue}` gauge.
+- **Verify:** Benchmark/load-test with 64 goroutines and 5MB bodies stays within memory bounds.
+- **Files:** `consumer.go`, `consumer_builder.go`.
+- **Deps:** T18, T19.
+
+### [ ] T51 — Publisher Rate Limiting [P1] · S
+- **Acceptance:**
+  - [ ] `PublisherBuilder.WithPublishRateLimit(perSec int)` token-bucket limiter implementation.
+  - [ ] `Publish` awaits token; on context cancel returns `ErrRateLimited` (transient).
+  - [ ] Metric `publisher_rate_limited_total{exchange}`.
+- **Verify:** `WithPublishRateLimit(100)` allows max 100 msg/s.
+- **Files:** `publisher.go`, `publisher_builder.go`.
+- **Deps:** T12, T13.
+
+### [ ] T52 — Native Queue & DLQ Observability [P2] · M
+- **Acceptance:**
+  - [ ] `Consumer[M].WithQueueDepthSampler(interval)` option.
+  - [ ] Background goroutine does `queue.declare-passive` to emit `queue_depth{queue}` and `dlq_depth{dlq}` gauges.
+- **Verify:** Gauge metrics reflect external enqueues correctly.
+- **Files:** `consumer.go`, `consumer_builder.go`.
+- **Deps:** T18, T19.
+
+### [ ] T53 — Consumer Draining API & Liveness Probes [P2] · M
+- **Acceptance:**
+  - [ ] `(*Consumer[M]).Pause(ctx)` sends `basic.cancel` locally without closing channel. `Resume(ctx)` re-issues `basic.consume`.
+  - [ ] `(*Consumer[M]).Health() ConsumerHealth` exposes `Active`, `Paused`, `LastDeliveryAt`, `InFlightHandlers`.
+- **Verify:** Test `Pause()`, publish 100 msgs, check none received, `Resume()`, check all 100 received. Liveness probe checks.
+- **Files:** `consumer.go`, `consumer_builder.go`.
+- **Deps:** T18, T36.
+
+### [ ] T54 — Context Cancellation vs Transient Errors [P2] · XS
+- **Acceptance:**
+  - [ ] `IsTransient(err)` returns `false` if `errors.Is(err, context.Canceled)`.
+- **Verify:** Table-driven test explicitly for `ErrChannelPoolExhausted` wrapped with `context.Canceled`.
+- **Files:** `errors.go`, `errors_test.go`.
+- **Deps:** T02, T07.
+
+### [ ] T55 — Deduplication Middleware [P3] · M
+- **Acceptance:**
+  - [ ] `WithDedupe(DedupeStore, ttl)` exposed on ConsumerBuilder.
+  - [ ] Pre-handler check (HIT -> Ack), Post-handler mark (on success).
+- **Verify:** Dedupes messages with same `MessageID`. Fails open on store error (logs warning, processes msg).
+- **Files:** `consumer.go`, `consumer_builder.go`.
+- **Deps:** T18, T38b.
+
+### [ ] T56 — Schema Drift Observability [P3] · S
+- **Acceptance:**
+  - [ ] `WithUnknownFieldObserver(func(path string))` on `codec.NewJSON`.
+  - [ ] Hook emits `codec_unknown_fields_total` prometheus counter.
+- **Verify:** Decoding `{"id":1, "unknown_new_field": "test"}` triggers the observer without failing the decode.
+- **Files:** `codec/json.go`, `codec/json_test.go`.
+- **Deps:** T09.
+
 ### Checkpoint — v0.1.0 shipped
 - [ ] Every SPEC §9 success criterion ticked.
 - [ ] `v0.1.0` tag on `main`.
@@ -1076,8 +1156,8 @@ SPEC §8 + §9 reliability bar: credential leakage is a defect.
 ---
 
 ## Quick stats
-- Total tasks: **55** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks).
-- Phases: **9**.
+- Total tasks: **65** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience).
+- Phases: **10**.
 - Estimated sizing: 5× XS · 31× S · 18× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.

@@ -914,6 +914,21 @@ here so the next reader doesn't have to re-derive.
    (`go.opentelemetry.io/otel/semconv/v1.27.0`). Re-evaluate on any
    breaking semantic-conventions bump.
 
+### Phase 10 — SRE & Resilience Hardening
+
+Goal: Address gaps identified in the SRE assessment (operability at scale, memory limits, and cardinality) originating from `LATER.md`.
+
+- **T47** `topology.go`: Inject `Binding{Exchange: dlxName, Queue: dlqName, RoutingKey: "#"}` in the in-memory expansion of `DeadLetter` (fix routing limbo).
+- **T48** `codec/json.go`: Evaluate `dec.More()` in `Decode` and return `ErrInvalidMessage` if trailing data exists. Add Fuzz target for strict mode.
+- **T49** `metrics/prometheus.go` and `consumer.go`: Change the `reason` label in `consumer_cancelled_total` from a raw UUIDv7 to a closed enum (`"queue_deleted"`, `"exclusive_revoked"`, `"unknown"`), preventing Prometheus OOM.
+- **T50** `consumer.go`: Expose `MaxInFlightBytes(n)` on the builder. Decrement semaphore after handler; pause ingestion when the limit is reached to avoid local OOM.
+- **T51** `publisher.go`: Add `WithPublishRateLimit(perSec)` (local token-bucket) to protect the broker from accidental runaway loops.
+- **T52** `consumer.go` and `metrics/`: Create `WithQueueDepthSampler` to poll (via `declare-passive`) and export native `queue_depth` and `dlq_depth` gauges.
+- **T53** `consumer.go`: Expose `Pause(ctx)` and `Resume(ctx)` for manual graceful degradation. Evolve the check to a rich `Health()` with In-Flight Handlers and Last Delivery info for k8s liveness probes.
+- **T54** `errors.go`: Refine `IsTransient()` to return false when the root cause is `context.Canceled`, blocking useless PublishRetries from upstream request cancellations.
+- **T55** `consumer_builder.go`: Create native `WithDedupe(store, ttl)` middleware, abstracting LRU/Redis cache from the handler and ensuring correct commits.
+- **T56** `codec/json.go`: Add `WithUnknownFieldObserver(func(path string))` to lax `NewJSON`, emitting the `codec_unknown_fields_total` metric to monitor silent schema drift.
+
 ## Out of scope (tracked for v0.2)
 
 - Native stream-protocol consume (`x-stream-offset`,
