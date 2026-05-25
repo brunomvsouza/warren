@@ -794,3 +794,44 @@ func TestPublisherConnPool_release_discardsStaleChannel(t *testing.T) {
 	// free queue must be empty: the stale entry was discarded, not returned.
 	assert.Equal(t, 0, len(pool.free), "release must discard entry with closed-channel signal")
 }
+
+// TestPublisherConnPool_acquire_returnsTokenOnOpenFnPanic verifies that when
+// openFn panics during acquire, the semaphore token is returned to the pool so
+// subsequent acquire calls are not permanently blocked. Without the fix
+// (LATER-04), the token leaks and the pool becomes exhausted after a single panic.
+func TestPublisherConnPool_acquire_returnsTokenOnOpenFnPanic(t *testing.T) {
+	panicked := false
+	pool := newPublisherConnPool(1, func() (publisherEntry, error) {
+		if !panicked {
+			panicked = true
+			panic("simulated openFn panic")
+		}
+		// Second call: return a valid entry.
+		fake := newFakePubCh(true)
+		return publisherEntry{
+			ch:           fake,
+			tracker:      nil,
+			closeCh:      fake.closedCh,
+			returnTagMap: new(sync.Map),
+		}, nil
+	})
+
+	// First acquire: openFn panics. Recover and verify the panic surfaces.
+	func() {
+		defer func() {
+			r := recover()
+			require.NotNil(t, r, "expected panic from openFn")
+			assert.Equal(t, "simulated openFn panic", r)
+		}()
+		_, _, _ = pool.acquire(context.Background())
+	}()
+
+	// Second acquire: must succeed within a short deadline. If the token was
+	// lost (pre-fix), this blocks until the context times out.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	_, release, err := pool.acquire(ctx)
+	require.NoError(t, err, "acquire after panic must succeed — token must be returned")
+	release()
+}

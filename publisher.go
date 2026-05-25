@@ -81,11 +81,25 @@ func (p *publisherConnPool) acquire(ctx context.Context) (publisherEntry, func()
 	case <-p.tokens:
 	}
 
+	// Guard against panics in getOrOpen (which calls openFn): if openFn panics
+	// the token would be lost permanently, shrinking the effective pool size
+	// with each panic until all Publish calls block indefinitely. The defer
+	// returns the token unconditionally unless the success or error path below
+	// sets tokenConsumed to true. See LATER-04.
+	tokenConsumed := false
+	defer func() {
+		if !tokenConsumed {
+			p.tokens <- struct{}{}
+		}
+	}()
+
 	entry, err := p.getOrOpen()
 	if err != nil {
+		tokenConsumed = true
 		p.tokens <- struct{}{}
 		return publisherEntry{}, nil, err
 	}
+	tokenConsumed = true
 	return entry, func() { p.release(entry) }, nil
 }
 
