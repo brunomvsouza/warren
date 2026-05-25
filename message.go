@@ -102,6 +102,20 @@ func validateHeadersDepth(h Headers, depth int) error {
 		return fmt.Errorf("%w: header nesting exceeds maximum depth %d", ErrInvalidMessage, maxHeaderDepth)
 	}
 	for k, v := range h {
+		// Coerce platform-width integers to their fixed-width AMQP equivalents
+		// in-place so that amqp091-go's table serializer never encounters
+		// unsupported types. int is encoded as int32 by amqp091-go, which would
+		// silently truncate values > math.MaxInt32; coercing to int64 preserves
+		// the full range. uint is not handled by amqp091-go at all and would
+		// return ErrFieldType at publish time without this coercion.
+		switch typed := v.(type) {
+		case int:
+			h[k] = int64(typed)
+			continue
+		case uint:
+			h[k] = uint64(typed)
+			continue
+		}
 		if err := validateHeaderValue(k, v, depth); err != nil {
 			return err
 		}
@@ -117,15 +131,23 @@ func validateHeaderValue(key string, v any, depth int) error {
 		float32, float64,
 		string, []byte,
 		time.Time,
-		nil,
-		int, uint:
+		nil:
 		return nil
 	case Headers:
 		return validateHeadersDepth(typed, depth+1)
 	case []any:
 		for i, elem := range typed {
-			if err := validateHeaderValue(fmt.Sprintf("%s[%d]", key, i), elem, depth); err != nil {
-				return err
+			// Coerce int/uint elements in-place, matching the map-level coercion
+			// in validateHeadersDepth, so that []any{int(1)} is also normalized.
+			switch e := elem.(type) {
+			case int:
+				typed[i] = int64(e)
+			case uint:
+				typed[i] = uint64(e)
+			default:
+				if err := validateHeaderValue(fmt.Sprintf("%s[%d]", key, i), elem, depth); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

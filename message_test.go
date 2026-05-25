@@ -164,6 +164,39 @@ func TestMessage_validateHeaders_rejectsInvalidElementInSlice(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidMessage)
 }
 
+// LATER-02: int/uint are coerced to int64/uint64 in-place during validation.
+
+func TestMessage_validateHeaders_coercesIntToInt64(t *testing.T) {
+	h := Headers{"count": int(42)}
+	m := Message[struct{}]{Headers: h}
+	require.NoError(t, m.validateHeaders())
+	// After validation the value must have been coerced to int64.
+	got, ok := h["count"]
+	require.True(t, ok)
+	assert.IsType(t, int64(0), got, "int must be coerced to int64 during validation")
+	assert.EqualValues(t, int64(42), got)
+}
+
+func TestMessage_validateHeaders_coercesUintToUint64(t *testing.T) {
+	h := Headers{"count": uint(77)}
+	m := Message[struct{}]{Headers: h}
+	require.NoError(t, m.validateHeaders())
+	got, ok := h["count"]
+	require.True(t, ok)
+	assert.IsType(t, uint64(0), got, "uint must be coerced to uint64 during validation")
+	assert.EqualValues(t, uint64(77), got)
+}
+
+func TestMessage_validateHeaders_coercesIntInNestedHeaders(t *testing.T) {
+	inner := Headers{"x": int(5)}
+	h := Headers{"nested": inner}
+	m := Message[struct{}]{Headers: h}
+	require.NoError(t, m.validateHeaders())
+	got, ok := inner["x"]
+	require.True(t, ok)
+	assert.IsType(t, int64(0), got, "int must be coerced to int64 in nested Headers")
+}
+
 func TestMessage_validateHeaders_rejectsExcessiveNesting(t *testing.T) {
 	// Build a Headers nested maxHeaderDepth+2 levels deep to exceed the limit.
 	deepest := Headers{"leaf": "value"}
