@@ -350,6 +350,24 @@ func TestBatchConsumerBuilder_PrefetchLessThanSize_Error(t *testing.T) {
 	assert.Contains(t, err.Error(), "prefetch count")
 }
 
+func TestBatchConsumerBuilder_SizeExceedsLimit_Error(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	_, err := BatchConsumerFor[string](conn).Queue("q").Size(65536).Build()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+	assert.Contains(t, err.Error(), "cannot exceed 65535")
+}
+
+func TestBatchConsumerBuilder_PrefetchSizeOverflow_Error(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	// Even if prefetch (100) > (65536 % 65536 = 0) where a truncated uint16 cast
+	// would pass validation, it must fail because size (65536) exceeds maximum AMQP prefetch count.
+	_, err := BatchConsumerFor[string](conn).Queue("q").Size(65536).Prefetch(100).Build()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+	assert.Contains(t, err.Error(), "cannot exceed 65535")
+}
+
 func TestBatchConsumerBuilder_LastWins_Size(t *testing.T) {
 	conn := newFakeConsumerConn(t)
 	bc, err := BatchConsumerFor[string](conn).Queue("q").Size(50).Size(200).Build()

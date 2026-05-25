@@ -163,7 +163,11 @@ func (b *BatchConsumerBuilder[M]) Build() (*BatchConsumer[M], error) {
 	cfg := *b
 	cfg.applyDefaults()
 
-	if cfg.prefetch < uint16(cfg.size) {
+	if cfg.size > 65535 {
+		return nil, fmt.Errorf("%w: size (%d) cannot exceed 65535 due to AMQP prefetch count limits", ErrInvalidOptions, cfg.size)
+	}
+
+	if uint(cfg.prefetch) < cfg.size {
 		return nil, fmt.Errorf("%w: prefetch count (%d) must be greater than or equal to size (%d) to avoid deadlocks", ErrInvalidOptions, cfg.prefetch, cfg.size)
 	}
 
