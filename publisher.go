@@ -173,14 +173,15 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 	}
 
 	confirmCh := ch.NotifyPublish(make(chan amqp091.Confirmation, buf))
-	// returnCh is intentionally unbuffered: the broker's dispatcher blocks on the
-	// send to returnCh, which guarantees that MarkReturned is called before the
-	// subsequent basic.ack is dispatched to confirmCh. This enforces the
-	// return-before-ack ordering at the Go runtime level (mirrors the wire-level
-	// guarantee from RabbitMQ) and prevents the race where both channels are ready
-	// simultaneously in the select loop, causing the ack to be processed first and
-	// silently discarding the ErrUnroutable result.
-	returnCh := ch.NotifyReturn(make(chan amqp091.Return))
+	// returnCh uses a buffer of 1: amqp091's dispatch goroutine sends basic.return
+	// frames synchronously on the per-connection reader goroutine. An unbuffered
+	// channel would stall the entire connection's reader while the publisher goroutine
+	// is mid-select processing an unrelated confirmation. Buffer 1 absorbs the one
+	// return frame that the AMQP wire guarantee ensures arrives before the paired
+	// basic.ack, so MarkReturned is still always called before Ack/Nack is processed
+	// in the select below — the ordering guarantee is preserved without risking a
+	// reader-goroutine stall under concurrent publish traffic.
+	returnCh := ch.NotifyReturn(make(chan amqp091.Return, 1))
 
 	go func() {
 		for {

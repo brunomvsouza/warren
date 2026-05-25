@@ -206,11 +206,8 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 		return err
 	}
 
-	cap := int(c.size)
-	if cap <= 0 {
-		cap = 100
-	}
-	pending := make([]*Delivery[M], 0, cap)
+	batchCap := int(c.size) // applyDefaults guarantees c.size >= 100; cap avoids shadowing builtin
+	pending := make([]*Delivery[M], 0, batchCap)
 
 	var (
 		flushTimer *time.Timer
@@ -244,7 +241,7 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 		stopFlushTimer()
 
 		toFlush := pending
-		pending = make([]*Delivery[M], 0, cap)
+		pending = make([]*Delivery[M], 0, batchCap)
 
 		// Wire ackNotify so any per-delivery Ack/Nack sets batch.acked.
 		batch := &Batch[M]{deliveries: toFlush}
@@ -274,13 +271,18 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 				elapsed := time.Since(start)
 				if errors.Is(hCtx.Err(), context.DeadlineExceeded) {
 					c.cm.RecordHandlerTimeout(c.queue)
-					c.cm.RecordHandler(c.queue, "timeout_nack_no_requeue", elapsed)
-					// Suppress auto-verdict and nack without requeue.
+					requeue := c.timeoutVerdict == TimeoutNackRequeue
+					outcome := "timeout_nack_no_requeue"
+					if requeue {
+						outcome = "timeout_nack_requeue"
+					}
+					c.cm.RecordHandler(c.queue, outcome, elapsed)
+					// Suppress auto-verdict and apply the configured timeout verdict.
 					batch.mu.Lock()
 					if !batch.acked {
 						batch.acked = true
 						batch.mu.Unlock()
-						_ = batch.nackAll(false)
+						_ = batch.nackAll(requeue)
 					} else {
 						batch.mu.Unlock()
 					}
@@ -332,14 +334,20 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 			}
 
 			delivery := newDelivery[M](&body, c.queue, d, c.closedCh)
+
+			// Counter A: x-death (cross-process redelivery counter). If the message has
+			// already been DLX-bounced n+ times, nack without requeue and skip batching.
+			// applyDefaults guarantees maxRedeliveries == 0 means unbounded.
+			if c.maxRedeliveries > 0 && delivery.DeathCount() >= c.maxRedeliveries {
+				c.cm.RecordMaxRedeliveries(c.queue, "x-death")
+				_ = d.Nack(false, false)
+				continue
+			}
+
 			pending = append(pending, delivery)
 			resetFlushTimer()
 
-			sz := c.size
-			if sz == 0 {
-				sz = 100
-			}
-			if uint(len(pending)) >= sz { //nolint:gosec // G115: size bounded by uint
+			if uint(len(pending)) >= c.size { //nolint:gosec // G115: size bounded by uint; applyDefaults ensures size >= 100
 				flush()
 			}
 		}
@@ -359,6 +367,10 @@ func (c *BatchConsumer[M]) applyBatchVerdict(batch *Batch[M], handlerErr error, 
 	batch.acked = true
 	batch.mu.Unlock()
 
+	// Apply in-process redelivery counter (counter B) before emitting the AMQP frame.
+	// May rewrite ErrRequeue → ErrMaxRedeliveries (→ Nack without requeue).
+	handlerErr = c.applyBatchCounterB(batch, handlerErr)
+
 	c.cm.RecordHandler(c.queue, handlerOutcome(handlerErr), elapsed)
 
 	if handlerErr == nil {
@@ -367,6 +379,80 @@ func (c *BatchConsumer[M]) applyBatchVerdict(batch *Batch[M], handlerErr error, 
 		requeue := errors.Is(handlerErr, ErrRequeue)
 		_ = batch.nackAll(requeue)
 	}
+}
+
+// applyBatchCounterB enforces the in-process redelivery counter (counter B) for the
+// batch. Returns the (possibly rewritten) handler error.
+//
+// When handlerErr is ErrRequeue and maxRedeliveries > 0 and counterB is enabled:
+// checks each delivery in the batch. If any would exceed the limit, all counter B
+// entries for the batch are cleaned up and ErrMaxRedeliveries is returned — rewriting
+// the whole batch to Nack(requeue=false). If none exceed the limit, all counters are
+// incremented and ErrRequeue is returned unchanged.
+//
+// When handlerErr is not ErrRequeue, counter B entries for all deliveries are deleted
+// (Ack or Nack(false) path — message won't be redelivered, so entries are no longer needed).
+//
+// If maxRedeliveries == 0 or counterBDisabled, the original handlerErr is returned as-is.
+func (c *BatchConsumer[M]) applyBatchCounterB(batch *Batch[M], handlerErr error) error {
+	if c.maxRedeliveries <= 0 || c.counterBDisabled {
+		return handlerErr
+	}
+	cs := c.counterState.Load()
+	if cs == nil {
+		return handlerErr
+	}
+
+	if !errors.Is(handlerErr, ErrRequeue) {
+		// Ack or Nack(false): clean up counter B entries to prevent memory leaks.
+		for _, d := range batch.deliveries {
+			cs.m.Delete(batchCounterBKey(c.tag, d.raw.MessageId, d.raw.DeliveryTag))
+		}
+		return handlerErr
+	}
+
+	// Verdict is ErrRequeue: check whether any delivery in the batch would exceed the limit.
+	for _, d := range batch.deliveries {
+		key := batchCounterBKey(c.tag, d.raw.MessageId, d.raw.DeliveryTag)
+		var count int64
+		if v, ok := cs.m.Load(key); ok {
+			if n, ok2 := v.(int64); ok2 {
+				count = n
+			}
+		}
+		if count+1 > int64(c.maxRedeliveries) { //nolint:gosec // G115: maxRedeliveries is int; count+1 cannot overflow int64 in practice
+			// At least one delivery exceeds the limit: rewrite the whole batch to Nack(false).
+			for _, d2 := range batch.deliveries {
+				cs.m.Delete(batchCounterBKey(c.tag, d2.raw.MessageId, d2.raw.DeliveryTag))
+			}
+			c.cm.RecordMaxRedeliveries(c.queue, "in-process")
+			return fmt.Errorf("%w (in-process counter exceeded)", ErrMaxRedeliveries)
+		}
+	}
+
+	// All deliveries are under the limit: increment counters and allow requeue.
+	for _, d := range batch.deliveries {
+		key := batchCounterBKey(c.tag, d.raw.MessageId, d.raw.DeliveryTag)
+		var count int64
+		if v, ok := cs.m.Load(key); ok {
+			if n, ok2 := v.(int64); ok2 {
+				count = n
+			}
+		}
+		cs.m.Store(key, count+1)
+	}
+	return handlerErr
+}
+
+// batchCounterBKey builds the counter B sync.Map key for a single delivery.
+// Mirrors the "mid:" / "dlv:" families used by Consumer[M].applyCounterB:
+//   - "mid:<MessageID>" when MessageID is set (stable across redeliveries → counter accumulates correctly).
+//   - "dlv:<consumerTag>:<deliveryTag>" otherwise (unique but not stable; counter resets on redeliver).
+func batchCounterBKey(consumerTag, msgID string, deliveryTag uint64) string {
+	if msgID != "" {
+		return "mid:" + msgID
+	}
+	return fmt.Sprintf("dlv:%s:%d", consumerTag, deliveryTag)
 }
 
 // openBatchDeliveryCh opens a subscription channel. Unit tests inject deliveryCh

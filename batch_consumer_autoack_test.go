@@ -927,6 +927,293 @@ func TestBatchConsumer_MetricsRecorded(t *testing.T) {
 	assert.Equal(t, "ack", capturedCM.records[0].outcome)
 }
 
+// TestBatchConsumer_HandlerTimeout_TimeoutNackRequeue verifies that
+// HandlerTimeoutVerdict(TimeoutNackRequeue) causes a Nack(requeue=true) on timeout.
+func TestBatchConsumer_HandlerTimeout_TimeoutNackRequeue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		Size(2).
+		HandlerTimeout(20 * time.Millisecond).
+		HandlerTimeoutVerdict(TimeoutNackRequeue).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	var mu sync.Mutex
+	type nackCall struct {
+		tag               uint64
+		multiple, requeue bool
+	}
+	var nackCalls []nackCall
+
+	fa := &fakeAcknowledger{
+		nackFn: func(tag uint64, multiple, requeue bool) error {
+			mu.Lock()
+			nackCalls = append(nackCalls, nackCall{tag, multiple, requeue})
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(hCtx context.Context, _ *Batch[string]) error {
+			<-hCtx.Done()
+			return hCtx.Err()
+		})
+	}()
+
+	deliveryCh <- makeJSONDelivery(1, "slow", fa)
+	deliveryCh <- makeJSONDelivery(2, "slow", fa)
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(nackCalls) > 0
+	}, time.Second, 10*time.Millisecond, "expected a nack after handler timeout")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, nackCalls, 1, "exactly one batch-level nack on timeout")
+	assert.Equal(t, uint64(2), nackCalls[0].tag, "nack targets highest tag")
+	assert.True(t, nackCalls[0].multiple)
+	assert.True(t, nackCalls[0].requeue, "TimeoutNackRequeue verdict must requeue")
+}
+
+// TestBatchConsumerBuilder_LastWins_HandlerTimeoutVerdict verifies last-wins for
+// HandlerTimeoutVerdict.
+func TestBatchConsumerBuilder_LastWins_HandlerTimeoutVerdict(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).Queue("q").
+		HandlerTimeoutVerdict(TimeoutNackRequeue).
+		HandlerTimeoutVerdict(TimeoutNackNoRequeue).
+		Build()
+	require.NoError(t, err)
+	assert.Equal(t, TimeoutNackNoRequeue, bc.timeoutVerdict)
+}
+
+// TestBatchConsumer_MaxRedeliveries_CounterA_XDeath verifies that a delivery whose
+// x-death count equals maxRedeliveries is nacked individually (without being batched)
+// and RecordMaxRedeliveries is called.
+func TestBatchConsumer_MaxRedeliveries_CounterA_XDeath(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+
+	capCM := &captureMaxRedeliveriesMetrics{}
+
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		Size(2). // 2 valid messages after the poison one is filtered by counter A
+		MaxRedeliveries(2).
+		Metrics(capCM).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	var mu sync.Mutex
+	type nackCall struct {
+		tag               uint64
+		multiple, requeue bool
+	}
+	var nackCalls []nackCall
+	var batchesSeen int
+
+	fa := &fakeAcknowledger{
+		nackFn: func(tag uint64, multiple, requeue bool) error {
+			mu.Lock()
+			nackCalls = append(nackCalls, nackCall{tag, multiple, requeue})
+			mu.Unlock()
+			return nil
+		},
+		ackFn: func(_ uint64, _ bool) error { return nil },
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+			mu.Lock()
+			batchesSeen++
+			mu.Unlock()
+			return nil
+		})
+	}()
+
+	// Build an x-death header with count=2 (equals maxRedeliveries) for queue "q".
+	xDeathHeaders := amqp091.Table{
+		"x-death": []any{
+			amqp091.Table{
+				"queue":  "q",
+				"reason": "rejected",
+				"count":  int64(2),
+			},
+		},
+	}
+
+	// Delivery 1: x-death count at limit → must be nacked individually, never batched.
+	deliveryCh <- amqp091.Delivery{
+		DeliveryTag:  1,
+		Acknowledger: fa,
+		Body:         []byte(`"poison"`),
+		Headers:      xDeathHeaders,
+	}
+	// Deliveries 2 and 3: fresh → batched normally.
+	deliveryCh <- makeJSONDelivery(2, "ok", fa)
+	deliveryCh <- makeJSONDelivery(3, "ok", fa)
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return batchesSeen >= 1
+	}, time.Second, 10*time.Millisecond, "expected one batch for valid messages")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Tag 1 must be nacked individually (multiple=false, requeue=false).
+	var counterAFired bool
+	for _, nc := range nackCalls {
+		if nc.tag == 1 && !nc.multiple && !nc.requeue {
+			counterAFired = true
+		}
+	}
+	assert.True(t, counterAFired, "poison message must be nacked without requeue via counter A")
+	assert.Equal(t, 1, batchesSeen, "exactly one batch for the 2 non-poison messages")
+	assert.Equal(t, 1, capCM.xDeathCount, "RecordMaxRedeliveries must be called once with cause=x-death")
+}
+
+// TestBatchConsumer_MaxRedeliveries_CounterB_InProcess verifies that when a batch
+// verdict of ErrRequeue has been applied maxRedeliveries times, the next invocation
+// rewrites the verdict to Nack(requeue=false) and calls RecordMaxRedeliveries.
+func TestBatchConsumer_MaxRedeliveries_CounterB_InProcess(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 20)
+
+	capCM := &captureMaxRedeliveriesMetrics{}
+
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		Size(1). // one message per batch → deterministic
+		MaxRedeliveries(2).
+		Metrics(capCM).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	var mu sync.Mutex
+	type nackCall struct {
+		tag               uint64
+		multiple, requeue bool
+	}
+	var nackCalls []nackCall
+
+	fa := &fakeAcknowledger{
+		nackFn: func(tag uint64, multiple, requeue bool) error {
+			mu.Lock()
+			nackCalls = append(nackCalls, nackCall{tag, multiple, requeue})
+			mu.Unlock()
+			return nil
+		},
+		ackFn: func(_ uint64, _ bool) error { return nil },
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Count how many times the handler fired; we will stop sending after the batch
+	// is nacked without requeue.
+	var handlerCalls int
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+			mu.Lock()
+			handlerCalls++
+			mu.Unlock()
+			return ErrRequeue // always request requeue
+		})
+	}()
+
+	// Inject 3 deliveries with the same MessageID so counter B accumulates correctly.
+	const msgID = "test-msg-counter-b"
+	for tag := uint64(1); tag <= 3; tag++ {
+		deliveryCh <- amqp091.Delivery{
+			DeliveryTag:  tag,
+			MessageId:    msgID,
+			Acknowledger: fa,
+			Body:         []byte(`"payload"`),
+		}
+	}
+
+	// Wait until the 3rd nack appears (the one that should be requeue=false).
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(nackCalls) >= 3
+	}, 2*time.Second, 10*time.Millisecond, "expected 3 nacks")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// First two nacks: requeue=true (counter B under limit).
+	assert.True(t, nackCalls[0].requeue, "1st attempt must be requeued (count=1 ≤ 2)")
+	assert.True(t, nackCalls[1].requeue, "2nd attempt must be requeued (count=2 ≤ 2)")
+	// Third nack: counter B exceeded (count+1=3 > 2) → requeue=false.
+	assert.False(t, nackCalls[2].requeue, "3rd attempt must NOT be requeued (counter B exceeded)")
+	assert.Equal(t, 1, capCM.inProcessCount, "RecordMaxRedeliveries must be called once with cause=in-process")
+}
+
+// captureMaxRedeliveriesMetrics records RecordMaxRedeliveries calls.
+type captureMaxRedeliveriesMetrics struct {
+	metrics.NoOpConsumerMetrics
+	mu             sync.Mutex
+	xDeathCount    int
+	inProcessCount int
+}
+
+func (c *captureMaxRedeliveriesMetrics) RecordMaxRedeliveries(queue, cause string) {
+	c.mu.Lock()
+	switch cause {
+	case "x-death":
+		c.xDeathCount++
+	case "in-process":
+		c.inProcessCount++
+	}
+	c.mu.Unlock()
+}
+
+func (c *captureMaxRedeliveriesMetrics) RecordHandler(queue, outcome string, _ time.Duration) {
+	// no-op; satisfy metrics.ConsumerMetrics if needed
+}
+
 // captureConsumerMetrics records handler calls for assertions.
 type captureConsumerMetrics struct {
 	metrics.NoOpConsumerMetrics

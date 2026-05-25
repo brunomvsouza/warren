@@ -72,10 +72,17 @@ func (b *BatchConsumerBuilder[M]) FlushAfter(d time.Duration) *BatchConsumerBuil
 }
 
 // HandlerTimeout sets a per-batch ctx deadline. Zero (default) means no deadline.
-// When the deadline expires the handler ctx is cancelled and the batch is nacked
-// without requeue (default verdict; mirrors HandlerTimeoutVerdict=TimeoutNackNoRequeue).
+// When the deadline expires the handler ctx is cancelled and the batch verdict is
+// determined by HandlerTimeoutVerdict (default: TimeoutNackNoRequeue).
 func (b *BatchConsumerBuilder[M]) HandlerTimeout(d time.Duration) *BatchConsumerBuilder[M] {
 	b.handlerTimeout = d
+	return b
+}
+
+// HandlerTimeoutVerdict sets the ack/nack action when HandlerTimeout fires.
+// Default: TimeoutNackNoRequeue (message goes to DLX or is dropped).
+func (b *BatchConsumerBuilder[M]) HandlerTimeoutVerdict(v TimeoutVerdict) *BatchConsumerBuilder[M] {
+	b.timeoutVerdict = v
 	return b
 }
 
