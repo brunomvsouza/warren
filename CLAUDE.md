@@ -134,3 +134,7 @@ When running `/ship` and the decision is NO-GO, fix the blockers, then move non-
 The project uses TDD + incremental implementation as a hard discipline (see `.cursor/rules/`). For any behavior change: write the failing test first, then the smallest implementation. For multi-file features: ship in vertical slices, each leaving the tree green. Each task in `tasks/plan.md` has explicit acceptance criteria — treat them as the test list.
 
 Recent commits follow `feat: <subject> (Txx)` / `fix: <subject> (Txx)`. Keep that format when committing task work so progress is greppable.
+
+## Language
+
+All project documents (`SPEC.md`, `tasks/plan.md`, `tasks/todo.md`, `LATER.md`, `CLAUDE.md`, `GEMINI.md`, godoc comments, commit messages, PR descriptions) are written in **English**. Any text added to these files — including new tasks, LATER entries, inline comments, and acceptance criteria — must be in English.

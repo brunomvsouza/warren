@@ -83,3 +83,7 @@ make integration-down
 - `/log`, `/metrics`, `/otel`: Observability interfaces and implementations.
 - `/examples`: Checkpoint examples that are verified in CI.
 - `/amqpmock`, `/amqptest`: Testing and mock helpers for downstream users.
+
+## Language
+
+All project documents (`SPEC.md`, `tasks/plan.md`, `tasks/todo.md`, `LATER.md`, `CLAUDE.md`, `GEMINI.md`, godoc comments, commit messages, PR descriptions) are written in **English**. Any text added to these files — including new tasks, LATER entries, inline comments, and acceptance criteria — must be in English.

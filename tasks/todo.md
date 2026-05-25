@@ -863,6 +863,28 @@ client cert).
 - **Files:** edits to `options_connection.go`, `connection.go`, `connection_sasl_external_integration_test.go`.
 - **Deps:** T07, T32 (TLS), T37 (`amqptest` for the SSL-auth-enabled testcontainer fixture).
 
+### [ ] T34c — Panic isolation for user-provided callbacks · S
+Every callback registered by the caller must be wrapped in `recover()` so a panicking
+handler cannot crash internal library goroutines. Pure-notification callbacks must also
+run in a goroutine to avoid blocking the event-loop that dispatches them.
+- **Acceptance:**
+  - [ ] **`WithOnBlocked`** — call moved to a dedicated goroutine (`go func() { defer recover; fn(reason) }()`); panic is logged with a stack trace via `logger.Errorf`; the `supervisor` `select` loop is never blocked while the callback executes.
+  - [ ] **`WithOnReconnect`** — wrapped in `recover()` at the inline call site in `runBarrier`; on panic, log the stack trace and ensure `barrierCond.Broadcast()` is still emitted (no permanent Publisher deadlock).
+  - [ ] **`WithOnTopologyDegraded`** — `recover()` added inside the already-spawned goroutine (`mc.wg.Add(1)` in `runBarrier`); panic is logged; `wg.Done()` is always executed via `defer`.
+  - [ ] **`Handler[M]` / `RawHandler[M]`** — invocation extracted into a `safeCallHandler` helper with `recover()`; panic results in `nack(requeue=false)` (prevents infinite poison-message loop) and log of the stack trace; applies to both the inline path (no timeout) and the goroutine path (with timeout).
+  - [ ] **`BatchHandler[M]`** — same pattern via `safeCallBatchHandler`; panic results in `nackAll(requeue=false)` + log.
+  - [ ] No public API change (no new exported error; recover is transparent to the caller).
+  - [ ] Unit tests for each site:
+    - `WithOnBlocked`: a panicking callback does not kill the `supervisor` goroutine (verified via goleak + mock conn).
+    - `WithOnReconnect`: panicking callback → barrier released, Publishers not deadlocked.
+    - `WithOnTopologyDegraded`: panicking callback → `wg.Done()` called, process does not crash.
+    - `Handler`: panic → nack without requeue emitted; consumer continues processing subsequent messages.
+    - `BatchHandler`: panic → nackAll without requeue; consumer continues.
+  - [ ] `goleak.VerifyNone` clean in all tests above.
+- **Verify:** `go test -race ./...` green; `go test -race -tags=integration ./...` green (when broker available).
+- **Files:** edits to `connection.go` (WithOnBlocked goroutine, WithOnReconnect + WithOnTopologyDegraded recover), `consumer.go` (safeCallHandler), `batch_consumer.go` (safeCallBatchHandler); tests in `connection_panic_test.go`, `consumer_panic_test.go`, `batch_consumer_panic_test.go`.
+- **Deps:** T07, T18, T23.
+
 ### [ ] T35 — `AutoAck()` opt-in + warning · S
 - **Acceptance:**
   - [ ] `ConsumerBuilder.AutoAck()` enables the AMQP `no-ack` flag.
@@ -1054,11 +1076,11 @@ SPEC §8 + §9 reliability bar: credential leakage is a defect.
 ---
 
 ## Quick stats
-- Total tasks: **54** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example).
+- Total tasks: **55** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks).
 - Phases: **9**.
 - Estimated sizing: 5× XS · 31× S · 18× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.
 - Bench gates (T44b): ≥ 30k msg/s single-conn, ≥ 100k msg/s with `WithPublisherConnections(4)+WithChannelPoolSize(16)`, `PublishBatch` ≥ 5× `Publish`.
 - Operational decisions: deps pinned exact in `go.mod`; testcontainer images pinned minor-patch; conformance against a live broker (no stub); pre-commit hooks opt-in via `make hooks`; no goreleaser (pure library); OTel Messaging semconv pinned to v1.27.0+; `golangci-lint` includes `errorlint`; `amqptest` plugin enablement supports three explicit modes (pre-baked image / mounted `.ez` / `t.Skip`).
-- Reliability invariants (mandatory): credential redaction (T07c, T45b), consumer re-subscribe (T18, T19), handler-ctx cancel on channel close (T18, T19), broker-nack → `ErrPublishNacked` (T11, T13), JSON lax default per Postel's Law + opt-in `NewJSONStrict` (T09, Rev 8), quorum-queue `x-delivery-limit` (T14, T15, T20), **synchronous reconnect barrier + degraded state** (T07, T16, T45), **at-least-once with documented dedupe pattern** (T13, T38b, SPEC §6.2.1), **HandlerTimeout verdict consistency** (T18, T18b), **client-side UserID validation** (T13), **Replier missing-DLX validation** (T30), **SASL EXTERNAL fail-closed** (T34b), **basic.cancel surfacing** (T36), **default conn counts 2/2 with consumer-tag UUID** (T07d, T18).
+- Reliability invariants (mandatory): credential redaction (T07c, T45b), consumer re-subscribe (T18, T19), handler-ctx cancel on channel close (T18, T19), broker-nack → `ErrPublishNacked` (T11, T13), JSON lax default per Postel's Law + opt-in `NewJSONStrict` (T09, Rev 8), quorum-queue `x-delivery-limit` (T14, T15, T20), **synchronous reconnect barrier + degraded state** (T07, T16, T45), **at-least-once with documented dedupe pattern** (T13, T38b, SPEC §6.2.1), **HandlerTimeout verdict consistency** (T18, T18b), **client-side UserID validation** (T13), **Replier missing-DLX validation** (T30), **SASL EXTERNAL fail-closed** (T34b), **basic.cancel surfacing** (T36), **default conn counts 2/2 with consumer-tag UUID** (T07d, T18), **panic isolation for user-provided callbacks** (T34c).

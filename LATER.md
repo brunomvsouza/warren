@@ -828,6 +828,58 @@ batch é mais rápido quando a diferença é de método de medição.
 
 ---
 
+### LATER-27 — Broad panic-safety audit and preventive linter for user-provided callbacks
+
+**Context:** A manual review (2026-05-24) identified five call sites in `connection.go`,
+`consumer.go`, and `batch_consumer.go` where user-provided callbacks
+(`WithOnBlocked`, `WithOnReconnect`, `WithOnTopologyDegraded`, `Handler[M]`,
+`BatchHandler[M]`) are invoked without `recover()` and, in some cases, inline inside
+tight event-loop goroutines. T34c addresses those known sites. It is plausible that
+analogous patterns exist in code not yet implemented (T25–T46) or in internal call sites
+not covered by this pass.
+
+**Impact:**
+- A panic in a user callback can: crash the entire process; permanently deadlock all
+  Publishers (barrier never broadcast); or silently kill a consumer goroutine, halting
+  consumption with no error log.
+- Blocking callbacks inside tight event-loops (`supervisor`, `runBarrier`) delay detection
+  of critical broker events (connection unblock, reconnect).
+- The bug is hard to reproduce in normal tests and typically surfaces in production under
+  load or with buggy callback code.
+
+**Evidence:** Manual review — session 2026-05-24 (user-requested analysis).
+T34c covers the already-identified sites; this entry tracks the residual sweep and
+long-term prevention via tooling.
+
+**Suggested solution:**
+
+1. **Systematic sweep post-T34c:** after T34c lands, review every user-supplied
+   closure/func invocation in production code
+   (`grep -rn "opts\." --include="*.go" | grep "nil"` as a starting point) and verify
+   that `recover()` is present and that the blocking vs. non-blocking behaviour is
+   documented in the option's godoc.
+
+2. **Static linter:** evaluate tools that detect goroutines without a top-level `recover()`
+   or unprotected calls to external functions:
+   - [`github.com/nikolaydubina/go-recover`](https://github.com/nikolaydubina/go-recover):
+     detects goroutines missing a `recover()` at the top.
+   - [`revive`](https://github.com/mgechev/revive) `defer` rule can flag `defer wg.Done()`
+     without a preceding `recover()`.
+   - Alternatively, a custom `golangci-lint` analyzer targeting the pattern
+     `go func() { userCallback() }()` without recover can be written and wired into
+     `.golangci.yml` as a `custom-gcl` plugin.
+   - Enable `paniccheck` if available in the golangci-lint version in use.
+
+3. **godoc convention:** document on `WithOnBlocked`, `WithOnReconnect`, and
+   `WithOnTopologyDegraded` whether the callback is blocking or non-blocking — the
+   "blocks the reconnect barrier" semantic of `WithOnReconnect` is a deliberate feature
+   that belongs in the public contract, not a hidden implementation detail.
+
+**Prerequisites:** T34c (panic isolation for the already-identified sites). This entry
+covers the residual audit and tooling-based prevention.
+
+---
+
 ### LATER-26 — `wireReturnPool` e `wireFakePool` são near-duplicatas
 
 **Contexto:** `publisher_t13_test.go:wireReturnPool` e `publisher_test.go:wireFakePool` —
