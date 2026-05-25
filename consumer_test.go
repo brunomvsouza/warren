@@ -929,3 +929,36 @@ type panicCodec struct{}
 func (panicCodec) Encode(_ any) ([]byte, error) { return nil, nil }
 func (panicCodec) Decode(_ []byte, _ any) error { panic("codec exploded") }
 func (panicCodec) ContentType() string          { return "application/octet-stream" }
+
+// — LATER-33: MessageId length bound in counterB key —————————————————————
+
+// TestConsumer_counterBKey_longMessageId_isTruncated verifies that MessageId
+// values longer than maxMsgIDKeyLen are truncated before being used as a
+// sync.Map key, bounding the memory impact of messages from a compromised
+// or misconfigured producer.
+func TestConsumer_counterBKey_longMessageId_isTruncated(t *testing.T) {
+	longID := strings.Repeat("x", maxMsgIDKeyLen+100)
+	key := counterBKeyForMsgID(longID)
+	// "mid:" prefix + truncated msgID — total key length must not exceed
+	// len("mid:") + maxMsgIDKeyLen.
+	maxExpected := len("mid:") + maxMsgIDKeyLen
+	assert.LessOrEqual(t, len(key), maxExpected,
+		"counterBKey must truncate MessageId to maxMsgIDKeyLen bytes")
+}
+
+// TestConsumer_counterBKey_shortMessageId_isNotTruncated verifies that
+// MessageId values within the limit pass through unchanged.
+func TestConsumer_counterBKey_shortMessageId_isNotTruncated(t *testing.T) {
+	shortID := strings.Repeat("a", maxMsgIDKeyLen)
+	key := counterBKeyForMsgID(shortID)
+	assert.Equal(t, "mid:"+shortID, key,
+		"counterBKey must not truncate MessageId within limit")
+}
+
+// TestConsumer_counterBKey_emptyMessageId_usesFallback verifies that an
+// empty MessageId uses the "dlv:" family as before.
+func TestConsumer_counterBKey_emptyMessageId_usesFallback(t *testing.T) {
+	key := counterBKeyForDeliveryTag("ctag-abc", 42)
+	assert.True(t, strings.HasPrefix(key, "dlv:"),
+		"empty MessageId must use dlv: key family; got %q", key)
+}

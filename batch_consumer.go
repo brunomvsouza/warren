@@ -493,12 +493,13 @@ func (c *BatchConsumer[M]) applyBatchCounterB(batch *Batch[M], handlerErr error)
 // batchCounterBKey builds the counter B sync.Map key for a single delivery.
 // Mirrors the "mid:" / "dlv:" families used by Consumer[M].applyCounterB:
 //   - "mid:<MessageID>" when MessageID is set (stable across redeliveries → counter accumulates correctly).
+//     MessageID is truncated to maxMsgIDKeyLen bytes via counterBKeyForMsgID to bound memory usage.
 //   - "dlv:<consumerTag>:<deliveryTag>" otherwise (unique but not stable; counter resets on redeliver).
 func batchCounterBKey(consumerTag, msgID string, deliveryTag uint64) string {
 	if msgID != "" {
-		return "mid:" + msgID
+		return counterBKeyForMsgID(msgID)
 	}
-	return fmt.Sprintf("dlv:%s:%d", consumerTag, deliveryTag)
+	return counterBKeyForDeliveryTag(consumerTag, deliveryTag)
 }
 
 // openBatchDeliveryCh opens a subscription channel. Unit tests inject deliveryCh

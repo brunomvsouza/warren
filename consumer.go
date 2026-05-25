@@ -46,6 +46,27 @@ type redeliveryCounter struct {
 	m sync.Map // key: "mid:<MessageID>" or "dlv:<consumerTag>:<deliveryTag>", value: int64
 }
 
+// maxMsgIDKeyLen is the maximum number of bytes of a MessageId that are used as
+// part of a sync.Map key in the redelivery counter. Truncating here bounds the
+// memory cost of a long (or adversarially crafted) MessageId to a fixed amount
+// per in-flight delivery, regardless of the original MessageId length.
+const maxMsgIDKeyLen = 512
+
+// counterBKeyForMsgID builds the "mid:<MessageId>" sync.Map key for redelivery
+// counter B, truncating MessageId to maxMsgIDKeyLen bytes when necessary.
+func counterBKeyForMsgID(msgID string) string {
+	if len(msgID) > maxMsgIDKeyLen {
+		msgID = msgID[:maxMsgIDKeyLen]
+	}
+	return "mid:" + msgID
+}
+
+// counterBKeyForDeliveryTag builds the "dlv:<consumerTag>:<deliveryTag>" key
+// used as a fallback when MessageId is empty.
+func counterBKeyForDeliveryTag(consumerTag string, deliveryTag uint64) string {
+	return fmt.Sprintf("dlv:%s:%d", consumerTag, deliveryTag)
+}
+
 // load returns the current redelivery count for key, or 0 if absent.
 // A non-int64 value in the map indicates a programming error; 0 is the safe default
 // (allows the delivery to proceed rather than crash or enter an infinite loop).
@@ -420,14 +441,12 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		cs = c.counterState.Load()
 		if raw.MessageId != "" {
 			// Stable key: MessageID persists across redeliveries → counter accumulates correctly.
-			// "mid:" prefix ensures no collision with the delivery-tag-based fallback family.
-			counterBKey = "mid:" + raw.MessageId
+			// counterBKeyForMsgID truncates to maxMsgIDKeyLen to bound memory usage.
+			counterBKey = counterBKeyForMsgID(raw.MessageId)
 		} else {
 			// No stable MessageID: use delivery tag as a unique-but-non-stable key.
-			// "dlv:" prefix ensures no collision with the "mid:" family even if a publisher
-			// crafts a MessageID that looks like a delivery-tag key.
 			// Counter B will not accumulate across redeliveries for these messages.
-			counterBKey = fmt.Sprintf("dlv:%s:%d", c.tag, raw.DeliveryTag)
+			counterBKey = counterBKeyForDeliveryTag(c.tag, raw.DeliveryTag)
 		}
 	}
 
