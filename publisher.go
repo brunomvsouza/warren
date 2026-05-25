@@ -95,8 +95,6 @@ func (p *publisherConnPool) acquire(ctx context.Context) (publisherEntry, func()
 
 	entry, err := p.getOrOpen()
 	if err != nil {
-		tokenConsumed = true
-		p.tokens <- struct{}{}
 		return publisherEntry{}, nil, err
 	}
 	tokenConsumed = true

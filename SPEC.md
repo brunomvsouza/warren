@@ -2553,16 +2553,16 @@ the next reader so the rationale survives the conversation:
    breaking implementers. Tests use `amqpmock.NewDelivery[M](…)` /
    `amqpmock.NewBatch[M](…)` constructors.
 
-10. **Quorum Queue `x-dead-letter-strategy: at-least-once` (Rev 9)** —
+52. **Quorum Queue `x-dead-letter-strategy: at-least-once` (Rev 9)** —
     Implicitly injected by `Topology.Declare` for Quorum queues with DLXs
     to guarantee message preservation during dead-lettering, removing the
     need for the user to specify it manually.
 
-11. **Strict Shutdown Cascade (Rev 9)** — `Close(ctx)` cancels consumers
+53. **Strict Shutdown Cascade (Rev 9)** — `Close(ctx)` cancels consumers
     *before* draining publishes, and drains publishes *before* closing
     sockets. The order is load-bearing.
 
-12. **BatchConsumer OTel Links (Rev 9)** — A single batch span receives
+54. **BatchConsumer OTel Links (Rev 9)** — A single batch span receives
     `Link` entries for every incoming message's `traceparent` rather than
     attempting to adopt a single parent.
 
@@ -3102,9 +3102,9 @@ fresh spec amendment.
 
 **Second-report verification pass (2026-05-25).** A separate SRE/AMQP
 gap report was cross-checked against this revision. 9 of its 11 items
-were already covered: at-least-once DLX strategy (decision 10), shutdown
-cascade (decision 11), non-blocking dispatcher (§6.3), RPC
-auto-population (§6.7), BatchConsumer Links (decision 12),
+were already covered: at-least-once DLX strategy (decision 52), shutdown
+cascade (decision 53), non-blocking dispatcher (§6.3), RPC
+auto-population (§6.7), BatchConsumer Links (decision 54),
 `multiple=true` resolution (§6.2), `DeliveryMode` wire mapping (§6.5),
 quorum-vs-classic prefetch (§6.3 "Queue Type Nuance"), and `Health()`
 semantics (§6.1) — items 1–9/11 in that report correspond to existing

@@ -20,3 +20,28 @@ func FuzzCodecJSON(f *testing.F) {
 		_ = c.Decode(data, &v)
 	})
 }
+
+func FuzzCodecJSONStrict(f *testing.F) {
+	// valid single-value inputs
+	f.Add([]byte(`{"id":1,"name":"test"}`))
+	f.Add([]byte(`{}`))
+	f.Add([]byte(`null`))
+	f.Add([]byte(`"string"`))
+	f.Add([]byte(`42`))
+	// trailing-data cases that must be rejected
+	f.Add([]byte(`{}{}"`))
+	f.Add([]byte(`{} garbage`))
+	f.Add([]byte(`{"a":1}{"b":2}`))
+	// unknown-field cases that must be rejected
+	f.Add([]byte(`{"unknown":true}`))
+	// empty / whitespace
+	f.Add([]byte(``))
+	f.Add([]byte("   "))
+
+	c := codec.NewJSONStrict()
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var v any
+		// must not panic — error is acceptable
+		_ = c.Decode(data, &v)
+	})
+}

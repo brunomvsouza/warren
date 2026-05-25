@@ -77,41 +77,6 @@ serialização existir para validar o round-trip de ponta a ponta.
 
 ---
 
-### LATER-04 — Token do semáforo de pool não retornado em caso de panic em `openFn`
-
-**Contexto:** `publisher.go:acquire` — o token de semáforo é devolvido ao canal `p.tokens` apenas
-no caminho de erro explícito (linha `p.tokens <- struct{}{}`). Se `openFn` disparar um panic, o
-`defer` de retorno do token não existe e o token é perdido permanentemente, reduzindo o tamanho
-efetivo do pool a cada panic.
-
-**Impacto:** Panics repetidos em `openFn` (ex: nil pointer em `openPublisherEntry` durante uma
-janela de race em `raw`) esgotariam silenciosamente o pool, fazendo todos os `Publish` bloquearem
-até deadline. `openFn` é código interno controlado, portanto o risco é baixo, mas a falha é
-não-óbvia.
-
-**Evidência:** `/ship` security-audit T12 — LOW finding.
-
-**Sugestão de solução:** Usar `defer` + flag booleana em `acquire` para retornar o token
-incondicionalmente em caso de panic:
-```go
-tokenReturned := false
-defer func() {
-    if !tokenReturned {
-        p.tokens <- struct{}{}
-    }
-}()
-entry, err := p.getOrOpen()
-if err != nil {
-    return publisherEntry{}, nil, err
-}
-tokenReturned = true
-return entry, func() { p.release(entry) }, nil
-```
-
-**Pré-requisitos:** Nenhum. Pode ser feito a qualquer momento após T12.
-
----
-
 ### LATER-05 — `wrapAMQPError` propaga o campo `Reason` do broker verbatim nos erros
 
 **Contexto:** `errors.go:wrapAMQPError` — o wrapping `fmt.Errorf("%w: %w", sentinel, err)` inclui

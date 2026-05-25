@@ -19,7 +19,7 @@ The library does not aim to be portable to other AMQP 0-9-1 brokers
 listed in `SPEC.md` §6 ("Note on AMQP 0-9-1 vs RabbitMQ").
 
 **Revision history:** (Rev 9 → Rev 8 → Rev 7 → Rev 6 → Rev 5 ordering preserved at the top — newest specialist pass first; Rev 5 sits below Rev 6 because it was the prior milestone the Rev 6 pass superseded.)
-- Rev 9 — SRE & AMQP 0-9-1 specialist review. 54 tasks (unchanged). Five surface changes:
+- Rev 9 — SRE & AMQP 0-9-1 specialist review. 54 tasks in existing phases (T01–T46 surface updated, no new tasks added from spec review; Phase 10 adds T47–T56). Five surface changes:
   1. `Topology.Declare` auto-injects `x-dead-letter-strategy: at-least-once` for quorum queues.
   2. `Connection.Close` cascade (cancel consumers → wait handlers → wait confirms → close sockets).
   3. `Concurrency(n)` non-blocking dispatcher requirement.
