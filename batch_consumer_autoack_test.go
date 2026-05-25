@@ -57,35 +57,17 @@ func newTestBatch(deliveries []*Delivery[string]) *Batch[string] {
 }
 
 // TestBatch_Ack_EmptyBatch_NoFrame verifies that Batch.Ack on an empty batch returns
-// nil without calling the acknowledger.
+// nil without panicking. The guard is highest() returning nil; no acknowledger is wired.
 func TestBatch_Ack_EmptyBatch_NoFrame(t *testing.T) {
-	var ackCalled bool
-	fa := &fakeAcknowledger{
-		ackFn: func(_ uint64, _ bool) error {
-			ackCalled = true
-			return nil
-		},
-	}
-	_ = fa // acknowledger never used for empty batch
 	batch := newTestBatch([]*Delivery[string]{})
 	require.NoError(t, batch.Ack(), "empty batch Ack must return nil")
-	assert.False(t, ackCalled, "no ack frame must be emitted for empty batch")
 }
 
 // TestBatch_Nack_EmptyBatch_NoFrame verifies that Batch.Nack on an empty batch returns
-// nil without calling the acknowledger.
+// nil without panicking. The guard is highest() returning nil; no acknowledger is wired.
 func TestBatch_Nack_EmptyBatch_NoFrame(t *testing.T) {
-	var nackCalled bool
-	fa := &fakeAcknowledger{
-		nackFn: func(_ uint64, _ bool, _ bool) error {
-			nackCalled = true
-			return nil
-		},
-	}
-	_ = fa
 	batch := newTestBatch([]*Delivery[string]{})
 	require.NoError(t, batch.Nack(false), "empty batch Nack must return nil")
-	assert.False(t, nackCalled, "no nack frame must be emitted for empty batch")
 }
 
 // TestBatch_AckAll_AcknowledgerError_ReturnsError verifies that when the underlying
@@ -1487,6 +1469,229 @@ func TestBatchConsumer_HandlerTimeout_CompletesBeforeDeadline_AppliesNormalVerdi
 	require.Len(t, capCM.records, 1)
 	assert.Equal(t, "q", capCM.records[0].queue)
 	assert.Equal(t, "ack", capCM.records[0].outcome, "outcome must be 'ack', not a timeout variant")
+}
+
+// TestBatchConsumer_MaxRedeliveries_CounterA_EmitsWarning verifies that when counter A
+// (x-death) fires, the logger emits a Warningf containing "cause=x-death".
+func TestBatchConsumer_MaxRedeliveries_CounterA_EmitsWarning(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+
+	conn := newFakeConsumerConn(t)
+	var logMu sync.Mutex
+	var warnings []string
+	conn.opts.logger = &captureLogger{onWarning: func(msg string) {
+		logMu.Lock()
+		warnings = append(warnings, msg)
+		logMu.Unlock()
+	}}
+
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("warnq").
+		Size(2).
+		MaxRedeliveries(1).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	var mu sync.Mutex
+	var nackCalls int
+	fa := &fakeAcknowledger{
+		nackFn: func(_ uint64, _ bool, _ bool) error {
+			mu.Lock()
+			nackCalls++
+			mu.Unlock()
+			return nil
+		},
+		ackFn: func(_ uint64, _ bool) error { return nil },
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error { return nil })
+	}()
+
+	// Delivery with x-death count equal to maxRedeliveries (1) → counter A fires.
+	deliveryCh <- amqp091.Delivery{
+		DeliveryTag:  1,
+		Acknowledger: fa,
+		Body:         []byte(`"poison"`),
+		Headers: amqp091.Table{
+			"x-death": []any{
+				amqp091.Table{"queue": "warnq", "reason": "rejected", "count": int64(1)},
+			},
+		},
+	}
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return nackCalls >= 1
+	}, time.Second, 10*time.Millisecond, "expected counter A nack")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	logMu.Lock()
+	defer logMu.Unlock()
+	require.Len(t, warnings, 1, "exactly one warning must be emitted for counter A")
+	assert.Contains(t, warnings[0], "cause=x-death", "warning must identify cause=x-death")
+	assert.Contains(t, warnings[0], `"warnq"`, "warning must include the queue name")
+}
+
+// TestBatchConsumer_MaxRedeliveries_CounterB_EmitsWarning verifies that when counter B
+// (in-process) fires, the logger emits a Warningf containing "cause=in-process".
+func TestBatchConsumer_MaxRedeliveries_CounterB_EmitsWarning(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 20)
+
+	conn := newFakeConsumerConn(t)
+	var logMu sync.Mutex
+	var warnings []string
+	conn.opts.logger = &captureLogger{onWarning: func(msg string) {
+		logMu.Lock()
+		warnings = append(warnings, msg)
+		logMu.Unlock()
+	}}
+
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("warnq").
+		Size(1).
+		MaxRedeliveries(2).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	var mu sync.Mutex
+	type nackCall struct {
+		requeue bool
+	}
+	var nackCalls []nackCall
+	fa := &fakeAcknowledger{
+		nackFn: func(_ uint64, _ bool, requeue bool) error {
+			mu.Lock()
+			nackCalls = append(nackCalls, nackCall{requeue})
+			mu.Unlock()
+			return nil
+		},
+		ackFn: func(_ uint64, _ bool) error { return nil },
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+			return ErrRequeue // always request requeue → accumulates counter B
+		})
+	}()
+
+	// Three deliveries with the same MessageID so counter B accumulates.
+	// After the 3rd, count+1=3 > maxRedeliveries=2 → Warningf must fire.
+	const msgID = "warn-counterb-msg"
+	for tag := uint64(1); tag <= 3; tag++ {
+		deliveryCh <- amqp091.Delivery{
+			DeliveryTag:  tag,
+			MessageId:    msgID,
+			Acknowledger: fa,
+			Body:         []byte(`"payload"`),
+		}
+	}
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(nackCalls) >= 3
+	}, 2*time.Second, 10*time.Millisecond, "expected 3 nacks")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	logMu.Lock()
+	defer logMu.Unlock()
+	require.Len(t, warnings, 1, "exactly one warning must be emitted when counter B fires")
+	assert.Contains(t, warnings[0], "cause=in-process", "warning must identify cause=in-process")
+	assert.Contains(t, warnings[0], `"warnq"`, "warning must include the queue name")
+}
+
+// TestBatchConsumer_HandlerTimeout_CtxCancelledDuringHandler_NoFrame verifies that when
+// the parent ctx is cancelled while a HandlerTimeout-guarded handler is running, no
+// ack/nack frame is emitted. hCtx (child of ctx) fires with Canceled (not
+// DeadlineExceeded), so the timeout verdict block is skipped. The <-handlerDone drain
+// is exercised: the test unblocks the handler after ctx cancellation.
+func TestBatchConsumer_HandlerTimeout_CtxCancelledDuringHandler_NoFrame(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		Size(1).
+		HandlerTimeout(500 * time.Millisecond). // generous: we cancel ctx before it fires
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	var mu sync.Mutex
+	var ackCalls, nackCalls int
+	fa := &fakeAcknowledger{
+		ackFn:  func(_ uint64, _ bool) error { mu.Lock(); ackCalls++; mu.Unlock(); return nil },
+		nackFn: func(_ uint64, _ bool, _ bool) error { mu.Lock(); nackCalls++; mu.Unlock(); return nil },
+	}
+
+	handlerStarted := make(chan struct{})
+	handlerCanReturn := make(chan struct{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+			close(handlerStarted)
+			// Block on a test-controlled channel (not hCtx) so handlerDone stays empty.
+			// Cancelling ctx makes hCtx.Done() fire in the timeout select while
+			// handlerDone is not yet ready → select deterministically picks hCtx.Done().
+			<-handlerCanReturn
+			return nil
+		})
+	}()
+
+	deliveryCh <- makeJSONDelivery(1, "msg", fa)
+
+	// Wait for handler to start before cancelling ctx.
+	select {
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start in time")
+	}
+
+	// Cancel parent ctx while handler is still blocked on handlerCanReturn.
+	// hCtx.Err() == context.Canceled (not DeadlineExceeded) → no ack/nack emitted.
+	cancel()
+
+	// Unblock the handler so <-handlerDone drains cleanly and Consume returns.
+	close(handlerCanReturn)
+
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 0, ackCalls, "no ack frame must be emitted on ctx cancel (not timeout)")
+	assert.Equal(t, 0, nackCalls, "no nack frame must be emitted on ctx cancel (not timeout)")
 }
 
 // captureMaxRedeliveriesMetrics records RecordMaxRedeliveries calls.

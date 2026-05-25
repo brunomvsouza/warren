@@ -348,6 +348,10 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 			// applyDefaults guarantees maxRedeliveries == 0 means unbounded.
 			if c.maxRedeliveries > 0 && delivery.DeathCount() >= c.maxRedeliveries {
 				c.cm.RecordMaxRedeliveries(c.queue, "x-death")
+				c.mc.opts.logger.Warningf(
+					"warren: max redeliveries exceeded for queue %q (cause=x-death, death_count=%d, limit=%d)",
+					c.queue, delivery.DeathCount(), c.maxRedeliveries,
+				)
 				_ = d.Nack(false, false)
 				continue
 			}
@@ -419,9 +423,33 @@ func (c *BatchConsumer[M]) applyBatchCounterB(batch *Batch[M], handlerErr error)
 		return handlerErr
 	}
 
-	// Verdict is ErrRequeue: collect (key, currentCount) in a single pass so each
-	// sync.Map key is read exactly once (halves map operations compared to a separate
-	// check loop followed by an increment loop).
+	// Fast-path: single-delivery batches skip the []kv heap allocation.
+	// Logic mirrors the general path below but operates on a single delivery directly.
+	if len(batch.deliveries) == 1 {
+		d := batch.deliveries[0]
+		key := batchCounterBKey(c.tag, d.raw.MessageId, d.raw.DeliveryTag)
+		var count int64
+		if v, ok := cs.m.Load(key); ok {
+			if n, ok2 := v.(int64); ok2 {
+				count = n
+			}
+		}
+		if count+1 > int64(c.maxRedeliveries) { //nolint:gosec // G115: maxRedeliveries is int; count+1 cannot overflow int64 in practice
+			cs.m.Delete(key)
+			c.cm.RecordMaxRedeliveries(c.queue, "in-process")
+			c.mc.opts.logger.Warningf(
+				"warren: max redeliveries exceeded for queue %q (cause=in-process, count=%d, limit=%d)",
+				c.queue, count+1, c.maxRedeliveries,
+			)
+			return fmt.Errorf("%w (in-process counter exceeded)", ErrMaxRedeliveries)
+		}
+		cs.m.Store(key, count+1)
+		return handlerErr
+	}
+
+	// General path: multi-delivery batches — collect (key, currentCount) in a single
+	// pass so each sync.Map key is read exactly once (halves map operations compared to
+	// a separate check loop followed by an increment loop).
 	type kv struct {
 		key   string
 		count int64
