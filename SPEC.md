@@ -645,6 +645,18 @@ internally via `Concurrency(n)`.
   4. Closes every TCP connection in the pool.
   This entire cascade runs up to the `ctx` deadline; if exceeded,
   connections are closed forcefully.
+  **Component registration (lifecycle contract).** "Managed
+  components" are the `Publisher[M]` / `Consumer[M]` / `BatchConsumer[M]`
+  / `Caller` / `Replier` values built from this `*Connection`: each
+  `XFor[M](conn).…Build()` **registers** the component with the
+  connection, which is how `Close` can issue `basic.cancel` to every
+  active consumer and drain every in-flight publisher without the
+  caller passing them back in. Calling a component's own `Close(ctx)`
+  is still supported and is **idempotent and safe alongside**
+  `Connection.Close` — whichever runs second is a no-op returning
+  `ErrAlreadyClosed`, never a double `channel.close` / double-cancel
+  on the broker. Closing a component individually also deregisters it
+  from the connection's cascade.
 - `Health(ctx)` verifies that the connection pool has at least one
   healthy TCP socket and that the connection is not in a degraded
   topology state. It opens and closes a temporary channel to
@@ -657,7 +669,11 @@ internally via `Concurrency(n)`.
   Default is `<binary>-<hostname>-<pid>`. Role and index suffixes
   (`<base>-pub-0`, `<base>-pub-1`, `<base>-con-0`, …) are appended
   per TCP connection so the broker side shows every socket
-  individually.
+  individually. **Keep the base name reasonably short:** the
+  management UI and some `rabbitmqctl` listings truncate long
+  connection names for display, and the per-socket role/index
+  suffixes add to the length — an over-long base makes the
+  individual sockets hard to tell apart in operator tooling.
 
 #### Heartbeat and partition detection
 
@@ -3083,3 +3099,18 @@ fresh spec amendment.
   add an async/streaming publish API with a bounded in-flight window
   (reversing Rev-6 decision 31) vs documenting the ceiling honestly is
   an owner decision, tracked in `LATER.md` as LATER-34.
+
+**Second-report verification pass (2026-05-25).** A separate SRE/AMQP
+gap report was cross-checked against this revision. 9 of its 11 items
+were already covered: at-least-once DLX strategy (decision 10), shutdown
+cascade (decision 11), non-blocking dispatcher (§6.3), RPC
+auto-population (§6.7), BatchConsumer Links (decision 12),
+`multiple=true` resolution (§6.2), `DeliveryMode` wire mapping (§6.5),
+quorum-vs-classic prefetch (§6.3 "Queue Type Nuance"), and `Health()`
+semantics (§6.1) — items 1–9/11 in that report correspond to existing
+text, notably the Rev 9 decisions. Its prefetch suggestion ("hundreds"
+for quorum) was rejected as unsupported; the 16-min/64-default guidance
+stands. Two genuinely-new doc notes were added from it: a connection-name
+length caveat on `WithConnectionName` (§6.1), and an explicit
+component-registration + idempotent double-close contract on
+`Connection.Close` (§6.1).
