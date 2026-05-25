@@ -880,39 +880,6 @@ covers the residual audit and tooling-based prevention.
 
 ---
 
-### LATER-31 — `applyBatchCounterB` reads each sync.Map key twice per delivery
-
-**Context:** `batch_consumer.go:415-442` — the check loop (lines 415-430) and the increment loop
-(lines 433-444) each call `cs.m.Load` for every delivery key, so each key is read twice from the
-`sync.Map` per batch dispatch. Because `Consume` is single-goroutine there is no correctness risk,
-but every key is loaded twice unnecessarily.
-
-**Impact:** Negligible at typical batch sizes (≤ 100); noticeable under microbenchmark at batch
-sizes ≥ 1000. Not a production blocker.
-
-**Evidence:** `/ship` code-reviewer — Suggestion (2026-05-24, post-T23 review).
-
-**Suggested solution:** Collect `(key, currentCount)` pairs into a local `[]struct{key string; count int64}`
-slice in the first loop, reuse them in the second. Halves sync.Map reads with no added complexity:
-```go
-type kv struct{ key string; count int64 }
-pairs := make([]kv, len(batch.deliveries))
-for i, d := range batch.deliveries {
-    key := batchCounterBKey(c.tag, d.raw.MessageId, d.raw.DeliveryTag)
-    var count int64
-    if v, ok := cs.m.Load(key); ok {
-        if n, ok2 := v.(int64); ok2 { count = n }
-    }
-    if count+1 > int64(c.maxRedeliveries) { /* ... */ }
-    pairs[i] = kv{key, count}
-}
-for _, p := range pairs { cs.m.Store(p.key, p.count+1) }
-```
-
-**Prerequisites:** None.
-
----
-
 ### LATER-32 — `BatchConsumer` counter B does not emit a warning log when max redeliveries is hit
 
 **Context:** `batch_consumer.go:428` — `Consumer[M].applyCounterB` emits a `logger.Warningf`

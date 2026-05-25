@@ -419,7 +419,14 @@ func (c *BatchConsumer[M]) applyBatchCounterB(batch *Batch[M], handlerErr error)
 		return handlerErr
 	}
 
-	// Verdict is ErrRequeue: check whether any delivery in the batch would exceed the limit.
+	// Verdict is ErrRequeue: collect (key, currentCount) in a single pass so each
+	// sync.Map key is read exactly once (halves map operations compared to a separate
+	// check loop followed by an increment loop).
+	type kv struct {
+		key   string
+		count int64
+	}
+	pairs := make([]kv, 0, len(batch.deliveries))
 	for _, d := range batch.deliveries {
 		key := batchCounterBKey(c.tag, d.raw.MessageId, d.raw.DeliveryTag)
 		var count int64
@@ -436,18 +443,13 @@ func (c *BatchConsumer[M]) applyBatchCounterB(batch *Batch[M], handlerErr error)
 			c.cm.RecordMaxRedeliveries(c.queue, "in-process")
 			return fmt.Errorf("%w (in-process counter exceeded)", ErrMaxRedeliveries)
 		}
+		pairs = append(pairs, kv{key, count})
 	}
 
-	// All deliveries are under the limit: increment counters and allow requeue.
-	for _, d := range batch.deliveries {
-		key := batchCounterBKey(c.tag, d.raw.MessageId, d.raw.DeliveryTag)
-		var count int64
-		if v, ok := cs.m.Load(key); ok {
-			if n, ok2 := v.(int64); ok2 {
-				count = n
-			}
-		}
-		cs.m.Store(key, count+1)
+	// All deliveries are under the limit: increment counters (reuse collected pairs —
+	// no second sync.Map read needed).
+	for _, p := range pairs {
+		cs.m.Store(p.key, p.count+1)
 	}
 	return handlerErr
 }
