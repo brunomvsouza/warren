@@ -1274,6 +1274,81 @@ func TestBatchConsumer_HandlerTimeout_CounterB_LimitsRequeue(t *testing.T) {
 	assert.Equal(t, 1, capCM.inProcessCount, "RecordMaxRedeliveries must be called exactly once with cause=in-process")
 }
 
+// TestBatchConsumer_HandlerTimeout_CompletesBeforeDeadline_AppliesNormalVerdict verifies
+// that when the handler returns before the HandlerTimeout fires, the handlerDone branch
+// of the timeout select is taken and the normal auto-verdict logic applies (ack on nil
+// return; RecordHandler outcome == "ack").
+func TestBatchConsumer_HandlerTimeout_CompletesBeforeDeadline_AppliesNormalVerdict(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	capCM := &captureConsumerMetrics{}
+
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		Size(1).
+		HandlerTimeout(200 * time.Millisecond). // generous timeout; handler returns immediately
+		Metrics(capCM).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	var mu sync.Mutex
+	type ackCall struct {
+		tag      uint64
+		multiple bool
+	}
+	var ackCalls []ackCall
+
+	fa := &fakeAcknowledger{
+		ackFn: func(tag uint64, multiple bool) error {
+			mu.Lock()
+			ackCalls = append(ackCalls, ackCall{tag, multiple})
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+			return nil // returns immediately; well before the 200 ms deadline
+		})
+	}()
+
+	deliveryCh <- makeJSONDelivery(1, "fast", fa)
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(ackCalls) > 0
+	}, time.Second, 10*time.Millisecond, "expected an ack after handler completes before deadline")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	ackSnapshot := append([]ackCall(nil), ackCalls...)
+	mu.Unlock()
+
+	require.Len(t, ackSnapshot, 1, "exactly one basic.ack frame")
+	assert.Equal(t, uint64(1), ackSnapshot[0].tag)
+	assert.True(t, ackSnapshot[0].multiple, "ack must use multiple=true")
+
+	// Verify RecordHandler was called with outcome "ack" (not a timeout variant).
+	capCM.mu.Lock()
+	defer capCM.mu.Unlock()
+	require.Len(t, capCM.records, 1)
+	assert.Equal(t, "q", capCM.records[0].queue)
+	assert.Equal(t, "ack", capCM.records[0].outcome, "outcome must be 'ack', not a timeout variant")
+}
+
 // captureMaxRedeliveriesMetrics records RecordMaxRedeliveries calls.
 type captureMaxRedeliveriesMetrics struct {
 	metrics.NoOpConsumerMetrics

@@ -880,29 +880,6 @@ covers the residual audit and tooling-based prevention.
 
 ---
 
-### LATER-28 — `handlerDone` branch in timeout select is never exercised
-
-**Context:** `batch_consumer.go:265` — the `case handlerErr := <-handlerDone` branch inside the
-`HandlerTimeout` select block has 0 test hits. Both existing timeout tests make the handler block
-until `hCtx.Done()` fires, so only the `case <-hCtx.Done()` branch is ever reached. The path where
-the handler completes before the deadline — which is the success path for `HandlerTimeout` — is
-completely untested.
-
-**Impact:** If `applyBatchVerdict` has a bug on this path (e.g. incorrect outcome recording, wrong
-ack verdict), it would go undetected. This is production code that runs for every
-`HandlerTimeout`-enabled consumer whose handler finishes within the deadline.
-
-**Evidence:** `/ship` test-engineer — Critical gap 1 (2026-05-24, post-T23 review).
-
-**Suggested solution:** Add `TestBatchConsumer_HandlerTimeout_CompletesBeforeDeadline_AppliesNormalVerdict`:
-configure `HandlerTimeout(200ms)`, handler returns immediately with `nil`, verify that
-`applyBatchVerdict` emits an `ack` (not the timeout nack) and `RecordHandler` records
-outcome `"ack"` (not `"timeout_nack_no_requeue"`).
-
-**Prerequisites:** None.
-
----
-
 ### LATER-29 — `TopologyHint` has 0% test coverage
 
 **Context:** `batch_consumer_builder.go:120-127` — the `TopologyHint(q Queue)` builder method is
