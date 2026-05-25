@@ -173,6 +173,9 @@ type BatchConsumer[M any] struct {
 // Consume starts accumulating messages from the configured queue and dispatching
 // batches to h. It blocks until ctx is cancelled.
 //
+// Cancelling ctx flushes any pending batch before returning; set HandlerTimeout
+// to bound shutdown latency when batch handlers may block indefinitely.
+//
 // May only be called once per consumer; create a new consumer via Build() to restart.
 func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error {
 	if !c.started.CompareAndSwap(false, true) {
@@ -270,29 +273,40 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 				hCancel()
 				elapsed := time.Since(start)
 				if errors.Is(hCtx.Err(), context.DeadlineExceeded) {
-					c.cm.RecordHandlerTimeout(c.queue)
-					requeue := c.timeoutVerdict == TimeoutNackRequeue
-					outcome := "timeout_nack_no_requeue"
-					if requeue {
-						outcome = "timeout_nack_requeue"
-					}
-					c.cm.RecordHandler(c.queue, outcome, elapsed)
-					// When the timeout verdict is requeue, apply counter B so that
-					// MaxRedeliveries is enforced even for timed-out batches.  A
-					// message whose handler consistently exceeds HandlerTimeout would
-					// otherwise loop indefinitely regardless of MaxRedeliveries.
-					if requeue {
-						syntheticErr := c.applyBatchCounterB(batch, ErrRequeue)
-						requeue = errors.Is(syntheticErr, ErrRequeue)
-					}
-					// Suppress auto-verdict and apply the (potentially counter-B-adjusted) timeout verdict.
+					// Only emit timeout metrics and apply the timeout verdict when the
+					// handler has not already applied its own verdict (e.g. called
+					// batch.Ack() before the deadline expired). Emitting timeout metrics
+					// for a batch that was already acked would produce misleading
+					// dashboard spikes that do not correspond to a real nack.
 					batch.mu.Lock()
-					if !batch.acked {
-						batch.acked = true
-						batch.mu.Unlock()
-						_ = batch.nackAll(requeue)
-					} else {
-						batch.mu.Unlock()
+					alreadyAcked := batch.acked
+					batch.mu.Unlock()
+
+					if !alreadyAcked {
+						c.cm.RecordHandlerTimeout(c.queue)
+						requeue := c.timeoutVerdict == TimeoutNackRequeue
+						outcome := "timeout_nack_no_requeue"
+						if requeue {
+							outcome = "timeout_nack_requeue"
+						}
+						c.cm.RecordHandler(c.queue, outcome, elapsed)
+						// When the timeout verdict is requeue, apply counter B so that
+						// MaxRedeliveries is enforced even for timed-out batches.  A
+						// message whose handler consistently exceeds HandlerTimeout would
+						// otherwise loop indefinitely regardless of MaxRedeliveries.
+						if requeue {
+							syntheticErr := c.applyBatchCounterB(batch, ErrRequeue)
+							requeue = errors.Is(syntheticErr, ErrRequeue)
+						}
+						// Suppress auto-verdict and apply the (potentially counter-B-adjusted) timeout verdict.
+						batch.mu.Lock()
+						if !batch.acked {
+							batch.acked = true
+							batch.mu.Unlock()
+							_ = batch.nackAll(requeue)
+						} else {
+							batch.mu.Unlock()
+						}
 					}
 				}
 				<-handlerDone // drain goroutine

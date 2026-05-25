@@ -232,6 +232,31 @@ func TestBatch_Ack_Idempotent(t *testing.T) {
 	assert.Equal(t, 1, ackCalls, "second Ack must be a no-op")
 }
 
+// TestBatch_Nack_Idempotent verifies that calling Batch.Nack twice only emits one
+// AMQP frame, mirroring the idempotency guarantee of Batch.Ack.
+func TestBatch_Nack_Idempotent(t *testing.T) {
+	var mu sync.Mutex
+	var nackCalls int
+
+	fa := &fakeAcknowledger{
+		nackFn: func(_ uint64, _ bool, _ bool) error {
+			mu.Lock()
+			nackCalls++
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	d1 := makeFakeDelivery(1, "m", fa)
+	batch := newTestBatch([]*Delivery[string]{d1})
+	require.NoError(t, batch.Nack(false))
+	require.NoError(t, batch.Nack(false)) // second call: idempotent
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, nackCalls, "second Nack must be a no-op")
+}
+
 // TestBatch_Messages returns decoded payloads.
 func TestBatch_Messages(t *testing.T) {
 	fa := &fakeAcknowledger{}

@@ -409,14 +409,18 @@ funções chamá-la. Alternativamente, colapsar `wireReturnPool` em `wireFakePoo
 
 ---
 
-### LATER-33 — `MessageId` sem limite de comprimento como chave do `sync.Map` em `applyBatchCounterB`
+### LATER-33 — `MessageId` sem limite de comprimento como chave do `sync.Map` em `applyBatchCounterB` e `consumer.go`
 
-**Contexto:** `batch_consumer.go:batchCounterBKey` — constrói a chave do `sync.Map` do counter B
-como `"mid:" + msgID` quando `MessageId` não é vazio, sem nenhuma validação de comprimento. Um
-broker comprometido ou produtor malicioso pode enviar mensagens com `MessageId` de comprimento
-arbitrário (ex: 1 MB), causando acúmulo de strings longas no map. O problema é idêntico ao
-mapeado em LATER-24 para `returnTagMap`, mas ocorre na instância `counterState` do
-`BatchConsumer`.
+**Contexto:** Dois call sites afetados:
+- `batch_consumer.go:batchCounterBKey` — constrói a chave do `sync.Map` do counter B como
+  `"mid:" + msgID` quando `MessageId` não é vazio, sem nenhuma validação de comprimento.
+- `consumer.go:424` — `counterBKey = "mid:" + raw.MessageId` — mesmo problema, mesma família de
+  chave, mesmo vetor de ataque.
+
+Ambos devem ser corrigidos no mesmo PR. Um broker comprometido ou produtor malicioso pode enviar
+mensagens com `MessageId` de comprimento arbitrário (ex: 1 MB), causando acúmulo de strings longas
+no map. O problema é idêntico ao mapeado em LATER-24 para `returnTagMap`, mas ocorre na instância
+`counterState` do `BatchConsumer` e no `Consumer` base.
 
 **Impacto:** Amplificação de memória dentro de uma sessão de canal (antes do próximo reconnect que
 cria um novo `redeliveryCounter`). Com prefetch padrão de 100 e `MessageId` de 1 MB, a exposição

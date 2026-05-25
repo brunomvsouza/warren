@@ -38,9 +38,16 @@ func FuzzCodecJSONStrict(f *testing.F) {
 	f.Add([]byte(``))
 	f.Add([]byte("   "))
 
+	// fuzzStrictTarget has two known fields; unknown fields must be rejected by
+	// NewJSONStrict (DisallowUnknownFields has no effect on interface{}).
+	type fuzzStrictTarget struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+
 	c := codec.NewJSONStrict()
 	f.Fuzz(func(t *testing.T, data []byte) {
-		var v any
+		var v fuzzStrictTarget
 		// must not panic — error is acceptable
 		_ = c.Decode(data, &v)
 	})

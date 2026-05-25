@@ -882,3 +882,16 @@ func (m *maxRedeliveriesCountingMetrics) RecordMaxRedeliveries(_, cause string) 
 	}
 	m.maxRedeliveries[cause]++
 }
+
+// TestRedeliveryCounter_load_nonInt64ValueReturnsSafeDefault verifies that
+// redeliveryCounter.load returns 0 (the safe default) when the sync.Map
+// holds a value of an unexpected type. This is a programming-error guard
+// introduced by the redeliveryCounter.load refactor (ab10edd); the branch
+// is impossible in normal operation but prevents a panic if the map is
+// accidentally populated with a non-int64 value.
+func TestRedeliveryCounter_load_nonInt64ValueReturnsSafeDefault(t *testing.T) {
+	cs := &redeliveryCounter{}
+	cs.m.Store("key", "not-an-int64") // deliberately corrupt stored type
+	result := cs.load("key")
+	assert.Equal(t, int64(0), result, "non-int64 stored value must return 0 as safe default")
+}

@@ -835,3 +835,39 @@ func TestPublisherConnPool_acquire_returnsTokenOnOpenFnPanic(t *testing.T) {
 	require.NoError(t, err, "acquire after panic must succeed — token must be returned")
 	release()
 }
+
+// TestPublisherConnPool_acquire_returnsTokenOnOpenFnError verifies that when
+// openFn returns an error (non-panic) during acquire, the semaphore token is
+// returned so subsequent acquire calls are not permanently blocked.
+// This covers the normal error path; the panic path is covered by
+// TestPublisherConnPool_acquire_returnsTokenOnOpenFnPanic.
+func TestPublisherConnPool_acquire_returnsTokenOnOpenFnError(t *testing.T) {
+	callCount := 0
+	pool := newPublisherConnPool(1, func() (publisherEntry, error) {
+		callCount++
+		if callCount == 1 {
+			return publisherEntry{}, errors.New("simulated openFn error")
+		}
+		// Second call: return a valid entry.
+		fake := newFakePubCh(true)
+		return publisherEntry{
+			ch:           fake,
+			tracker:      nil,
+			closeCh:      fake.closedCh,
+			returnTagMap: new(sync.Map),
+		}, nil
+	})
+
+	// First acquire: openFn returns an error. The token must be returned.
+	_, _, err := pool.acquire(context.Background())
+	require.Error(t, err, "expected error from openFn")
+
+	// Second acquire: must succeed within a short deadline. If the token was
+	// lost (pre-fix), this blocks until the context times out.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	_, release, err := pool.acquire(ctx)
+	require.NoError(t, err, "acquire after error must succeed — token must be returned")
+	release()
+}
