@@ -880,6 +880,127 @@ covers the residual audit and tooling-based prevention.
 
 ---
 
+### LATER-28 — `handlerDone` branch in timeout select is never exercised
+
+**Context:** `batch_consumer.go:265` — the `case handlerErr := <-handlerDone` branch inside the
+`HandlerTimeout` select block has 0 test hits. Both existing timeout tests make the handler block
+until `hCtx.Done()` fires, so only the `case <-hCtx.Done()` branch is ever reached. The path where
+the handler completes before the deadline — which is the success path for `HandlerTimeout` — is
+completely untested.
+
+**Impact:** If `applyBatchVerdict` has a bug on this path (e.g. incorrect outcome recording, wrong
+ack verdict), it would go undetected. This is production code that runs for every
+`HandlerTimeout`-enabled consumer whose handler finishes within the deadline.
+
+**Evidence:** `/ship` test-engineer — Critical gap 1 (2026-05-24, post-T23 review).
+
+**Suggested solution:** Add `TestBatchConsumer_HandlerTimeout_CompletesBeforeDeadline_AppliesNormalVerdict`:
+configure `HandlerTimeout(200ms)`, handler returns immediately with `nil`, verify that
+`applyBatchVerdict` emits an `ack` (not the timeout nack) and `RecordHandler` records
+outcome `"ack"` (not `"timeout_nack_no_requeue"`).
+
+**Prerequisites:** None.
+
+---
+
+### LATER-29 — `TopologyHint` has 0% test coverage
+
+**Context:** `batch_consumer_builder.go:120-127` — the `TopologyHint(q Queue)` builder method is
+never invoked in any test. Neither the "quorum queue with delivery limit → disables counter B" path
+nor the "non-quorum → keeps counter B enabled" path is exercised.
+
+**Impact:** `counterBDisabled` can be set incorrectly without any test catching it. A regression
+that always disables (or always enables) counter B for quorum queues would silently pass the suite.
+
+**Evidence:** `/ship` test-engineer — Important gap 7 (2026-05-24, post-T23 review).
+
+**Suggested solution:**
+- `TestBatchConsumerBuilder_TopologyHint_QuorumWithLimit_DisablesCounterB` — asserts
+  `counterBDisabled == true` after `TopologyHint(Queue{Type: QueueTypeQuorum, DeliveryLimit: 5})`.
+- `TestBatchConsumerBuilder_TopologyHint_QuorumNoLimit_KeepsCounterBEnabled` — asserts
+  `counterBDisabled == false` after `TopologyHint(Queue{Type: QueueTypeQuorum, DeliveryLimit: 0})`.
+- `TestBatchConsumerBuilder_TopologyHint_ClassicQueue_KeepsCounterBEnabled` — non-quorum queue.
+
+**Prerequisites:** None.
+
+---
+
+### LATER-30 — `ackAll` / `nackAll` error paths have 0 test hits
+
+**Context:** `batch_consumer.go:113-115` and `125-127` — the branches that handle an error returned
+by `h.raw.Ack` / `h.raw.Nack` inside `ackAll` and `nackAll` are never exercised. All current tests
+use a `fakeAcknowledger` with `ackFn`/`nackFn` returning `nil`.
+
+**Impact:** If the error-handling logic in these branches regresses (e.g., wrong error wrapping,
+missing return), no test would catch it.
+
+**Evidence:** `/ship` test-engineer — Important gap 8 (2026-05-24, post-T23 review).
+
+**Suggested solution:**
+- `TestBatch_AckAll_AcknowledgerError_ReturnsWrappedErr` — `fakeAcknowledger.ackFn` returns
+  `errors.New("channel closed")`; assert that `batch.Ack()` returns a non-nil error.
+- `TestBatch_NackAll_AcknowledgerError_ReturnsWrappedErr` — same for `nackFn`.
+- `TestBatch_Ack_EmptyBatch_NoFrame` / `TestBatch_Nack_EmptyBatch_NoFrame` — create a `Batch[string]`
+  with no deliveries and verify that `Ack()`/`Nack()` return `nil` without calling the acknowledger
+  (`highest()` returns nil → ackAll/nackAll short-circuit at the nil check on lines 110/122).
+
+**Prerequisites:** None.
+
+---
+
+### LATER-31 — `applyBatchCounterB` reads each sync.Map key twice per delivery
+
+**Context:** `batch_consumer.go:415-442` — the check loop (lines 415-430) and the increment loop
+(lines 433-444) each call `cs.m.Load` for every delivery key, so each key is read twice from the
+`sync.Map` per batch dispatch. Because `Consume` is single-goroutine there is no correctness risk,
+but every key is loaded twice unnecessarily.
+
+**Impact:** Negligible at typical batch sizes (≤ 100); noticeable under microbenchmark at batch
+sizes ≥ 1000. Not a production blocker.
+
+**Evidence:** `/ship` code-reviewer — Suggestion (2026-05-24, post-T23 review).
+
+**Suggested solution:** Collect `(key, currentCount)` pairs into a local `[]struct{key string; count int64}`
+slice in the first loop, reuse them in the second. Halves sync.Map reads with no added complexity:
+```go
+type kv struct{ key string; count int64 }
+pairs := make([]kv, len(batch.deliveries))
+for i, d := range batch.deliveries {
+    key := batchCounterBKey(c.tag, d.raw.MessageId, d.raw.DeliveryTag)
+    var count int64
+    if v, ok := cs.m.Load(key); ok {
+        if n, ok2 := v.(int64); ok2 { count = n }
+    }
+    if count+1 > int64(c.maxRedeliveries) { /* ... */ }
+    pairs[i] = kv{key, count}
+}
+for _, p := range pairs { cs.m.Store(p.key, p.count+1) }
+```
+
+**Prerequisites:** None.
+
+---
+
+### LATER-32 — `BatchConsumer` counter B does not emit a warning log when max redeliveries is hit
+
+**Context:** `batch_consumer.go:428` — `Consumer[M].applyCounterB` emits a `logger.Warningf`
+(`"warren: max redeliveries exceeded…"`) when counter B fires. `BatchConsumer[M]` silently records
+the metric (`c.cm.RecordMaxRedeliveries`) without any log output. The `mc` field on `BatchConsumer`
+carries the managed connection (which has `opts.logger`) but the warning is missing.
+
+**Impact:** Operational asymmetry: a `Consumer[M]` emits a warning that appears in log aggregators
+when counter B fires; a `BatchConsumer[M]` does not, making the event invisible unless the operator
+is actively scraping the `RecordMaxRedeliveries` metric.
+
+**Evidence:** `/ship` code-reviewer — Suggestion (2026-05-24, post-T23 review).
+
+**Suggested solution:** Add a `Warningf` call in `applyBatchCounterB` immediately before
+`return fmt.Errorf("%w ...", ErrMaxRedeliveries)`, mirroring `Consumer[M]`'s log line.
+
+**Prerequisites:** None.
+
+---
+
 ### LATER-26 — `wireReturnPool` e `wireFakePool` são near-duplicatas
 
 **Contexto:** `publisher_t13_test.go:wireReturnPool` e `publisher_test.go:wireFakePool` —

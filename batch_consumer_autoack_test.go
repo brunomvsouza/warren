@@ -1191,6 +1191,89 @@ func TestBatchConsumer_MaxRedeliveries_CounterB_InProcess(t *testing.T) {
 	assert.Equal(t, 1, capCM.inProcessCount, "RecordMaxRedeliveries must be called once with cause=in-process")
 }
 
+// TestBatchConsumer_HandlerTimeout_CounterB_LimitsRequeue verifies that
+// HandlerTimeoutVerdict(TimeoutNackRequeue) and MaxRedeliveries(n) compose correctly:
+// counter B is incremented on each timeout-triggered requeue and the (n+1)-th timeout
+// causes Nack(requeue=false) instead of Nack(requeue=true), preventing infinite loops.
+func TestBatchConsumer_HandlerTimeout_CounterB_LimitsRequeue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	capCM := &captureMaxRedeliveriesMetrics{}
+
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		Size(1).
+		HandlerTimeout(20 * time.Millisecond).
+		HandlerTimeoutVerdict(TimeoutNackRequeue).
+		MaxRedeliveries(2).
+		Metrics(capCM).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	var mu sync.Mutex
+	type nackCall struct {
+		tag               uint64
+		multiple, requeue bool
+	}
+	var nackCalls []nackCall
+
+	const msgID = "timeout-counterb-msg-01"
+	fa := &fakeAcknowledger{
+		nackFn: func(tag uint64, multiple, requeue bool) error {
+			mu.Lock()
+			nackCalls = append(nackCalls, nackCall{tag, multiple, requeue})
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(hCtx context.Context, _ *Batch[string]) error {
+			<-hCtx.Done() // always block until HandlerTimeout fires
+			return hCtx.Err()
+		})
+	}()
+
+	// Send the same MessageID three times to accumulate counter B across timeouts.
+	for i := uint64(1); i <= 3; i++ {
+		deliveryCh <- amqp091.Delivery{
+			DeliveryTag:  i,
+			MessageId:    msgID,
+			Body:         []byte(`"hello"`),
+			Acknowledger: fa,
+		}
+		// Wait for each individual nack before sending the next delivery.
+		assert.Eventually(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(nackCalls) == int(i)
+		}, 2*time.Second, 10*time.Millisecond, "expected nack #%d after timeout", i)
+	}
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Len(t, nackCalls, 3)
+	// First two timeouts: counter B is under limit → requeue=true.
+	assert.True(t, nackCalls[0].requeue, "1st timeout must be requeued (count=1 ≤ 2)")
+	assert.True(t, nackCalls[1].requeue, "2nd timeout must be requeued (count=2 ≤ 2)")
+	// Third timeout: count+1=3 > maxRedeliveries=2 → counter B overrides to requeue=false.
+	assert.False(t, nackCalls[2].requeue, "3rd timeout must NOT be requeued (counter B exceeded)")
+	assert.Equal(t, 1, capCM.inProcessCount, "RecordMaxRedeliveries must be called exactly once with cause=in-process")
+}
+
 // captureMaxRedeliveriesMetrics records RecordMaxRedeliveries calls.
 type captureMaxRedeliveriesMetrics struct {
 	metrics.NoOpConsumerMetrics

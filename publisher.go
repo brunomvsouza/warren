@@ -173,15 +173,16 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 	}
 
 	confirmCh := ch.NotifyPublish(make(chan amqp091.Confirmation, buf))
-	// returnCh uses a buffer of 1: amqp091's dispatch goroutine sends basic.return
-	// frames synchronously on the per-connection reader goroutine. An unbuffered
-	// channel would stall the entire connection's reader while the publisher goroutine
-	// is mid-select processing an unrelated confirmation. Buffer 1 absorbs the one
-	// return frame that the AMQP wire guarantee ensures arrives before the paired
-	// basic.ack, so MarkReturned is still always called before Ack/Nack is processed
-	// in the select below — the ordering guarantee is preserved without risking a
-	// reader-goroutine stall under concurrent publish traffic.
-	returnCh := ch.NotifyReturn(make(chan amqp091.Return, 1))
+	// returnCh is intentionally unbuffered. amqp091's per-connection reader goroutine
+	// delivers basic.return frames via a blocking channel send, so the reader stalls
+	// until this goroutine receives. That serialises the sequence:
+	//   basic.return received → MarkReturned called → reader continues → basic.ack dispatched
+	// guaranteeing that MarkReturned always precedes Ack/Nack in the select loop below.
+	// The stall is O(1) (map lookup + write) and only occurs on the error path (mandatory
+	// unroutable messages). A buffered channel would let the reader dispatch the ack before
+	// this goroutine processes the return; with a flat two-case select the scheduler could
+	// then pick confirmCh first, silently losing ErrUnroutable ~50 % of the time.
+	returnCh := ch.NotifyReturn(make(chan amqp091.Return))
 
 	go func() {
 		for {
@@ -671,8 +672,9 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 	// Step 4.5: clean up returnTagMap entries for mandatory publishers only.
 	// For unroutable messages the goroutine already called LoadAndDelete when the
 	// basic.return arrived — those entries are gone by the time Wait returns
-	// (basic.return always precedes basic.ack on the unbuffered returnCh, and Wait
-	// only returns after the ack). For successfully-routed messages no return ever
+	// (basic.return always precedes basic.ack; returnCh is unbuffered so MarkReturned
+	// is always called before the paired ack is processed; see comment above). For
+	// successfully-routed messages no return ever
 	// arrives, so their entries remain and must be removed here. For messages that
 	// failed at PublishWithContext, their entries were also never consumed by a
 	// return, so they are cleaned up here too. Messages that failed at Register had

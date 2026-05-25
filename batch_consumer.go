@@ -277,7 +277,15 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 						outcome = "timeout_nack_requeue"
 					}
 					c.cm.RecordHandler(c.queue, outcome, elapsed)
-					// Suppress auto-verdict and apply the configured timeout verdict.
+					// When the timeout verdict is requeue, apply counter B so that
+					// MaxRedeliveries is enforced even for timed-out batches.  A
+					// message whose handler consistently exceeds HandlerTimeout would
+					// otherwise loop indefinitely regardless of MaxRedeliveries.
+					if requeue {
+						syntheticErr := c.applyBatchCounterB(batch, ErrRequeue)
+						requeue = errors.Is(syntheticErr, ErrRequeue)
+					}
+					// Suppress auto-verdict and apply the (potentially counter-B-adjusted) timeout verdict.
 					batch.mu.Lock()
 					if !batch.acked {
 						batch.acked = true
