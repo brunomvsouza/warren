@@ -34,48 +34,7 @@ Cada item deve conter:
 
 ---
 
-### LATER-02 — `int`/`uint` aceitos em `validateHeaders` mas não coagidos para `int64`/`uint64`
-
-**Contexto:** `message.go:validateHeaderValue` — os tipos `int` e `uint` são aceitos na
-validação (retornam `nil`) porque o comentário do campo `Headers` em `types.go` promete
-"auto-coerce para int64/uint64 at publish time". No entanto, a coerção ainda não foi
-implementada. Quando o publisher (T12) serializar o header via `amqp091.Table`, passar um valor
-Go `int` (não `int64`) pode resultar em erro no encoder do `amqp091-go` ou em comportamento
-não determinístico conforme versão da biblioteca.
-
-**Impacto:** Erro em runtime ao publicar headers com `int`/`uint` nativos, potencialmente
-mascarado por `ErrInvalidMessage` genérico sem indicar qual header falhou. A API promete
-coerção silenciosa; sem implementá-la a promessa é falsa.
-
-**Evidência:** `/ship` code-review + security-auditor MEDIUM-2 em T09/T10.
-
-**Sugestão de solução:** Realizar a coerção dentro de `validateHeaderValue` (ou num `coerceHeaders`
-separado chamado antes da serialização), transformando `int` → `int64` e `uint` → `uint64`
-in-place no mapa antes de passar para o encoder:
-
-```go
-case int:
-    h[key] = int64(v.(int))
-    return nil
-case uint:
-    h[key] = uint64(v.(uint))
-    return nil
-```
-
-Isso exige mudar a assinatura para passar o mapa e a chave, ou criar um passo de normalização
-separado. Avaliar junto com T12 (publisher) quando a serialização de `amqp091.Table` for
-integrada.
-
-**Pré-requisitos:** T12 (`publisher.go`) — só faz sentido implementar quando o caminho de
-serialização existir para validar o round-trip de ponta a ponta.
-
-**Acceptance criteria quando implementado:**
-- `Headers{"count": int(5)}` serializado via `amqp091.Table` sem erro e recebido pelo broker.
-- `Headers{"count": uint(5)}` idem.
-- Teste de integração (tag `integration`) confirma round-trip via `rabbitmqadmin get`.
-- `validateHeaderValue` continua retornando `ErrInvalidMessage` para tipos realmente inválidos.
-
----
+<!-- LATER-02 resolved: commit 48ee170 (fix: coerce int/uint headers to int64/uint64 during validation) -->
 
 ### LATER-05 — `wrapAMQPError` propaga o campo `Reason` do broker verbatim nos erros
 
@@ -99,60 +58,9 @@ continuarem funcionando.
 
 ---
 
-### LATER-06 — Upper bound ausente em `WithChannelPoolSize` / buffer de confirms
+<!-- LATER-06 resolved: commit 65924b5 (fix: add upper bound validation for WithChannelPoolSize) -->
 
-**Contexto:** `publisher.go:openPublisherEntry` — o buffer do canal de confirms é
-`max(poolSize, 8)`. `poolSize` vem de `opts.channelPoolSize` que é validado como `≥ 1` mas não
-tem teto. Um valor extremo (ex: 1_000_000) causa uma alocação massiva de `chan amqp091.Confirmation`
-em cada `openPublisherEntry`.
-
-**Impacto:** Misconfiguration local causa OOM imediato em vez de erro de validação descritivo na
-inicialização. Em infraestrutura compartilhada ou gerenciada, pode ser explorado para DoS.
-
-**Evidência:** `/ship` security-audit T12 — LOW finding.
-
-**Sugestão de solução:**
-1. Adicionar validação de upper bound (ex: 4096) em `validateConnOptions`.
-2. Cap o buffer de confirms em `openPublisherEntry`: `if buf > 4096 { buf = 4096 }`.
-
-**Pré-requisitos:** T12. Pode ser adicionado ao mesmo PR ou em hotfix posterior.
-
----
-
-### LATER-03 — Fuzz target do codec cobre apenas `NewJSON()` com `any` como destino
-
-**Contexto:** `codec/json_fuzz_test.go:16-21` — `FuzzCodecJSON` usa `var v any` como destino de
-decode, o que nunca exercita comportamentos sensíveis a schema (qualquer JSON cabe em
-`interface{}`). Os caminhos divergentes entre `NewJSON()` (lax default, Postel) e
-`NewJSONStrict()` (`DisallowUnknownFields` opt-in) não são distinguidos pelo fuzz engine.
-
-**Impacto:** Panics ou comportamentos inesperados em qualquer dos dois codecs sob inputs
-malformados poderiam não ser detectados antes de chegar em produção. O valor principal do fuzz
-target atual é testar "não panics" — objetivo válido mas incompleto.
-
-**Evidência:** `/ship` code-review + test-engineer gaps T09/T10.
-
-**Sugestão de solução:**
-1. Adicionar um segundo fuzz target `FuzzCodecJSONStrict` que use `NewJSONStrict()`.
-2. Usar uma struct tipada como destino (ex: a `order` já definida em `json_test.go`) para que
-   `DisallowUnknownFields` seja exercitado com inputs reais do fuzz engine.
-3. Adicionar seeds adversariais ao corpus inicial:
-   ```go
-   f.Add(bytes.Repeat([]byte(`[`), 500))        // deeply nested array
-   f.Add([]byte(`{"id":` + strings.Repeat("9", 100) + `}`)) // large integer
-   f.Add([]byte("\xff\xfe"))                     // invalid UTF-8
-   ```
-
-**Pré-requisitos:** Nenhum. Pode ser feito a qualquer momento após T09.
-
-**Acceptance criteria quando implementado:**
-- `FuzzCodecJSON` (lax default) usa struct tipada como destino; comportamento de "aceita unknown
-  field" exercitado por seeds com campos extras.
-- `FuzzCodecJSONStrict` existe e cobre o caminho `DisallowUnknownFields`.
-- Seeds adversariais adicionados ao corpus de ambos os targets.
-- `go test -fuzz=FuzzCodecJSON -fuzztime=60s ./codec` e o equivalente strict passam sem panics.
-
----
+<!-- LATER-03 resolved: commit 7d4dde9 (test(codec): improve fuzz coverage for lax and strict JSON codecs) -->
 
 ### LATER-08 — CI actions pinadas em tags semver mutáveis
 
@@ -409,45 +317,7 @@ funções chamá-la. Alternativamente, colapsar `wireReturnPool` em `wireFakePoo
 
 ---
 
-### LATER-33 — `MessageId` sem limite de comprimento como chave do `sync.Map` em `applyBatchCounterB` e `consumer.go`
-
-**Contexto:** Dois call sites afetados:
-- `batch_consumer.go:batchCounterBKey` — constrói a chave do `sync.Map` do counter B como
-  `"mid:" + msgID` quando `MessageId` não é vazio, sem nenhuma validação de comprimento.
-- `consumer.go:424` — `counterBKey = "mid:" + raw.MessageId` — mesmo problema, mesma família de
-  chave, mesmo vetor de ataque.
-
-Ambos devem ser corrigidos no mesmo PR. Um broker comprometido ou produtor malicioso pode enviar
-mensagens com `MessageId` de comprimento arbitrário (ex: 1 MB), causando acúmulo de strings longas
-no map. O problema é idêntico ao mapeado em LATER-24 para `returnTagMap`, mas ocorre na instância
-`counterState` do `BatchConsumer` e no `Consumer` base.
-
-**Impacto:** Amplificação de memória dentro de uma sessão de canal (antes do próximo reconnect que
-cria um novo `redeliveryCounter`). Com prefetch padrão de 100 e `MessageId` de 1 MB, a exposição
-é ~100 MB por consumidor por ciclo de canal. Não é explorável remotamente sem acesso ao broker;
-não há risco de vazamento de dados.
-
-**Evidência:** `/ship` security-auditor — LOW finding (2026-05-25, post-LATER-32 review).
-OWASP A05:2021 — Security Misconfiguration (resource exhaustion, defence-in-depth gap). Ver
-relatório completo em `batch_consumer.go:applyBatchCounterB`.
-
-**Sugestão de solução:** Truncar `msgID` em `batchCounterBKey` antes de usá-lo como chave:
-
-```go
-const maxMsgIDKeyLen = 512
-if len(msgID) > maxMsgIDKeyLen {
-    msgID = msgID[:maxMsgIDKeyLen]
-}
-```
-
-Aplicar a mesma lógica em `consumer.go:counterBKey` para consistência. Considerar extrair a
-lógica de key construction para `internal/headers` ou um helper compartilhado.
-
-**Pré-requisitos:** [[LATER-24]] (sync.Map memory retention) — agrupar as correções de memória
-do `sync.Map` no mesmo PR para revisão coesa. T37 (amqptest) pode facilitar um teste de
-integração que verifique o bound.
-
----
+<!-- LATER-33 resolved: commit 167f0a4 (fix: truncate MessageId to 512 bytes in redelivery counter B keys) -->
 
 ### LATER-34 — Synchronous-confirm throughput ceiling / async publish API (architecture decision)
 
