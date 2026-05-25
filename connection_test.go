@@ -372,6 +372,42 @@ func TestDial_channelPoolSizeZero_errorMentionsWithChannelPoolSize(t *testing.T)
 	assert.Contains(t, err.Error(), "WithChannelPoolSize")
 }
 
+// LATER-06: upper bound on WithChannelPoolSize —————————————————————————————
+
+func TestDial_channelPoolSizeAboveMax_returnsErrInvalidOptions(t *testing.T) {
+	ctx := context.Background()
+	_, err := warren.Dial(ctx, warren.WithChannelPoolSize(4097))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions),
+		"WithChannelPoolSize(4097) must return ErrInvalidOptions; got: %v", err)
+}
+
+func TestDial_channelPoolSizeAtMax_isValid(t *testing.T) {
+	// 4096 is the upper bound itself — must not be rejected by validation.
+	// We use a dialer that always fails so the test never reaches the broker
+	// and no goroutines are leaked.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := warren.Dial(ctx,
+		warren.WithChannelPoolSize(4096),
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
+			return nil, errors.New("no broker")
+		}),
+	)
+	// ErrInvalidOptions would mean the option value itself was rejected.
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
+		"WithChannelPoolSize(4096) must be accepted by validation; got: %v", err)
+}
+
+func TestDial_channelPoolSizeAboveMax_errorMentionsWithChannelPoolSize(t *testing.T) {
+	ctx := context.Background()
+	_, err := warren.Dial(ctx, warren.WithChannelPoolSize(1_000_000))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "WithChannelPoolSize",
+		"error must mention the offending option name")
+}
+
 // — WithHeartbeat: negative value does not fail validation ——————————————
 
 func TestDial_negativeHeartbeat_doesNotReturnErrInvalidOptions(t *testing.T) {

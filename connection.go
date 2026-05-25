@@ -661,6 +661,13 @@ func applyConnDefaults(opts *connOptions) {
 // risk OOM on broker and client; use chunked publishing for large payloads.
 const frameMaxHardCeiling = 104_857_600 // 100 MiB
 
+// channelPoolSizeMax is the upper bound for WithChannelPoolSize. Values above
+// this cause a large channel-confirm buffer allocation in openPublisherEntry
+// (one buffered channel of that size per pool entry) and risk OOM under
+// misconfiguration. 4096 channels per TCP connection is already well above any
+// realistic workload; values beyond this indicate a configuration error.
+const channelPoolSizeMax = 4096
+
 func validateConnOptions(opts *connOptions) error {
 	// FrameMax: zero means server-driven (ok). [1,4095] violates the spec minimum.
 	if opts.frameMax > 0 && opts.frameMax < 4096 {
@@ -684,6 +691,10 @@ func validateConnOptions(opts *connOptions) error {
 	if opts.channelPoolSize <= 0 {
 		return fmt.Errorf("%w: WithChannelPoolSize must be ≥ 1; got %d",
 			ErrInvalidOptions, opts.channelPoolSize)
+	}
+	if opts.channelPoolSize > channelPoolSizeMax {
+		return fmt.Errorf("%w: WithChannelPoolSize must be ≤ %d; got %d",
+			ErrInvalidOptions, channelPoolSizeMax, opts.channelPoolSize)
 	}
 
 	// SASL EXTERNAL: fail-closed

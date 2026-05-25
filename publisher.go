@@ -176,6 +176,9 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 	closeCh := ch.NotifyClose(make(chan *amqp091.Error, 1))
 
 	buf := max(poolSize, 8)
+	if buf > 4096 {
+		buf = 4096
+	}
 
 	entry := publisherEntry{
 		ch:           ch,
