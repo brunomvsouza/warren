@@ -176,8 +176,11 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 	closeCh := ch.NotifyClose(make(chan *amqp091.Error, 1))
 
 	buf := max(poolSize, 8)
-	if buf > 4096 {
-		buf = 4096
+	// Cap at channelPoolSizeMax: validation already rejects poolSize above this
+	// value, but openPublisherEntry may be called with internal pool sizes before
+	// validation runs, so we enforce the ceiling here too to keep both in sync.
+	if buf > channelPoolSizeMax {
+		buf = channelPoolSizeMax
 	}
 
 	entry := publisherEntry{

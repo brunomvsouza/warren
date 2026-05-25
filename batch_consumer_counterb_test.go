@@ -5,6 +5,7 @@ package warren
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -28,4 +29,21 @@ func TestBatchCounterBKey_emptyMessageId_usesFallback(t *testing.T) {
 	key := batchCounterBKey("ctag-abc", "", 42)
 	assert.True(t, strings.HasPrefix(key, "dlv:"),
 		"empty MessageId must use dlv: key family; got %q", key)
+	assert.Contains(t, key, "ctag-abc",
+		"fallback key must embed the consumerTag; got %q", key)
+	assert.Contains(t, key, "42",
+		"fallback key must embed the deliveryTag; got %q", key)
+}
+
+// TestBatchCounterBKey_multibyteMessageId_truncatesAtRuneBoundary verifies
+// that batchCounterBKey delegates to counterBKeyForMsgID which truncates at a
+// rune boundary, so the resulting key is always valid UTF-8.
+func TestBatchCounterBKey_multibyteMessageId_truncatesAtRuneBoundary(t *testing.T) {
+	// "中" is U+4E2D, 3 bytes in UTF-8. Build a string that will cross the limit.
+	longID := strings.Repeat("中", maxMsgIDKeyLen)
+	key := batchCounterBKey("ctag-abc", longID, 1)
+	assert.True(t, utf8.ValidString(key),
+		"truncated key must be valid UTF-8; got %q", key)
+	assert.LessOrEqual(t, len(key), len("mid:")+maxMsgIDKeyLen,
+		"truncated key must not exceed the length bound")
 }

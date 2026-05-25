@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 	"github.com/stretchr/testify/assert"
@@ -946,6 +947,23 @@ func TestConsumer_counterBKey_longMessageId_isTruncated(t *testing.T) {
 		"counterBKey must truncate MessageId to maxMsgIDKeyLen bytes")
 }
 
+// TestConsumer_counterBKey_multibyteMessageId_truncatesAtRuneBoundary verifies
+// that truncation never splits a multi-byte UTF-8 rune, so the resulting key
+// is always valid UTF-8. A MessageId built from 3-byte CJK characters just
+// long enough to cross the byte boundary is used as the adversarial input.
+func TestConsumer_counterBKey_multibyteMessageId_truncatesAtRuneBoundary(t *testing.T) {
+	// "中" is U+4E2D, encoded as 3 bytes (0xE4 0xB8 0xAD) in UTF-8.
+	// Repeat enough times to exceed maxMsgIDKeyLen bytes.
+	longID := strings.Repeat("中", maxMsgIDKeyLen) // 3×maxMsgIDKeyLen bytes
+	key := counterBKeyForMsgID(longID)
+	// The key must be valid UTF-8 — no rune was split at the cut point.
+	assert.True(t, utf8.ValidString(key),
+		"truncated key must be valid UTF-8; got %q", key)
+	// The key must still be bounded.
+	assert.LessOrEqual(t, len(key), len("mid:")+maxMsgIDKeyLen,
+		"truncated key must not exceed the length bound")
+}
+
 // TestConsumer_counterBKey_shortMessageId_isNotTruncated verifies that
 // MessageId values within the limit pass through unchanged.
 func TestConsumer_counterBKey_shortMessageId_isNotTruncated(t *testing.T) {
@@ -956,9 +974,14 @@ func TestConsumer_counterBKey_shortMessageId_isNotTruncated(t *testing.T) {
 }
 
 // TestConsumer_counterBKey_emptyMessageId_usesFallback verifies that an
-// empty MessageId uses the "dlv:" family as before.
+// empty MessageId uses the "dlv:" family and embeds both consumerTag and
+// deliveryTag so the key is unique per in-flight delivery.
 func TestConsumer_counterBKey_emptyMessageId_usesFallback(t *testing.T) {
 	key := counterBKeyForDeliveryTag("ctag-abc", 42)
 	assert.True(t, strings.HasPrefix(key, "dlv:"),
 		"empty MessageId must use dlv: key family; got %q", key)
+	assert.Contains(t, key, "ctag-abc",
+		"fallback key must embed the consumerTag; got %q", key)
+	assert.Contains(t, key, "42",
+		"fallback key must embed the deliveryTag; got %q", key)
 }

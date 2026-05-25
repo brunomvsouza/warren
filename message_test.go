@@ -197,6 +197,19 @@ func TestMessage_validateHeaders_coercesIntInNestedHeaders(t *testing.T) {
 	assert.IsType(t, int64(0), got, "int must be coerced to int64 in nested Headers")
 }
 
+func TestMessage_validateHeaders_coercesIntAndUintInSlice(t *testing.T) {
+	// int and uint inside []any must be coerced in-place to int64/uint64,
+	// matching the map-level coercion in validateHeadersDepth.
+	s := []any{int(99), uint(7), "unchanged"}
+	m := Message[struct{}]{Headers: Headers{"k": s}}
+	require.NoError(t, m.validateHeaders())
+	assert.IsType(t, int64(0), s[0], "int element must be coerced to int64")
+	assert.EqualValues(t, int64(99), s[0])
+	assert.IsType(t, uint64(0), s[1], "uint element must be coerced to uint64")
+	assert.EqualValues(t, uint64(7), s[1])
+	assert.Equal(t, "unchanged", s[2], "string element must not be modified")
+}
+
 func TestMessage_validateHeaders_rejectsExcessiveNesting(t *testing.T) {
 	// Build a Headers nested maxHeaderDepth+2 levels deep to exceed the limit.
 	deepest := Headers{"leaf": "value"}

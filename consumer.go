@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
@@ -54,11 +55,27 @@ const maxMsgIDKeyLen = 512
 
 // counterBKeyForMsgID builds the "mid:<MessageId>" sync.Map key for redelivery
 // counter B, truncating MessageId to maxMsgIDKeyLen bytes when necessary.
+// Truncation is done at a UTF-8 rune boundary so the resulting key is always
+// valid UTF-8, which is safe to log, trace, or export.
 func counterBKeyForMsgID(msgID string) string {
 	if len(msgID) > maxMsgIDKeyLen {
-		msgID = msgID[:maxMsgIDKeyLen]
+		msgID = truncateAtRuneBoundary(msgID, maxMsgIDKeyLen)
 	}
 	return "mid:" + msgID
+}
+
+// truncateAtRuneBoundary returns s[:n] stepped back to the nearest rune start,
+// so the result is always valid UTF-8. If n >= len(s) the original string is
+// returned unchanged.
+func truncateAtRuneBoundary(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	// Walk backwards from n until we land on a rune-start byte.
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // counterBKeyForDeliveryTag builds the "dlv:<consumerTag>:<deliveryTag>" key
