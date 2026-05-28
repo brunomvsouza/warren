@@ -687,10 +687,10 @@ before Phase 5 can close.
 
 ## Phase 6 — Codecs + OTel observability
 
-### [ ] T24 — `codec/protobuf.go` · S
+### [x] T24 — `codec/protobuf.go` · S
 - **Acceptance:**
-  - [ ] `codec.NewProtobuf()` round-trips any `proto.Message`.
-  - [ ] `ContentType()` returns `application/x-protobuf`.
+  - [x] `codec.NewProtobuf()` round-trips any `proto.Message`.
+  - [x] `ContentType()` returns `application/x-protobuf`.
 - **Verify:** Round-trip test with a representative `.proto`-generated type + fuzz target.
 - **Files:** `codec/protobuf.go`, `codec/protobuf_test.go`, `codec/protobuf_fuzz_test.go`.
 - **Deps:** T09.
