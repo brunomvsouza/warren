@@ -69,6 +69,17 @@ func TestNewProtobuf_Encode_nonProtoMessage_returnsErrInvalidMessage(t *testing.
 	assert.True(t, errors.Is(err, codec.ErrInvalidMessage), "expected codec.ErrInvalidMessage, got: %v", err)
 }
 
+func TestNewProtobuf_Encode_nilProtoPointer_returnsErrInvalidMessage(t *testing.T) {
+	c := codec.NewProtobuf()
+	var ts *timestamppb.Timestamp // typed-nil proto.Message
+	// A typed-nil pointer marshals to empty bytes with no error, which would
+	// silently publish an empty body. Encode must reject it with
+	// ErrInvalidMessage, mirroring Decode's nil-destination guard.
+	_, err := c.Encode(ts)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, codec.ErrInvalidMessage), "expected codec.ErrInvalidMessage, got: %v", err)
+}
+
 func TestNewProtobuf_Decode_nonProtoMessage_returnsErrInvalidMessage(t *testing.T) {
 	c := codec.NewProtobuf()
 	var o order
