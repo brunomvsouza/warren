@@ -350,7 +350,7 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 
 			// Decode payload; nack invalid messages individually without batching.
 			var body M
-			if err := safeDecodeConsumer(c.codec, d.Body, d.Headers, &body); err != nil {
+			if err := safeDecodeConsumer(c.codec, d.Body, d.Headers, d.ContentType, &body); err != nil {
 				_ = d.Nack(false, false)
 				continue
 			}

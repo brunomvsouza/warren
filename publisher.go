@@ -420,13 +420,13 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 		return msg, nil, fmt.Errorf("%w: Body must not be nil", ErrInvalidMessage)
 	}
 
-	body, ceHeaders, err := encodeBody(p.codec, msg.Body)
+	body, ceHeaders, ceContentType, err := encodeBody(p.codec, msg.Body)
 	if err != nil {
 		return msg, nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
-	// A HeaderCodec (e.g. CloudEvents binary mode) returns headers that travel
-	// alongside the body. Merge them into a fresh map so the caller's Headers
-	// map is never mutated; codec headers win on key conflict.
+	// A HeaderCodec (e.g. CloudEvents binary mode) returns headers and a
+	// content-type that travel alongside the body. Merge headers into a fresh map
+	// so the caller's Headers map is never mutated; codec headers win on conflict.
 	if len(ceHeaders) > 0 {
 		merged := make(Headers, len(msg.Headers)+len(ceHeaders))
 		for k, v := range msg.Headers {
@@ -436,6 +436,11 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 			merged[k] = v
 		}
 		msg.Headers = merged
+	}
+	// The codec's content-type (e.g. CloudEvents datacontenttype) is authoritative
+	// for the body it produced, so it overrides any default or caller value.
+	if ceContentType != "" {
+		msg.ContentType = ceContentType
 	}
 
 	// Local payload guardrail: reject before opening a channel so the publisher
@@ -448,14 +453,15 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 	return msg, body, nil
 }
 
-// encodeBody encodes the body, returning any AMQP headers a HeaderCodec wants to
-// travel alongside it. For a plain Codec the headers result is nil.
-func encodeBody(c codec.Codec, body any) ([]byte, map[string]any, error) {
+// encodeBody encodes the body, returning any AMQP headers and content-type a
+// HeaderCodec wants to travel alongside it. For a plain Codec the headers result
+// is nil and the content-type is empty.
+func encodeBody(c codec.Codec, body any) ([]byte, map[string]any, string, error) {
 	if hc, ok := c.(codec.HeaderCodec); ok {
 		return hc.EncodeWithHeaders(body)
 	}
 	b, err := c.Encode(body)
-	return b, nil, err
+	return b, nil, "", err
 }
 
 // publishOnce performs a single publish attempt (no retry logic).

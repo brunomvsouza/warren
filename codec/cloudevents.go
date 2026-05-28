@@ -1,116 +1,90 @@
 package codec
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
+
+	"github.com/cloudevents/sdk-go/v2/event"
+	"github.com/cloudevents/sdk-go/v2/types"
 )
 
-// CloudEvent is the payload type for the CloudEvents codecs. It models a
-// CloudEvents v1.0 event (https://github.com/cloudevents/spec). Use it as the
-// message type M with NewCloudEventsStructured or NewCloudEventsBinary.
-//
-// Data holds the raw event payload bytes. In structured mode JSON data is
-// inlined under the "data" member and any other data is base64-encoded under
-// "data_base64". In binary mode Data is the AMQP message body and the context
-// attributes travel as ce-* headers.
-type CloudEvent struct {
-	// Required context attributes.
-	ID          string
-	Source      string
-	SpecVersion string
-	Type        string
+// CloudEvent is the canonical CloudEvents event type from the official Go SDK
+// (github.com/cloudevents/sdk-go/v2). Use it as the message type M with the
+// CloudEvents codecs; construct one with cloudevents.NewEvent(). Re-exporting
+// the upstream type keeps the wire format faithful to clients in other
+// languages.
+type CloudEvent = event.Event
 
-	// Optional context attributes.
-	DataContentType string
-	DataSchema      string
-	Subject         string
-	Time            time.Time
+const (
+	ceStructuredContentType = "application/cloudevents+json"
+	// ceAMQPPrefix is the AMQP application-property prefix for CloudEvents binary
+	// mode, matching the official Go SDK default (protocol/amqp/v2). RabbitMQ
+	// bridges 0-9-1 headers to AMQP 1.0 application-properties, so a non-Go
+	// AMQP-1.0 CloudEvents client reads these attributes unchanged.
+	ceAMQPPrefix = "cloudEvents:"
+)
 
-	// Data is the raw event payload.
-	Data []byte
-
-	// Extensions are non-standard context attributes. Values are strings: in
-	// binary mode each maps to a ce-<name> header, in structured mode to a
-	// top-level JSON member. Non-string structured extensions are read as their
-	// string form.
-	Extensions map[string]string
+// ceStandardAttrs are the context-attribute names handled as typed event fields
+// (the rest of the cloudEvents:-prefixed headers are extensions). datacontenttype
+// is listed so a stray cloudEvents:datacontenttype header is not mistaken for an
+// extension; per the binding it travels on the content-type property instead.
+var ceStandardAttrs = map[string]struct{}{
+	"specversion":     {},
+	"id":              {},
+	"source":          {},
+	"type":            {},
+	"subject":         {},
+	"dataschema":      {},
+	"time":            {},
+	"datacontenttype": {},
 }
 
-const ceDefaultSpecVersion = "1.0"
-
-// asCloudEvent accepts *CloudEvent or CloudEvent (the publisher passes *M).
-func asCloudEvent(v any) (*CloudEvent, error) {
+func asEvent(v any) (*event.Event, error) {
 	switch e := v.(type) {
-	case *CloudEvent:
+	case *event.Event:
 		if e == nil {
-			return nil, fmt.Errorf("%w: Encode requires a non-nil *codec.CloudEvent", ErrInvalidMessage)
+			return nil, fmt.Errorf("%w: Encode requires a non-nil *cloudevents.Event", ErrInvalidMessage)
 		}
 		return e, nil
-	case CloudEvent:
+	case event.Event:
 		return &e, nil
 	default:
-		return nil, fmt.Errorf("%w: value of type %T is not a codec.CloudEvent", ErrInvalidMessage, v)
+		return nil, fmt.Errorf("%w: value of type %T is not a cloudevents.Event", ErrInvalidMessage, v)
 	}
 }
 
-// asCloudEventDest requires a settable *CloudEvent for Decode.
-func asCloudEventDest(v any) (*CloudEvent, error) {
-	e, ok := v.(*CloudEvent)
+func asEventDest(v any) (*event.Event, error) {
+	e, ok := v.(*event.Event)
 	if !ok || e == nil {
-		return nil, fmt.Errorf("%w: Decode requires a non-nil *codec.CloudEvent destination", ErrInvalidMessage)
+		return nil, fmt.Errorf("%w: Decode requires a non-nil *cloudevents.Event destination", ErrInvalidMessage)
 	}
 	return e, nil
 }
 
-// isJSONDataContentType reports whether data with this content type is itself
-// JSON and may be inlined under the "data" member. Empty defaults to JSON.
-func isJSONDataContentType(ct string) bool {
-	if ct == "" {
-		return true
-	}
-	ct = strings.ToLower(ct)
-	if i := strings.IndexByte(ct, ';'); i >= 0 {
-		ct = strings.TrimSpace(ct[:i])
-	}
-	return ct == "application/json" || strings.HasSuffix(ct, "+json")
-}
-
-func (ev *CloudEvent) specVersionOrDefault() string {
-	if ev.SpecVersion == "" {
-		return ceDefaultSpecVersion
-	}
-	return ev.SpecVersion
-}
-
-// ceStructuredCodec encodes the full CloudEvent JSON envelope into the body.
+// ceStructuredCodec serialises the full CloudEvent JSON envelope into the body,
+// delegating to the SDK's JSON event format.
 type ceStructuredCodec struct{}
 
-// NewCloudEventsStructured returns a codec that serialises a codec.CloudEvent as
-// a full CloudEvents JSON envelope in the message body. ContentType is
-// "application/cloudevents+json".
-//
-// JSON data (datacontenttype application/json, a +json suffix, or unset) is
-// inlined under the "data" member; any other data is base64-encoded under
-// "data_base64", per the CloudEvents JSON format.
+// NewCloudEventsStructured returns a codec that serialises a cloudevents.Event as
+// a full CloudEvents JSON envelope in the message body (content-type
+// application/cloudevents+json). Serialization is delegated to the SDK event
+// format, so data / data_base64, extensions, and time follow the spec exactly.
 func NewCloudEventsStructured() Codec {
 	return &ceStructuredCodec{}
 }
 
-func (c *ceStructuredCodec) ContentType() string { return "application/cloudevents+json" }
+func (c *ceStructuredCodec) ContentType() string { return ceStructuredContentType }
 
 func (c *ceStructuredCodec) Encode(v any) ([]byte, error) {
-	ev, err := asCloudEvent(v)
+	ev, err := asEvent(v)
 	if err != nil {
 		return nil, err
 	}
-	m, err := ev.toStructuredMap()
-	if err != nil {
-		return nil, err
+	if err := ev.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
-	out, err := json.Marshal(m)
+	out, err := json.Marshal(ev)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
@@ -118,172 +92,31 @@ func (c *ceStructuredCodec) Encode(v any) ([]byte, error) {
 }
 
 func (c *ceStructuredCodec) Decode(data []byte, v any) error {
-	ev, err := asCloudEventDest(v)
+	ev, err := asEventDest(v)
 	if err != nil {
 		return err
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := json.Unmarshal(data, ev); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
-	return ev.fromStructuredMap(raw)
-}
-
-// toStructuredMap builds the JSON envelope as a map so extensions can be merged
-// as top-level members alongside the standard attributes.
-func (ev *CloudEvent) toStructuredMap() (map[string]any, error) {
-	m := make(map[string]any, 8+len(ev.Extensions))
-
-	// Extensions first so a standard attribute can never be shadowed.
-	for k, val := range ev.Extensions {
-		m[k] = val
-	}
-
-	m["specversion"] = ev.specVersionOrDefault()
-	m["id"] = ev.ID
-	m["source"] = ev.Source
-	m["type"] = ev.Type
-	if ev.DataContentType != "" {
-		m["datacontenttype"] = ev.DataContentType
-	}
-	if ev.DataSchema != "" {
-		m["dataschema"] = ev.DataSchema
-	}
-	if ev.Subject != "" {
-		m["subject"] = ev.Subject
-	}
-	if !ev.Time.IsZero() {
-		m["time"] = ev.Time.UTC().Format(time.RFC3339Nano)
-	}
-	if len(ev.Data) > 0 {
-		if isJSONDataContentType(ev.DataContentType) {
-			if !json.Valid(ev.Data) {
-				return nil, fmt.Errorf("%w: data is not valid JSON for content-type %q", ErrInvalidMessage, ev.DataContentType)
-			}
-			m["data"] = json.RawMessage(ev.Data)
-		} else {
-			m["data_base64"] = base64.StdEncoding.EncodeToString(ev.Data)
-		}
-	}
-	return m, nil
-}
-
-func (ev *CloudEvent) fromStructuredMap(raw map[string]json.RawMessage) error {
-	*ev = CloudEvent{}
-
-	_, hasData := raw["data"]
-	_, hasData64 := raw["data_base64"]
-	if hasData && hasData64 {
-		return fmt.Errorf("%w: envelope carries both data and data_base64", ErrInvalidMessage)
-	}
-
-	for k, rv := range raw {
-		switch k {
-		case "specversion":
-			if err := decodeJSONString(k, rv, &ev.SpecVersion); err != nil {
-				return err
-			}
-		case "id":
-			if err := decodeJSONString(k, rv, &ev.ID); err != nil {
-				return err
-			}
-		case "source":
-			if err := decodeJSONString(k, rv, &ev.Source); err != nil {
-				return err
-			}
-		case "type":
-			if err := decodeJSONString(k, rv, &ev.Type); err != nil {
-				return err
-			}
-		case "datacontenttype":
-			if err := decodeJSONString(k, rv, &ev.DataContentType); err != nil {
-				return err
-			}
-		case "dataschema":
-			if err := decodeJSONString(k, rv, &ev.DataSchema); err != nil {
-				return err
-			}
-		case "subject":
-			if err := decodeJSONString(k, rv, &ev.Subject); err != nil {
-				return err
-			}
-		case "time":
-			var s string
-			if err := decodeJSONString(k, rv, &s); err != nil {
-				return err
-			}
-			ts, err := time.Parse(time.RFC3339Nano, s)
-			if err != nil {
-				return fmt.Errorf("%w: invalid time %q: %w", ErrInvalidMessage, s, err)
-			}
-			ev.Time = ts
-		case "data":
-			ev.Data = append([]byte(nil), rv...)
-		case "data_base64":
-			var s string
-			if err := decodeJSONString(k, rv, &s); err != nil {
-				return err
-			}
-			b, err := base64.StdEncoding.DecodeString(s)
-			if err != nil {
-				return fmt.Errorf("%w: invalid data_base64: %w", ErrInvalidMessage, err)
-			}
-			ev.Data = b
-		default:
-			if ev.Extensions == nil {
-				ev.Extensions = make(map[string]string)
-			}
-			var s string
-			if err := json.Unmarshal(rv, &s); err != nil {
-				// Non-string extension: keep its raw JSON form.
-				s = string(rv)
-			}
-			ev.Extensions[k] = s
-		}
-	}
 	return nil
 }
 
-func decodeJSONString(key string, rv json.RawMessage, dst *string) error {
-	if err := json.Unmarshal(rv, dst); err != nil {
-		return fmt.Errorf("%w: attribute %q must be a JSON string: %w", ErrInvalidMessage, key, err)
-	}
-	return nil
-}
-
-// ceHeaderPrefix is the AMQP-header namespace for CloudEvents binary mode.
-const ceHeaderPrefix = "ce-"
-
-// ceStandardHeaders are the ce-* headers that map to typed CloudEvent fields
-// rather than to Extensions.
-var ceStandardHeaders = map[string]struct{}{
-	"ce-specversion":     {},
-	"ce-id":              {},
-	"ce-source":          {},
-	"ce-type":            {},
-	"ce-datacontenttype": {},
-	"ce-dataschema":      {},
-	"ce-subject":         {},
-	"ce-time":            {},
-}
-
-// ceBinaryCodec implements CloudEvents binary content mode: the event data is
-// the AMQP body and the context attributes are ce-* headers.
+// ceBinaryCodec implements CloudEvents binary content mode of the CloudEvents
+// AMQP Protocol Binding.
 type ceBinaryCodec struct{}
 
-// NewCloudEventsBinary returns a codec for CloudEvents binary content mode. The
-// event data is carried as the AMQP message body and the context attributes are
-// mapped to AMQP headers prefixed "ce-" (ce-id, ce-source, ce-type,
-// ce-specversion, and the optional ce-subject, ce-time, ce-datacontenttype,
-// ce-dataschema, plus ce-<extension>).
+// NewCloudEventsBinary returns a codec for CloudEvents binary content mode (the
+// CloudEvents AMQP Protocol Binding): the event data is the AMQP body,
+// datacontenttype maps to the AMQP content-type property, and every other
+// context attribute (and extension) maps to a cloudEvents:-prefixed AMQP header.
 //
 // It implements HeaderCodec and is meant to be used through the library's
-// publisher and consumer, which route the headers automatically. Its plain
-// Encode/Decode reject use (with ErrInvalidMessage) so the ce-* attributes can
-// never be silently dropped by a caller that bypasses the header-aware path.
-//
-// ContentType returns "" because the event's datacontenttype travels in the
-// ce-datacontenttype header, not the AMQP content-type property.
+// publisher and consumer, which route the headers and content-type
+// automatically. Its plain Encode/Decode reject use (with ErrInvalidMessage) so
+// the cloudEvents: attributes can never be silently dropped by a caller that
+// bypasses the header-aware path. ContentType returns "" because the per-event
+// content type is supplied dynamically by EncodeWithHeaders.
 func NewCloudEventsBinary() Codec {
 	return &ceBinaryCodec{}
 }
@@ -291,109 +124,116 @@ func NewCloudEventsBinary() Codec {
 func (c *ceBinaryCodec) ContentType() string { return "" }
 
 func (c *ceBinaryCodec) Encode(any) ([]byte, error) {
-	return nil, fmt.Errorf("%w: CloudEvents binary mode requires a header-aware publisher; the ce-* attributes cannot be carried by Encode alone", ErrInvalidMessage)
+	return nil, fmt.Errorf("%w: CloudEvents binary mode requires a header-aware publisher; attributes cannot be carried by Encode alone", ErrInvalidMessage)
 }
 
 func (c *ceBinaryCodec) Decode([]byte, any) error {
-	return fmt.Errorf("%w: CloudEvents binary mode requires a header-aware consumer; the ce-* attributes cannot be read by Decode alone", ErrInvalidMessage)
+	return fmt.Errorf("%w: CloudEvents binary mode requires a header-aware consumer; attributes cannot be read by Decode alone", ErrInvalidMessage)
 }
 
-func (c *ceBinaryCodec) EncodeWithHeaders(v any) ([]byte, map[string]any, error) {
-	ev, err := asCloudEvent(v)
+func (c *ceBinaryCodec) EncodeWithHeaders(v any) ([]byte, map[string]any, string, error) {
+	ev, err := asEvent(v)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
+	}
+	if err := ev.Validate(); err != nil {
+		return nil, nil, "", fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
 
-	headers := make(map[string]any, 8+len(ev.Extensions))
-
-	// Extensions first so a standard attribute can never be shadowed.
-	for k, val := range ev.Extensions {
-		headers[ceHeaderPrefix+k] = val
+	headers := make(map[string]any, 8)
+	headers[ceAMQPPrefix+"specversion"] = ev.SpecVersion()
+	headers[ceAMQPPrefix+"id"] = ev.ID()
+	headers[ceAMQPPrefix+"source"] = ev.Source()
+	headers[ceAMQPPrefix+"type"] = ev.Type()
+	if s := ev.Subject(); s != "" {
+		headers[ceAMQPPrefix+"subject"] = s
+	}
+	if s := ev.DataSchema(); s != "" {
+		headers[ceAMQPPrefix+"dataschema"] = s
+	}
+	if t := ev.Time(); !t.IsZero() {
+		headers[ceAMQPPrefix+"time"] = types.FormatTime(t)
+	}
+	for name, val := range ev.Extensions() {
+		s, ferr := types.Format(val)
+		if ferr != nil {
+			return nil, nil, "", fmt.Errorf("%w: extension %q: %w", ErrInvalidMessage, name, ferr)
+		}
+		headers[ceAMQPPrefix+name] = s
 	}
 
-	headers["ce-specversion"] = ev.specVersionOrDefault()
-	headers["ce-id"] = ev.ID
-	headers["ce-source"] = ev.Source
-	headers["ce-type"] = ev.Type
-	if ev.DataContentType != "" {
-		headers["ce-datacontenttype"] = ev.DataContentType
-	}
-	if ev.DataSchema != "" {
-		headers["ce-dataschema"] = ev.DataSchema
-	}
-	if ev.Subject != "" {
-		headers["ce-subject"] = ev.Subject
-	}
-	if !ev.Time.IsZero() {
-		headers["ce-time"] = ev.Time.UTC().Format(time.RFC3339Nano)
-	}
-
-	return ev.Data, headers, nil
+	return ev.Data(), headers, ev.DataContentType(), nil
 }
 
-func (c *ceBinaryCodec) DecodeWithHeaders(body []byte, headers map[string]any, v any) error {
-	ev, err := asCloudEventDest(v)
+func (c *ceBinaryCodec) DecodeWithHeaders(body []byte, headers map[string]any, contentType string, v any) error {
+	out, err := asEventDest(v)
 	if err != nil {
 		return err
 	}
-	*ev = CloudEvent{}
 
 	// specversion presence is what distinguishes a binary CloudEvent from any
-	// other message: a structured envelope (no ce-* headers) fails here.
-	specVersion, ok := ceHeaderString(headers, "ce-specversion")
+	// other message: a structured envelope (no cloudEvents: headers) fails here.
+	specVersion, ok := ceHeaderString(headers, ceAMQPPrefix+"specversion")
 	if !ok {
-		return fmt.Errorf("%w: missing ce-specversion header; not a binary CloudEvent", ErrInvalidMessage)
+		return fmt.Errorf("%w: missing %sspecversion header; not a binary CloudEvent", ErrInvalidMessage, ceAMQPPrefix)
 	}
-	ev.SpecVersion = specVersion
 
-	if s, ok := ceHeaderString(headers, "ce-id"); ok {
-		ev.ID = s
+	ev := event.New(specVersion)
+	if ev.Context == nil {
+		// event.New leaves Context nil for an unrecognised spec version; reject
+		// before any setter dereferences it.
+		return fmt.Errorf("%w: unsupported CloudEvents specversion %q", ErrInvalidMessage, specVersion)
 	}
-	if s, ok := ceHeaderString(headers, "ce-source"); ok {
-		ev.Source = s
+
+	if s, ok := ceHeaderString(headers, ceAMQPPrefix+"id"); ok {
+		ev.SetID(s)
 	}
-	if s, ok := ceHeaderString(headers, "ce-type"); ok {
-		ev.Type = s
+	if s, ok := ceHeaderString(headers, ceAMQPPrefix+"source"); ok {
+		ev.SetSource(s)
 	}
-	if s, ok := ceHeaderString(headers, "ce-datacontenttype"); ok {
-		ev.DataContentType = s
+	if s, ok := ceHeaderString(headers, ceAMQPPrefix+"type"); ok {
+		ev.SetType(s)
 	}
-	if s, ok := ceHeaderString(headers, "ce-dataschema"); ok {
-		ev.DataSchema = s
+	if s, ok := ceHeaderString(headers, ceAMQPPrefix+"subject"); ok {
+		ev.SetSubject(s)
 	}
-	if s, ok := ceHeaderString(headers, "ce-subject"); ok {
-		ev.Subject = s
+	if s, ok := ceHeaderString(headers, ceAMQPPrefix+"dataschema"); ok {
+		ev.SetDataSchema(s)
 	}
-	if s, ok := ceHeaderString(headers, "ce-time"); ok {
-		ts, err := time.Parse(time.RFC3339Nano, s)
-		if err != nil {
-			return fmt.Errorf("%w: invalid ce-time %q: %w", ErrInvalidMessage, s, err)
+	if s, ok := ceHeaderString(headers, ceAMQPPrefix+"time"); ok {
+		ts, perr := types.ParseTime(s)
+		if perr != nil {
+			return fmt.Errorf("%w: invalid %stime %q: %w", ErrInvalidMessage, ceAMQPPrefix, s, perr)
 		}
-		ev.Time = ts
+		ev.SetTime(ts)
 	}
 
 	for k := range headers {
-		if !strings.HasPrefix(k, ceHeaderPrefix) {
+		if !strings.HasPrefix(k, ceAMQPPrefix) {
 			continue
 		}
-		if _, std := ceStandardHeaders[k]; std {
+		name := strings.TrimPrefix(k, ceAMQPPrefix)
+		if _, std := ceStandardAttrs[name]; std {
 			continue
 		}
 		s, _ := ceHeaderString(headers, k)
-		if ev.Extensions == nil {
-			ev.Extensions = make(map[string]string)
-		}
-		ev.Extensions[strings.TrimPrefix(k, ceHeaderPrefix)] = s
+		ev.SetExtension(name, s)
 	}
 
-	if len(body) > 0 {
-		ev.Data = body
+	if contentType != "" {
+		ev.SetDataContentType(contentType)
 	}
+	if len(body) > 0 {
+		ev.DataEncoded = body
+		ev.DataBase64 = false
+	}
+
+	*out = ev
 	return nil
 }
 
-// ceHeaderString reads a ce-* header value, coercing string and []byte (the two
-// forms amqp091 produces for AMQP short/long strings) to string.
+// ceHeaderString reads a cloudEvents: header value, coercing string and []byte
+// (the two forms amqp091 produces for AMQP short/long strings) to string.
 func ceHeaderString(headers map[string]any, key string) (string, bool) {
 	v, ok := headers[key]
 	if !ok {

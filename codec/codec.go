@@ -25,21 +25,24 @@ type Codec interface {
 }
 
 // HeaderCodec is an optional interface a Codec may implement when its wire
-// format spans both the message body and AMQP headers. Publishers and consumers
-// detect it by type assertion: on publish the headers returned by
-// EncodeWithHeaders are merged into Message.Headers; on consume the delivery's
-// headers are passed to DecodeWithHeaders. A Codec that does not implement
-// HeaderCodec uses the plain Encode/Decode path unchanged.
+// format spans the message body, AMQP headers, and the content-type property.
+// Publishers and consumers detect it by type assertion: on publish the headers
+// returned by EncodeWithHeaders are merged into Message.Headers and a non-empty
+// contentType overrides Message.ContentType; on consume the delivery's headers
+// and content-type property are passed to DecodeWithHeaders. A Codec that does
+// not implement HeaderCodec uses the plain Encode/Decode path unchanged.
 //
 // The CloudEvents binary-mode codec (NewCloudEventsBinary) is the built-in
-// implementation: the event data travels as the body while context attributes
-// travel as ce-* headers.
+// implementation: per the CloudEvents AMQP Protocol Binding, the event data
+// travels as the body, datacontenttype as the content-type property, and every
+// other context attribute as a cloudEvents:-prefixed header.
 type HeaderCodec interface {
 	Codec
-	// EncodeWithHeaders serialises v into a body and a set of AMQP headers.
-	// Returns ErrInvalidMessage on failure.
-	EncodeWithHeaders(v any) (body []byte, headers map[string]any, err error)
-	// DecodeWithHeaders deserialises body plus headers into v. It must only read
-	// headers, never mutate the provided map. Returns ErrInvalidMessage on failure.
-	DecodeWithHeaders(body []byte, headers map[string]any, v any) error
+	// EncodeWithHeaders serialises v into a body, a set of AMQP headers, and a
+	// content-type. Returns ErrInvalidMessage on failure.
+	EncodeWithHeaders(v any) (body []byte, headers map[string]any, contentType string, err error)
+	// DecodeWithHeaders deserialises body plus headers plus content-type into v.
+	// It must only read headers, never mutate the provided map. Returns
+	// ErrInvalidMessage on failure.
+	DecodeWithHeaders(body []byte, headers map[string]any, contentType string, v any) error
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,106 +24,95 @@ func TestNewCloudEventsBinary_ImplementsHeaderCodec(t *testing.T) {
 }
 
 func TestNewCloudEventsBinary_ContentType(t *testing.T) {
-	// datacontenttype travels as the ce-datacontenttype header, so the codec
-	// reports no static AMQP content-type.
+	// The per-event datacontenttype is supplied dynamically by EncodeWithHeaders.
 	assert.Equal(t, "", codec.NewCloudEventsBinary().ContentType())
 }
 
 func TestCloudEventsBinary_RoundTrip(t *testing.T) {
 	c := newBinary(t)
-	original := &codec.CloudEvent{
-		ID:              "id-1",
-		Source:          "/services/orders",
-		SpecVersion:     "1.0",
-		Type:            "com.example.order.created",
-		DataContentType: "application/json",
-		DataSchema:      "https://example.com/schema",
-		Subject:         "order/42",
-		Time:            time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC),
-		Data:            []byte(`{"order_id":42}`),
-	}
 
-	body, headers, err := c.EncodeWithHeaders(original)
+	original := cloudevents.NewEvent()
+	original.SetID("id-1")
+	original.SetSource("/services/orders")
+	original.SetType("com.example.order.created")
+	original.SetSubject("order/42")
+	original.SetTime(time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC))
+	require.NoError(t, original.SetData(cloudevents.ApplicationJSON, map[string]any{"order_id": 42}))
+
+	body, headers, contentType, err := c.EncodeWithHeaders(&original)
 	require.NoError(t, err)
 
-	// Body carries data only.
-	assert.Equal(t, original.Data, body)
+	// Body carries data only; datacontenttype is the content-type property.
+	assert.Equal(t, original.Data(), body)
+	assert.Equal(t, "application/json", contentType)
 
-	// Attributes travel as ce-* headers.
-	assert.Equal(t, "id-1", headers["ce-id"])
-	assert.Equal(t, "/services/orders", headers["ce-source"])
-	assert.Equal(t, "com.example.order.created", headers["ce-type"])
-	assert.Equal(t, "1.0", headers["ce-specversion"])
-	assert.Equal(t, "order/42", headers["ce-subject"])
-	assert.Equal(t, "application/json", headers["ce-datacontenttype"])
-	assert.Equal(t, "https://example.com/schema", headers["ce-dataschema"])
-	assert.Contains(t, headers, "ce-time")
+	// Per the CloudEvents AMQP binding, attributes use the cloudEvents: prefix.
+	assert.Equal(t, "id-1", headers["cloudEvents:id"])
+	assert.Equal(t, "/services/orders", headers["cloudEvents:source"])
+	assert.Equal(t, "com.example.order.created", headers["cloudEvents:type"])
+	assert.Equal(t, "1.0", headers["cloudEvents:specversion"])
+	assert.Equal(t, "order/42", headers["cloudEvents:subject"])
+	assert.Contains(t, headers, "cloudEvents:time")
+	// datacontenttype is NOT a header — it is the content-type property.
+	assert.NotContains(t, headers, "cloudEvents:datacontenttype")
 
 	var decoded codec.CloudEvent
-	require.NoError(t, c.DecodeWithHeaders(body, headers, &decoded))
-	assert.Equal(t, original.ID, decoded.ID)
-	assert.Equal(t, original.Source, decoded.Source)
-	assert.Equal(t, original.SpecVersion, decoded.SpecVersion)
-	assert.Equal(t, original.Type, decoded.Type)
-	assert.Equal(t, original.DataContentType, decoded.DataContentType)
-	assert.Equal(t, original.DataSchema, decoded.DataSchema)
-	assert.Equal(t, original.Subject, decoded.Subject)
-	assert.True(t, original.Time.Equal(decoded.Time))
-	assert.Equal(t, original.Data, decoded.Data)
+	require.NoError(t, c.DecodeWithHeaders(body, headers, contentType, &decoded))
+	assert.Equal(t, original.ID(), decoded.ID())
+	assert.Equal(t, original.Source(), decoded.Source())
+	assert.Equal(t, original.Type(), decoded.Type())
+	assert.Equal(t, original.SpecVersion(), decoded.SpecVersion())
+	assert.Equal(t, original.Subject(), decoded.Subject())
+	assert.Equal(t, original.DataContentType(), decoded.DataContentType())
+	assert.True(t, original.Time().Equal(decoded.Time()))
+	assert.Equal(t, original.Data(), decoded.Data())
 }
 
 func TestCloudEventsBinary_RoundTrip_Extensions(t *testing.T) {
 	c := newBinary(t)
-	original := &codec.CloudEvent{
-		ID:          "id-2",
-		Source:      "/x",
-		SpecVersion: "1.0",
-		Type:        "t",
-		Extensions: map[string]string{
-			"tenant":   "acme",
-			"priority": "high",
-		},
-		Data: []byte("hello"),
-	}
 
-	body, headers, err := c.EncodeWithHeaders(original)
+	original := cloudevents.NewEvent()
+	original.SetID("id-2")
+	original.SetSource("/x")
+	original.SetType("t")
+	original.SetExtension("tenant", "acme")
+	original.SetExtension("priority", "high")
+	require.NoError(t, original.SetData(cloudevents.ApplicationJSON, map[string]any{"k": 1}))
+
+	body, headers, contentType, err := c.EncodeWithHeaders(&original)
 	require.NoError(t, err)
-	assert.Equal(t, "acme", headers["ce-tenant"])
-	assert.Equal(t, "high", headers["ce-priority"])
+	assert.Equal(t, "acme", headers["cloudEvents:tenant"])
+	assert.Equal(t, "high", headers["cloudEvents:priority"])
 
 	var decoded codec.CloudEvent
-	require.NoError(t, c.DecodeWithHeaders(body, headers, &decoded))
-	assert.Equal(t, original.Extensions, decoded.Extensions)
-	assert.Equal(t, original.Data, decoded.Data)
-}
-
-func TestCloudEventsBinary_Encode_DefaultsSpecVersion(t *testing.T) {
-	c := newBinary(t)
-	_, headers, err := c.EncodeWithHeaders(&codec.CloudEvent{ID: "x", Source: "s", Type: "t"})
-	require.NoError(t, err)
-	assert.Equal(t, "1.0", headers["ce-specversion"])
+	require.NoError(t, c.DecodeWithHeaders(body, headers, contentType, &decoded))
+	assert.Equal(t, "acme", decoded.Extensions()["tenant"])
+	assert.Equal(t, "high", decoded.Extensions()["priority"])
 }
 
 func TestCloudEventsBinary_Decode_MissingSpecVersionFails(t *testing.T) {
 	c := newBinary(t)
 	var ev codec.CloudEvent
-	err := c.DecodeWithHeaders([]byte("data"), map[string]any{"ce-id": "x"}, &ev)
+	err := c.DecodeWithHeaders([]byte("data"), map[string]any{"cloudEvents:id": "x"}, "", &ev)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
 }
 
 // Cross-encoding: a structured-encoded message (full envelope in the body, no
-// ce-* headers) must fail cleanly when fed to the binary decoder.
+// cloudEvents: headers) must fail cleanly when fed to the binary decoder.
 func TestCloudEventsBinary_CrossEncoding_StructuredFailsBinary(t *testing.T) {
 	structured := codec.NewCloudEventsStructured()
-	body, err := structured.Encode(&codec.CloudEvent{
-		ID: "x", Source: "s", SpecVersion: "1.0", Type: "t", Data: []byte(`{"a":1}`),
-	})
+	ev := cloudevents.NewEvent()
+	ev.SetID("x")
+	ev.SetSource("s")
+	ev.SetType("t")
+	require.NoError(t, ev.SetData(cloudevents.ApplicationJSON, map[string]any{"a": 1}))
+	body, err := structured.Encode(&ev)
 	require.NoError(t, err)
 
 	c := newBinary(t)
-	var ev codec.CloudEvent
-	err = c.DecodeWithHeaders(body, map[string]any{}, &ev) // structured carries no ce-* headers
+	var got codec.CloudEvent
+	err = c.DecodeWithHeaders(body, map[string]any{}, "application/cloudevents+json", &got)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
 }
@@ -132,37 +122,41 @@ func TestCloudEventsBinary_Decode_ByteSliceHeaderValues(t *testing.T) {
 	c := newBinary(t)
 	var ev codec.CloudEvent
 	headers := map[string]any{
-		"ce-specversion": []byte("1.0"),
-		"ce-id":          []byte("id-9"),
-		"ce-source":      "/s",
-		"ce-type":        "t",
+		"cloudEvents:specversion": []byte("1.0"),
+		"cloudEvents:id":          []byte("id-9"),
+		"cloudEvents:source":      "/s",
+		"cloudEvents:type":        "t",
 	}
-	require.NoError(t, c.DecodeWithHeaders([]byte("body"), headers, &ev))
-	assert.Equal(t, "1.0", ev.SpecVersion)
-	assert.Equal(t, "id-9", ev.ID)
+	require.NoError(t, c.DecodeWithHeaders([]byte("body"), headers, "", &ev))
+	assert.Equal(t, "1.0", ev.SpecVersion())
+	assert.Equal(t, "id-9", ev.ID())
 }
 
 func TestCloudEventsBinary_Decode_IgnoresNonCEHeaders(t *testing.T) {
 	c := newBinary(t)
 	var ev codec.CloudEvent
 	headers := map[string]any{
-		"ce-specversion": "1.0",
-		"ce-id":          "id",
-		"ce-source":      "/s",
-		"ce-type":        "t",
-		"traceparent":    "00-abc-def-01",
-		"x-custom":       "keep-out",
+		"cloudEvents:specversion": "1.0",
+		"cloudEvents:id":          "id",
+		"cloudEvents:source":      "/s",
+		"cloudEvents:type":        "t",
+		"traceparent":             "00-abc-def-01",
+		"x-custom":                "keep-out",
 	}
-	require.NoError(t, c.DecodeWithHeaders([]byte("body"), headers, &ev))
-	assert.NotContains(t, ev.Extensions, "traceparent")
-	assert.NotContains(t, ev.Extensions, "x-custom")
+	require.NoError(t, c.DecodeWithHeaders([]byte("body"), headers, "", &ev))
+	assert.NotContains(t, ev.Extensions(), "traceparent")
+	assert.NotContains(t, ev.Extensions(), "x-custom")
 	// Non-ce headers must not be mutated/removed by the codec.
 	assert.Equal(t, "00-abc-def-01", headers["traceparent"])
 }
 
 func TestCloudEventsBinary_PlainEncodeRejected(t *testing.T) {
 	c := codec.NewCloudEventsBinary()
-	_, err := c.Encode(&codec.CloudEvent{ID: "x", Source: "s", SpecVersion: "1.0", Type: "t"})
+	ev := cloudevents.NewEvent()
+	ev.SetID("x")
+	ev.SetSource("s")
+	ev.SetType("t")
+	_, err := c.Encode(&ev)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
 }
@@ -175,16 +169,16 @@ func TestCloudEventsBinary_PlainDecodeRejected(t *testing.T) {
 	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
 }
 
-func TestCloudEventsBinary_Encode_RejectsNonCloudEvent(t *testing.T) {
+func TestCloudEventsBinary_Encode_RejectsNonEvent(t *testing.T) {
 	c := newBinary(t)
-	_, _, err := c.EncodeWithHeaders("not an event")
+	_, _, _, err := c.EncodeWithHeaders("not an event")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
 }
 
 func TestCloudEventsBinary_Decode_RejectsNilDestination(t *testing.T) {
 	c := newBinary(t)
-	err := c.DecodeWithHeaders([]byte("body"), map[string]any{"ce-specversion": "1.0"}, nil)
+	err := c.DecodeWithHeaders([]byte("body"), map[string]any{"cloudEvents:specversion": "1.0"}, "", nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
 }
