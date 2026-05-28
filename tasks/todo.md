@@ -697,19 +697,22 @@ before Phase 5 can close.
 
 ### [ ] T25 — `codec/cloudevents.go` — structured mode · S
 - **Acceptance:**
-  - [ ] `cloudevents.NewStructured()` encodes the full CloudEvent JSON envelope into the message body.
+  - [ ] `codec.NewCloudEventsStructured()` encodes the full CloudEvent JSON envelope into the message body. Encode/Decode operate on a `codec.CloudEvent` value.
   - [ ] `ContentType()` returns `application/cloudevents+json`.
-- **Verify:** Round-trip test against the official CloudEvents test vectors.
+  - [ ] JSON-typed `data` is inlined under the `data` member; non-JSON `data` is base64-encoded under `data_base64`, per the CloudEvents JSON format spec.
+- **Verify:** Round-trip test against representative CloudEvents v1.0 JSON events (the upstream `cloudevents/spec` test vectors are not vendored; round-trip covers the same `data`/`data_base64`/extension paths).
 - **Files:** `codec/cloudevents.go`, `codec/cloudevents_structured_test.go`.
 - **Deps:** T09.
 
 ### [ ] T26 — `codec/cloudevents.go` — binary mode · M
 - **Acceptance:**
-  - [ ] `cloudevents.NewBinary()` puts `data` in the body and CloudEvent attributes (`id`, `source`, `type`, `specversion`, `subject`, `time`, `datacontenttype`) into AMQP headers prefixed `ce-*`.
+  - [ ] `codec.NewCloudEventsBinary()` puts `data` in the body and CloudEvent attributes (`id`, `source`, `type`, `specversion`, `subject`, `time`, `datacontenttype`, plus extensions) into AMQP headers prefixed `ce-*`.
   - [ ] Decode reconstitutes the full CloudEvent from body + headers.
   - [ ] Follows the CloudEvents AMQP Protocol Binding spec.
-- **Verify:** Round-trip + cross-encoding test (structured-encoded message decodes via binary decoder fails cleanly with `ErrInvalidMessage`).
-- **Files:** edits to `codec/cloudevents.go`, `codec/cloudevents_binary_test.go`.
+  - [ ] Introduces the optional `codec.HeaderCodec` interface (`EncodeWithHeaders`/`DecodeWithHeaders`, embeds `Codec`); the binary codec's plain `Encode`/`Decode` reject use outside a header-aware publisher/consumer with `ErrInvalidMessage` (no silent attribute loss).
+  - [ ] Publisher (`encodeMsg`) and Consumer (`safeDecodeConsumer`) detect `HeaderCodec` and route headers, so the codec works end-to-end.
+- **Verify:** Round-trip + cross-encoding test (structured-encoded message decodes via binary decoder fails cleanly with `ErrInvalidMessage`) + an end-to-end publisher→consumer test (no broker) asserting `ce-*` headers and `data` body round-trip. Fuzz target `FuzzCodecCloudEventsBinary` feeds arbitrary body+headers into `DecodeWithHeaders` and asserts no panic.
+- **Files:** edits to `codec/cloudevents.go`, `codec/codec.go` (`HeaderCodec`), `publisher.go`, `consumer.go`; `codec/cloudevents_binary_test.go`, `codec/cloudevents_binary_fuzz_test.go`.
 - **Deps:** T25.
 
 ### [ ] T27 — OTel in Publisher · S

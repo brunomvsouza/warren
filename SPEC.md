@@ -1996,15 +1996,40 @@ value.
     workloads).
   - `codec.NewProtobuf()` — proto3 binary; `ContentType` =
     `application/x-protobuf`.
-  - `cloudevents.NewStructured()` — full CloudEvent JSON envelope is
-    the payload body; content-type `application/cloudevents+json`.
-  - `cloudevents.NewBinary()` — payload body carries only `data`;
+  - `codec.NewCloudEventsStructured()` — full CloudEvent JSON envelope
+    is the payload body; content-type `application/cloudevents+json`.
+    Encode/Decode operate on a `codec.CloudEvent` value.
+  - `codec.NewCloudEventsBinary()` — payload body carries only `data`;
     CloudEvent attributes are mapped to AMQP headers prefixed `ce-*`
-    per the CloudEvents AMQP Protocol Binding spec.
+    per the CloudEvents AMQP Protocol Binding spec. `ContentType()`
+    returns `""` (the event's `datacontenttype` travels as the
+    `ce-datacontenttype` header, not the AMQP content-type property).
 
-  **Panic safety contract.** Every `Codec.Encode` and `Codec.Decode`
-  call is wrapped by the Publisher / Consumer in a `defer recover`
-  that converts a codec panic into `ErrInvalidMessage` (wrapping the
+  **Header-aware codecs (`HeaderCodec`).** A codec whose wire format
+  spans both the body and AMQP headers implements the optional
+  `HeaderCodec` interface (embeds `Codec`):
+
+  ```go
+  type HeaderCodec interface {
+      Codec
+      EncodeWithHeaders(v any) (body []byte, headers map[string]any, err error)
+      DecodeWithHeaders(body []byte, headers map[string]any, v any) error
+  }
+  ```
+
+  Publishers and consumers detect `HeaderCodec` by type assertion: on
+  publish the returned headers are merged into `Message.Headers`; on
+  consume the delivery's headers are passed to `DecodeWithHeaders`. A
+  codec that does not implement `HeaderCodec` uses the plain
+  `Encode`/`Decode` path unchanged. `NewCloudEventsBinary()` is the
+  built-in `HeaderCodec`; its plain `Encode`/`Decode` reject use
+  outside a header-aware publisher/consumer with `ErrInvalidMessage`,
+  so the `ce-*` attributes can never be silently dropped.
+
+  **Panic safety contract.** Every `Codec.Encode` / `Codec.Decode`
+  (and `HeaderCodec.EncodeWithHeaders` / `DecodeWithHeaders`) call is
+  wrapped by the Publisher / Consumer in a `defer recover` that
+  converts a codec panic into `ErrInvalidMessage` (wrapping the
   recovered value). Third-party codecs may not crash the
   publisher/consumer goroutine; the contract is enforced and tested.
 
@@ -2453,10 +2478,13 @@ Coverage and tooling:
       `internal/redact`.
 - [ ] `Connection` ships with a no-op `otel.Tracer` by default; no code
       path branches on "tracing disabled".
-- [ ] `codec.CloudEvents` supports both structured and binary modes per
-      the CloudEvents AMQP Protocol Binding spec; `codec.NewJSON()` is
-      lax by default (Postel's Law — accepts unknown fields on `Decode`);
-      `codec.NewJSONStrict()` is the opt-in `DisallowUnknownFields` mode.
+- [ ] `codec.NewCloudEventsStructured()` and
+      `codec.NewCloudEventsBinary()` support both modes per the
+      CloudEvents AMQP Protocol Binding spec; the binary codec
+      implements `HeaderCodec` so `ce-*` attributes round-trip through
+      AMQP headers. `codec.NewJSON()` is lax by default (Postel's Law —
+      accepts unknown fields on `Decode`); `codec.NewJSONStrict()` is
+      the opt-in `DisallowUnknownFields` mode.
 - [ ] AMQP reply codes from the broker are surfaced as wraps of the
       §6.8 reply-code sentinels (`ErrAccessRefused`, `ErrNotFound`,
       `ErrPreconditionFailed`, etc.) and parseable via `AMQPCode(err)`.

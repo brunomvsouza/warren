@@ -702,8 +702,8 @@ Goal: Protobuf + CloudEvents (both modes) codecs; OTel spans across
 publish→consume with header propagation.
 
 - **T24** `codec/protobuf.go` + round-trip tests against a representative `.proto`
-- **T25** `codec/cloudevents.go` structured mode (`application/cloudevents+json`)
-- **T26** `codec/cloudevents.go` binary mode (`ce-*` AMQP headers)
+- **T25** `codec/cloudevents.go` structured mode — `codec.NewCloudEventsStructured()` (`application/cloudevents+json`); operates on a `codec.CloudEvent` value
+- **T26** `codec/cloudevents.go` binary mode — `codec.NewCloudEventsBinary()` (`ce-*` AMQP headers). Introduces the optional `codec.HeaderCodec` interface (`EncodeWithHeaders`/`DecodeWithHeaders`) and wires it into `publisher.go` (`encodeMsg` merges returned headers into `Message.Headers`) and `consumer.go` (`safeDecodeConsumer` passes `Delivery.Headers` to `DecodeWithHeaders`) so the codec is functional end-to-end.
 - **T27** OTel integration in `Publisher` (publish span + inject context into AMQP headers)
 - **T28** OTel integration in `Consumer` (extract span context from headers + handler span). For `BatchConsumer`, the span must contain **Links** to the extracted `traceparent` of every message in the batch.
 
@@ -962,7 +962,7 @@ supervisor and MUST be sequenced, not parallelized.** R10-18
 - **T70** `connection.go` + `consumer.go` + `batch_consumer.go`: graceful-shutdown completeness — specify + handle prefetched-but-undispatched deliveries on `Close` (drain or nack-requeue, documented), and flush a `BatchConsumer`'s pending partial batch on `Close`/final `FlushAfter`. **(R10-15, P2.5)**
 - **T71** `metrics/` + `channelpool.go` + `consumer.go`: add channel-pool acquire-wait/saturation metric, a `consumer_in_flight{queue}` gauge, and a `consumer_redelivered_total{queue}` counter (redelivery ratio = leading instability signal). Coordinates with Phase 10 T50/T52/T53. **(R10-16, P2.6)**
 - **T72** `options_connection.go` + `connection.go`: `net.Dialer` keepalive on the default dialer (document `TCP_USER_TIMEOUT` where available) so a write to a half-open socket fails promptly rather than relying on `ConfirmTimeout` as the only backstop. **(R10-17, P2.7)**
-- **T73** `publisher.go` + `consumer.go`: wrap every `Codec.Encode`/`Codec.Decode` call in a `defer recover` that converts a recovered value into `ErrInvalidMessage` (T09 panic-safety contract, formalised as a trackable task). The consumer path already recovers `Decode`; the publisher's `Encode` call does **not** — close that gap so a panicking **user-supplied** codec cannot crash the publish goroutine. Built-in codecs (`NewJSON`/`NewJSONStrict`/`NewProtobuf`) must never panic by design; the recover is the net for third-party codecs, not a license for the built-ins. **(post-T24 review)**
+- **T73** `publisher.go` + `consumer.go`: wrap every `Codec.Encode`/`Codec.Decode` (and `HeaderCodec.EncodeWithHeaders`/`DecodeWithHeaders`) call in a `defer recover` that converts a recovered value into `ErrInvalidMessage` (T09 panic-safety contract, formalised as a trackable task). The consumer path already recovers its decode call (`safeDecodeConsumer`, which after T26 also routes `DecodeWithHeaders`); the publisher's `Encode`/`EncodeWithHeaders` call does **not** — close that gap so a panicking **user-supplied** codec cannot crash the publish goroutine. Built-in codecs (`NewJSON`/`NewJSONStrict`/`NewProtobuf`/`NewCloudEventsStructured`/`NewCloudEventsBinary`) must never panic by design; the recover is the net for third-party codecs, not a license for the built-ins. **(post-T24 review)**
 
 **Checkpoint Phase 11:**
 - [ ] `go build ./...` + `make lint` clean; `go test -race ./...` and the integration lane pass; `goleak.VerifyNone` clean.
