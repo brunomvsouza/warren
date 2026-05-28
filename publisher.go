@@ -462,6 +462,11 @@ func (p *Publisher[M]) injectTrace(ctx context.Context, headers Headers) Headers
 // finishPublishSpan stamps the terminal outcome on the publish span: the
 // messaging.rabbitmq.outcome attribute always, and on failure the error.type
 // attribute, an Error status, and a recorded error (SPEC §6.9).
+//
+// Unlike finishConsumeSpan, the raw err.Error() is kept as the status description:
+// publish errors are framework/broker diagnostics (routing, confirms, channel
+// state), never handler- or payload-derived, so there is no message content to
+// leak (SPEC §8) and the broker's reason text is useful when debugging.
 func finishPublishSpan(span otel.Span, err error) {
 	outcome, errType := publishOutcome(err)
 	span.SetAttributes(attribute.String("messaging.rabbitmq.outcome", outcome))

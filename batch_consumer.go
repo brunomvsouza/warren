@@ -306,7 +306,11 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 							syntheticErr := c.applyBatchCounterB(batch, ErrRequeue)
 							requeue = errors.Is(syntheticErr, ErrRequeue)
 						}
-						// Suppress auto-verdict and apply the (potentially counter-B-adjusted) timeout verdict.
+						// Suppress auto-verdict and apply the (potentially counter-B-adjusted)
+						// timeout verdict. Re-check batch.acked under the lock: the handler
+						// goroutine is still running and may have acked between the
+						// alreadyAcked read above and here, in which case the synthetic nack
+						// must be dropped to avoid a double ack/nack frame.
 						batch.mu.Lock()
 						if !batch.acked {
 							batch.acked = true
@@ -321,12 +325,17 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 					// handler exceeded HandlerTimeout and the span must carry a terminal
 					// outcome (SPEC §6.9, "ended in every termination path"). This flush
 					// invocation owns the span and ends it via the deferred span.End();
-					// there is no later path that would stamp it.
+					// there is no later path that would stamp it. Note the deliberate
+					// span/metric divergence: when alreadyAcked is true the span still
+					// carries outcome=timeout, but no timeout metric was recorded (the block
+					// above is skipped) — the metric is suppressed so an already-acked batch
+					// does not produce a misleading nack-spike on dashboards.
 					finishConsumeSpan(span, outcomeTimeout, context.DeadlineExceeded)
 				}
-				// else: the outer ctx was cancelled (consumer lifecycle end, not a message
-				// outcome). No verdict is stamped on the span — mirroring Consumer.dispatch's
-				// outer-ctx-cancel path — and the deferred span.End() still closes it.
+				// Otherwise (outer ctx cancelled, not DeadlineExceeded): consumer lifecycle
+				// end, not a message outcome. No verdict is stamped on the span — mirroring
+				// Consumer.dispatch's outer-ctx-cancel path — and the deferred span.End()
+				// still closes it.
 				<-handlerDone // drain goroutine
 			}
 			return

@@ -38,16 +38,39 @@ const (
 // finishConsumeSpan stamps the terminal outcome on a consume span: the
 // messaging.rabbitmq.outcome attribute always, and on failure the error.type
 // attribute, an Error status, and a recorded error (SPEC §6.9).
+//
+// A handler may return an error whose message embeds message payload or PII. To
+// honour SPEC §8 (never leak message content into observability), both the status
+// description and the recorded error are reduced to the closed error-type
+// vocabulary (consumeErrorType) rather than err.Error() — which reaches the trace
+// backend verbatim via the span status and the exception event. The recorded error
+// still unwraps to the original so errors.Is-based backends keep the sentinel
+// chain. Publisher spans keep err.Error() because publish errors are framework /
+// broker diagnostics, never handler- or payload-derived (see finishPublishSpan).
 func finishConsumeSpan(span otel.Span, outcome string, err error) {
 	span.SetAttributes(attribute.String("messaging.rabbitmq.outcome", outcome))
 	if err == nil {
 		span.SetStatus(otelcodes.Ok, "")
 		return
 	}
-	span.SetAttributes(semconv.ErrorTypeKey.String(consumeErrorType(err)))
-	span.SetStatus(otelcodes.Error, err.Error())
-	span.RecordError(err)
+	errType := consumeErrorType(err)
+	span.SetAttributes(semconv.ErrorTypeKey.String(errType))
+	span.SetStatus(otelcodes.Error, errType)
+	span.RecordError(redactedSpanError{label: errType, err: err})
 }
+
+// redactedSpanError adapts an error for Span.RecordError so the recorded exception
+// event renders a closed-vocabulary label (never the raw, possibly payload-derived
+// err.Error()) while errors.Is/As still unwrap to the original error. It keeps
+// message content out of the tracing backend (SPEC §8) without dropping the
+// sentinel chain operators alert on.
+type redactedSpanError struct {
+	label string
+	err   error
+}
+
+func (e redactedSpanError) Error() string { return e.label }
+func (e redactedSpanError) Unwrap() error { return e.err }
 
 // consumeVerdictOutcome maps a (post-counter-B) handler verdict error to the
 // span outcome label. ErrPoison and any non-sentinel handler error both resolve

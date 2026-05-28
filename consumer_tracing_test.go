@@ -2,6 +2,7 @@ package warren
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"regexp"
 	"testing"
@@ -346,4 +347,36 @@ func TestConsumer_source_noHeaderMutation(t *testing.T) {
 		assert.NotRegexp(t, deleteHeaders, string(src),
 			"%s must not delete header keys on the consume path (SPEC §6.9 contract)", f)
 	}
+}
+
+// — span error rendering must not leak handler-supplied content (SPEC §8) ——————
+
+// finishConsumeSpan must never render a handler's raw err.Error() onto the span: a
+// handler may return an error whose message embeds message payload or PII. Both the
+// status description and the recorded error event are reduced to the closed
+// error-type vocabulary, while errors.Is still unwraps to the original sentinel so
+// assertive alerting keeps working.
+func TestConsumer_processSpan_errorRendering_doesNotLeakHandlerMessage(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	const secret = "pan=4111111111111111"
+	span := runProcessSpan(t, nil, jsonDelivery("x"), func(_ context.Context, _ string) error {
+		// A poison error whose message embeds a payload-derived secret.
+		return fmt.Errorf("%w: %s", ErrPoison, secret)
+	})
+
+	// error.type and status still classify the failure for alerting.
+	et, _ := span.attr("error.type")
+	assert.Equal(t, "ErrPoison", et.AsString())
+	assert.Equal(t, codes.Error, span.status)
+
+	// Status description is the closed-vocabulary type, never the raw message.
+	assert.Equal(t, "ErrPoison", span.statMsg)
+	assert.NotContains(t, span.statMsg, secret, "status description must not leak the handler error message")
+
+	// The recorded error event must not carry the raw message either, but must
+	// still unwrap to the sentinel so errors.Is-based backends keep working.
+	require.Len(t, span.errs, 1)
+	assert.NotContains(t, span.errs[0].Error(), secret, "recorded error must not leak the handler error message")
+	assert.ErrorIs(t, span.errs[0], ErrPoison)
 }
