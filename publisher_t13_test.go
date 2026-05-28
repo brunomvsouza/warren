@@ -16,6 +16,7 @@ import (
 	"github.com/brunomvsouza/warren/codec"
 	"github.com/brunomvsouza/warren/internal/confirms"
 	"github.com/brunomvsouza/warren/metrics"
+	"github.com/brunomvsouza/warren/otel"
 )
 
 // wireReturnPool creates a pool for any pubChannel that supports NotifyReturn.
@@ -93,6 +94,7 @@ func newTestPubReturn[M any](ch pubChannel, pm metrics.PublisherMetrics, onRetur
 		exchange:       "x",
 		confirmTimeout: 2 * time.Second,
 		onReturn:       onReturn,
+		tracer:         otel.NoOpTracer{},
 	}
 	// Pass pub.callOnReturn so that the goroutine uses the Publisher's conversion logic.
 	pool, _, stopPool := wireReturnPool(ch, pub.callOnReturn)

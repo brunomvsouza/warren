@@ -10,6 +10,9 @@ import (
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
 
 	"github.com/brunomvsouza/warren/codec"
 	"github.com/brunomvsouza/warren/internal/confirms"
@@ -261,6 +264,7 @@ type Publisher[M any] struct {
 	codec          codec.Codec
 	pm             metrics.PublisherMetrics
 	tracer         otel.Tracer
+	propagator     otel.Propagator
 	confirmTimeout time.Duration
 	mandatory      bool
 	onReturn       func(Return)
@@ -360,21 +364,44 @@ func (p *Publisher[M]) Publish(ctx context.Context, msg Message[M]) error {
 		defer cancel()
 	}
 
+	// Open the publish span first so it wraps encode failures too. The span is
+	// ended in every termination path via defer — including a propagating codec
+	// panic (encodeMsg recovers it into ErrInvalidMessage, so it does not
+	// propagate, but the defer is the backstop regardless).
+	ctx, span := p.tracer.Start(ctx, p.exchange+" publish", p.publishSpanAttrs()...)
+	defer span.End()
+
 	msg, body, err := p.encodeMsg(msg)
 	if err != nil {
+		finishPublishSpan(span, err)
 		return err
 	}
+
+	span.SetAttributes(
+		semconv.MessagingMessageID(msg.MessageID),
+		semconv.MessagingMessageBodySize(len(body)),
+	)
+	if msg.CorrelationID != "" {
+		span.SetAttributes(semconv.MessagingMessageConversationID(msg.CorrelationID))
+	}
+
+	// Inject the trace context into the message headers before any frame is
+	// written, so it travels with basic.publish and survives any DLX bounce.
+	msg.Headers = p.injectTrace(ctx, msg.Headers)
 
 	var attempt int
 	for {
 		err := p.publishOnce(ctx, msg, body)
 		if err == nil {
+			finishPublishSpan(span, nil)
 			return nil
 		}
 		if p.retryPolicy == nil || !IsTransient(err) {
+			finishPublishSpan(span, err)
 			return err
 		}
 		if p.retryPolicy.Retries > 0 && attempt >= p.retryPolicy.Retries {
+			finishPublishSpan(span, err)
 			return err
 		}
 		attempt++
@@ -384,9 +411,96 @@ func (p *Publisher[M]) Publish(ctx context.Context, msg Message[M]) error {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			finishPublishSpan(span, err)
 			return err
 		case <-timer.C:
 		}
+	}
+}
+
+// publishSpanAttrs builds the static span attributes known before encoding
+// (SPEC §6.9). network.peer.* is included only when a Connection is present.
+func (p *Publisher[M]) publishSpanAttrs() []attribute.KeyValue {
+	attrs := []attribute.KeyValue{
+		semconv.MessagingSystemKey.String("rabbitmq"),
+		semconv.MessagingDestinationName(p.exchange),
+		semconv.MessagingOperationTypeKey.String("publish"),
+	}
+	if p.conn != nil {
+		if host, port, ok := p.conn.peerAddress(); ok {
+			attrs = append(attrs, semconv.NetworkPeerAddress(host))
+			if port > 0 {
+				attrs = append(attrs, semconv.NetworkPeerPort(port))
+			}
+		}
+	}
+	return attrs
+}
+
+// injectTrace writes the W3C trace context from ctx into a copy-safe headers
+// map, preserving any caller-supplied traceparent/tracestate (last-wins per
+// SPEC §6.9). It allocates a headers map only when ctx carries a live span.
+func (p *Publisher[M]) injectTrace(ctx context.Context, headers Headers) Headers {
+	if !p.propagator.ActiveContext(ctx) {
+		return headers
+	}
+	if headers == nil {
+		headers = make(Headers, 2)
+	}
+	callerTP, hasTP := headers[otel.HeaderTraceParent]
+	callerTS, hasTS := headers[otel.HeaderTraceState]
+	p.propagator.Inject(ctx, headers)
+	if hasTP {
+		headers[otel.HeaderTraceParent] = callerTP
+	}
+	if hasTS {
+		headers[otel.HeaderTraceState] = callerTS
+	}
+	return headers
+}
+
+// finishPublishSpan stamps the terminal outcome on the publish span: the
+// messaging.rabbitmq.outcome attribute always, and on failure the error.type
+// attribute, an Error status, and a recorded error (SPEC §6.9).
+func finishPublishSpan(span otel.Span, err error) {
+	outcome, errType := publishOutcome(err)
+	span.SetAttributes(attribute.String("messaging.rabbitmq.outcome", outcome))
+	if err == nil {
+		span.SetStatus(otelcodes.Ok, "")
+		return
+	}
+	span.SetAttributes(semconv.ErrorTypeKey.String(errType))
+	span.SetStatus(otelcodes.Error, err.Error())
+	span.RecordError(err)
+}
+
+// publishOutcome maps a publish error to the (outcome, error.type) pair used on
+// the publish span. The outcome mirrors the publisher_publish_seconds{outcome}
+// metric label space; error.type is the sentinel name for assertive alerting.
+func publishOutcome(err error) (outcome, errorType string) {
+	switch {
+	case err == nil:
+		return "ack", ""
+	case errors.Is(err, ErrUnroutable):
+		return "return", "ErrUnroutable"
+	case errors.Is(err, ErrConfirmTimeout):
+		return "timeout", "ErrConfirmTimeout"
+	case errors.Is(err, ErrPublishNacked):
+		return "nack", "ErrPublishNacked"
+	case errors.Is(err, ErrMessageTooLarge):
+		return "too_large", "ErrMessageTooLarge"
+	case errors.Is(err, ErrChannelPoolExhausted):
+		return "pool_exhausted", "ErrChannelPoolExhausted"
+	case errors.Is(err, ErrConnectionBlocked):
+		return "blocked", "ErrConnectionBlocked"
+	case errors.Is(err, ErrInvalidMessage):
+		return "error", "ErrInvalidMessage"
+	case errors.Is(err, ErrChannelClosed):
+		return "error", "ErrChannelClosed"
+	case errors.Is(err, ErrReconnecting):
+		return "error", "ErrReconnecting"
+	default:
+		return "error", "error"
 	}
 }
 
@@ -420,7 +534,7 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 		return msg, nil, fmt.Errorf("%w: Body must not be nil", ErrInvalidMessage)
 	}
 
-	body, ceHeaders, ceContentType, err := encodeBody(p.codec, msg.Body)
+	body, ceHeaders, ceContentType, err := safeEncodeBody(p.codec, msg.Body)
 	if err != nil {
 		return msg, nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
@@ -457,6 +571,21 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 	}
 
 	return msg, body, nil
+}
+
+// safeEncodeBody calls encodeBody, recovering from a codec panic per the T09
+// panic-safety contract (mirrors safeDecodeConsumer on the consume path). The
+// recovered value is reported by type only — never by content — so a custom
+// codec cannot leak message bytes into an error string, log, or span. The
+// caller wraps the returned error in ErrInvalidMessage.
+func safeEncodeBody(c codec.Codec, body any) (out []byte, headers map[string]any, contentType string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			out, headers, contentType = nil, nil, ""
+			err = fmt.Errorf("codec panic: %T", r)
+		}
+	}()
+	return encodeBody(c, body)
 }
 
 // encodeBody encodes the body, returning any AMQP headers and content-type a

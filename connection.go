@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -826,4 +827,30 @@ func DefaultConnectionName() string {
 	exe := filepath.Base(os.Args[0])
 	hostname, _ := os.Hostname()
 	return fmt.Sprintf("%s-%s-%d", exe, hostname, os.Getpid())
+}
+
+// peerAddress returns the broker host and port parsed from the configured
+// address (the first entry when WithAddrs is used). It is best-effort and
+// feeds the network.peer.* OTel span attributes (SPEC §6.9); ok is false when
+// no host can be parsed. The userinfo is never included, so there is nothing
+// to redact.
+func (c *Connection) peerAddress() (host string, port int, ok bool) {
+	addr := c.opts.addr
+	if len(c.opts.addrs) > 0 {
+		addr = c.opts.addrs[0]
+	}
+	u, err := url.Parse(addr)
+	if err != nil || u.Hostname() == "" {
+		return "", 0, false
+	}
+	host = u.Hostname()
+	switch {
+	case u.Port() != "":
+		port, _ = strconv.Atoi(u.Port())
+	case u.Scheme == "amqps":
+		port = 5671
+	default:
+		port = 5672
+	}
+	return host, port, true
 }

@@ -715,14 +715,14 @@ before Phase 5 can close.
 - **Files:** edits to `codec/cloudevents.go`, `codec/codec.go` (`HeaderCodec`), `publisher.go`, `consumer.go`, `batch_consumer.go`; `codec/cloudevents_binary_test.go`, `codec/cloudevents_binary_fuzz_test.go`, `cloudevents_wiring_test.go`.
 - **Deps:** T25.
 
-### [ ] T27 — OTel in Publisher · S
+### [x] T27 — OTel in Publisher · S
 Per SPEC §6.9 "Tracing continuity post-mortem" + §10 #51 (Rev 8 item M).
 - **Acceptance:**
-  - [ ] `Publisher.Publish` opens a span named `<exchange> publish` with messaging attributes from OTel semantic conventions.
-  - [ ] Span attributes match SPEC §6.9 for publish: `messaging.system="rabbitmq"`, `messaging.destination.name`, `messaging.operation.type=publish`, `messaging.message.id`, `messaging.message.conversation_id`, `messaging.message.body.size`, `network.peer.address`, `network.peer.port` (where applicable).
-  - [ ] Context is injected into the AMQP headers via `otel.Propagator` **before any frame is written**, so the propagated context travels as part of `basic.publish` and is therefore preserved through any DLX bounce. Caller-supplied `traceparent`/`tracestate` in `Message[M].Headers` win (last-wins) — the library does not overwrite explicit values.
-  - [ ] **Span outcome contract.** On termination, set `messaging.rabbitmq.outcome` to one of `ack`/`nack`/`return`/`timeout`/`too_large`/`pool_exhausted`/`blocked`/`error` (matches the `publisher_publish_seconds{outcome}` metric label). On every failure class set OTel status to `Error`, call `Span.RecordError(err)`, and set `error.type` to the sentinel name (`"ErrUnroutable"`, `"ErrConfirmTimeout"`, `"ErrPublishNacked"`, `"ErrMessageTooLarge"`, `"ErrChannelPoolExhausted"`, `"ErrConnectionBlocked"`). Encode errors set `error.type="ErrInvalidMessage"`.
-  - [ ] Span is `End()`ed in every termination path including panics (handled by the codec panic-safety `recover`); a test injects a panicking codec and asserts no open spans remain via the in-memory tracer.
+  - [x] `Publisher.Publish` opens a span named `<exchange> publish` with messaging attributes from OTel semantic conventions.
+  - [x] Span attributes match SPEC §6.9 for publish: `messaging.system="rabbitmq"`, `messaging.destination.name`, `messaging.operation.type=publish`, `messaging.message.id`, `messaging.message.conversation_id`, `messaging.message.body.size`, `network.peer.address`, `network.peer.port` (where applicable).
+  - [x] Context is injected into the AMQP headers via `otel.Propagator` **before any frame is written**, so the propagated context travels as part of `basic.publish` and is therefore preserved through any DLX bounce. Caller-supplied `traceparent`/`tracestate` in `Message[M].Headers` win (last-wins) — the library does not overwrite explicit values.
+  - [x] **Span outcome contract.** On termination, set `messaging.rabbitmq.outcome` to one of `ack`/`nack`/`return`/`timeout`/`too_large`/`pool_exhausted`/`blocked`/`error` (matches the `publisher_publish_seconds{outcome}` metric label). On every failure class set OTel status to `Error`, call `Span.RecordError(err)`, and set `error.type` to the sentinel name (`"ErrUnroutable"`, `"ErrConfirmTimeout"`, `"ErrPublishNacked"`, `"ErrMessageTooLarge"`, `"ErrChannelPoolExhausted"`, `"ErrConnectionBlocked"`). Encode errors set `error.type="ErrInvalidMessage"`.
+  - [x] Span is `End()`ed in every termination path including panics (handled by the codec panic-safety `recover`); a test injects a panicking codec and asserts no open spans remain via the in-memory tracer.
 - **Verify:** Integration test with an in-memory tracer asserts span name, attributes, `messaging.rabbitmq.outcome`, status code, and `error.type` across the full failure matrix (`ErrUnroutable`, `ErrConfirmTimeout`, `ErrPublishNacked`, `ErrMessageTooLarge`, encode error, pool-exhausted).
 - **Files:** edits to `publisher.go`, `publisher_tracing_test.go`.
 - **Deps:** T12, T13 (`ErrMessageTooLarge` from Rev 8), T05.

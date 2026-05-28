@@ -443,3 +443,30 @@ Prefer (a) unless a header-heavy codec makes the gap material in practice.
 
 ---
 
+### LATER-38 — `publisher_publish_seconds{outcome}` metric label space lags the span outcome contract
+
+**Context:** T27 implemented the publish span's `messaging.rabbitmq.outcome` attribute using the rich
+label space mandated by SPEC §6.9 (`ack`/`nack`/`return`/`timeout`/`too_large`/`pool_exhausted`/
+`blocked`/`error`), via `publishOutcome` in `publisher.go`. The `publisher_publish_seconds{outcome}`
+Prometheus histogram, however, is still recorded with the coarse legacy labels `success`/`error`/
+`too_large` in `publishOnce` and `PublishBatch`. SPEC §6.9 states the span outcome "mirrors the
+metric `publisher_publish_seconds{outcome}` label" — i.e. both are intended to share the rich space.
+
+**Impact:** Operators cannot pivot 1:1 between a trace's outcome and the metric's outcome dimension;
+"show me the publish-latency distribution for `outcome=return`" is not answerable from the metric
+because the metric only emits `error` for unroutable/nacked/timeout/blocked/pool-exhausted alike.
+No correctness impact — both signals are individually correct; only the label vocabularies diverge.
+
+**Evidence:** T27 (OTel in Publisher) implementation, 2026-05-28. Out of T27 scope: the task's
+Files list is `publisher.go` + `publisher_tracing_test.go`, while aligning the metric labels also
+requires updating the metric-assertion tests (`publisher_test.go`, `publisher_batch_test.go`).
+
+**Suggested solution:** Route the metric's outcome label through the same `publishOutcome` mapper
+used by the span, so `RecordPublish` receives `ack`/`nack`/`return`/`timeout`/`too_large`/
+`pool_exhausted`/`blocked`/`error`. Update the affected metric-assertion tests in the same change.
+Note this is a metric-label vocabulary change and may affect downstream dashboards/alerts.
+
+**Prerequisites:** T27 (done). Coordinate with any dashboard/alert owners before changing labels.
+
+---
+

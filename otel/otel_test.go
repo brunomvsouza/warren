@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
 	"go.opentelemetry.io/otel/trace"
 
@@ -25,6 +26,8 @@ func TestNoOpTracer_doesNotPanic(t *testing.T) {
 	require.NotNil(t, span)
 	require.NotNil(t, ctx)
 	span.SetAttributes(attribute.Int("size", 42))
+	span.SetStatus(codes.Error, "boom")
+	span.SetStatus(codes.Ok, "")
 	span.RecordError(nil)
 	span.RecordError(assert.AnError)
 	span.End()
@@ -72,6 +75,31 @@ func TestPropagator_emptyHeaders_noValidContext(t *testing.T) {
 	ctx := p.Extract(map[string]any{})
 	sc := trace.SpanContextFromContext(ctx)
 	assert.False(t, sc.IsValid(), "empty headers must not produce a valid SpanContext")
+}
+
+func TestPropagator_ActiveContext(t *testing.T) {
+	p := warrenotel.NewPropagator()
+	assert.False(t, p.ActiveContext(context.Background()),
+		"a bare context carries no span context")
+
+	ctx := trace.ContextWithSpanContext(context.Background(), validSpanContext())
+	assert.True(t, p.ActiveContext(ctx),
+		"a context with a valid span context must be reported active")
+}
+
+func TestPropagator_zeroValue_usable(t *testing.T) {
+	// The zero value must default to W3C TraceContext propagation rather than
+	// panicking on a nil inner propagator.
+	var p warrenotel.Propagator
+	ctx := trace.ContextWithSpanContext(context.Background(), validSpanContext())
+	assert.True(t, p.ActiveContext(ctx))
+
+	h := map[string]any{}
+	require.NotPanics(t, func() { p.Inject(ctx, h) })
+	assert.Contains(t, h, warrenotel.HeaderTraceParent)
+
+	got := trace.SpanContextFromContext(p.Extract(h))
+	assert.True(t, got.IsValid())
 }
 
 func TestPropagator_injectOnlyWritesTraceHeaders(t *testing.T) {

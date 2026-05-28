@@ -16,6 +16,7 @@ import (
 	"context"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // Span is a single named operation within a distributed trace.
@@ -24,6 +25,10 @@ type Span interface {
 	End()
 	// SetAttributes adds key-value pairs to the span.
 	SetAttributes(attrs ...attribute.KeyValue)
+	// SetStatus sets the span status code and an optional human-readable
+	// description. Publisher and Consumer set codes.Error on every failure
+	// class so trace UIs render failed spans red (SPEC §6.9).
+	SetStatus(code codes.Code, description string)
 	// RecordError records an error as a span event.
 	RecordError(err error)
 }
@@ -48,4 +53,5 @@ type noOpSpan struct{}
 
 func (noOpSpan) End()                                  {}
 func (noOpSpan) SetAttributes(_ ...attribute.KeyValue) {}
+func (noOpSpan) SetStatus(_ codes.Code, _ string)      {}
 func (noOpSpan) RecordError(_ error)                   {}

@@ -198,6 +198,7 @@ func (b *PublisherBuilder[M]) Build() (*Publisher[M], error) {
 		codec:               b.c,
 		pm:                  b.pm,
 		tracer:              b.tracer,
+		propagator:          otel.NewPropagator(),
 		confirmTimeout:      b.confirmTimeout,
 		mandatory:           b.mandatory,
 		onReturn:            b.onReturn,

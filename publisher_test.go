@@ -15,6 +15,7 @@ import (
 	"github.com/brunomvsouza/warren/codec"
 	"github.com/brunomvsouza/warren/internal/confirms"
 	"github.com/brunomvsouza/warren/metrics"
+	"github.com/brunomvsouza/warren/otel"
 )
 
 // — fake pub channel —————————————————————————————————————————————————————
@@ -304,6 +305,7 @@ func newTestPub[M any](fake *fakePubChannel, pm metrics.PublisherMetrics) (*Publ
 	pub := &Publisher[M]{
 		pools: []*publisherConnPool{pool}, mcs: []*managedConn{mc},
 		codec: codec.NewJSON(), pm: pm, exchange: "x",
+		tracer: otel.NoOpTracer{},
 	}
 	return pub, pool, stopPool
 }
@@ -677,6 +679,7 @@ func TestPublisher_Publish_returnsErrInvalidMessage_onEncodeFailure(t *testing.T
 	pub := &Publisher[badPayload]{
 		pools: []*publisherConnPool{}, mcs: []*managedConn{},
 		codec: codec.NewJSON(), pm: metrics.NoOpPublisherMetrics{}, exchange: "x",
+		tracer: otel.NoOpTracer{},
 	}
 
 	err := pub.Publish(context.Background(), Message[badPayload]{Body: &badPayload{Ch: make(chan int)}})

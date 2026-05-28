@@ -16,6 +16,7 @@ import (
 	"github.com/brunomvsouza/warren/codec"
 	"github.com/brunomvsouza/warren/internal/confirms"
 	"github.com/brunomvsouza/warren/metrics"
+	"github.com/brunomvsouza/warren/otel"
 )
 
 // newTestPubBatch builds a Publisher[M] with a single fake-backed pool and a
@@ -1041,6 +1042,7 @@ func TestPublisher_ConcurrentPublish_And_PublishBatch(t *testing.T) {
 		publishBatchMaxSize: 1024,
 		confirmTimeout:      2 * time.Second,
 		mandatory:           true,
+		tracer:              otel.NoOpTracer{},
 	}
 	defer func() { _ = pub.Close(context.Background()) }()
 
