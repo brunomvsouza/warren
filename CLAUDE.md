@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Source of truth
 
 - **`SPEC.md`** — complete public API surface and contracts (large; read in slices). Anything contradicting SPEC must amend SPEC first.
-- **`tasks/plan.md`** — phased implementation plan (54 tasks T01..T46, with sub-letters). Tasks are numbered and ordered by dependency; recent commits are titled `feat: ... (Txx)` to track progress.
+- **`tasks/plan.md`** — phased implementation plan (10 phases, tasks T01..T73 with sub-letters). Tasks are numbered and ordered by dependency; recent commits are titled `feat: ... (Txx)` to track progress.
 - **`tasks/todo.md`** — granular checklist tied to `plan.md` (very large; read with `offset`/`limit`).
 
 When the user references "Txx", look it up in `tasks/plan.md` for scope and acceptance criteria.
@@ -24,18 +24,18 @@ make examples-build     # go build ./examples/... (unit lane; no broker required
 make examples-smoke     # go test -race -tags=integration ./examples/... (requires Docker)
 ```
 
-### Testes de integração locais
+### Local integration testing
 
-Use `docker-compose.integration.yml` para subir um RabbitMQ idêntico ao CI:
+Use `docker-compose.integration.yml` to bring up a RabbitMQ identical to CI:
 
 ```
-make integration-up                                           # sobe o broker (aguarda healthy)
+make integration-up                                           # start the broker (waits for healthy)
 AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ make test-integration
 AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ make examples-smoke
-make integration-down                                         # para e remove o broker
+make integration-down                                         # stop and remove the broker
 ```
 
-O `AMQP_TEST_URL` deve ser exportado ou prefixado no comando; sem ele os testes de integração pulam com `t.Skip`.
+`AMQP_TEST_URL` must be exported or prefixed on the command; without it the integration tests skip via `t.Skip`.
 
 `examples-build` and `examples-smoke` enforce SPEC §7 "Executable
 examples at checkpoints" + §10 Rev decision 49: every checkpoint
@@ -73,18 +73,20 @@ Module path is `github.com/brunomvsouza/warren` (note: **no `.go` suffix** despi
 A generics-typed wrapper over `github.com/rabbitmq/amqp091-go`. The public API is being built bottom-up following `tasks/plan.md`. Layout (current + planned):
 
 ```
-errors.go, types.go, retry.go, doc.go        ← root package `amqp`
+errors.go, types.go, retry.go, message.go, doc.go  ← root package `amqp`
 log/      metrics/   otel/                   ← pluggable observability (NoOp default)
 internal/reconnect                           ← supervised reconnect loop + RetryPolicy
 internal/redact                              ← AMQP URI userinfo redaction (choke-point)
-internal/amqperror   (planned T07b)          ← *amqp091.Error → reply-code sentinel wraps
-internal/confirms    (planned T11)           ← publisher-confirm tracker
-internal/headers     (planned)               ← x-death parser, otel propagation headers
-codec/               (planned T09/T24-T26)   ← JSON (lax default per Postel's Law; NewJSONStrict opt-in), Protobuf, CloudEvents
-connection.go, channelpool.go (planned)     ← multi-TCP pool, role-split
-topology.go          (planned T14-T16)
-publisher.go, consumer.go, rpc.go, delay.go  (planned)
-amqpmock/, amqptest/ (planned T37)
+internal/amqperror                           ← *amqp091.Error → reply-code sentinel wraps
+internal/confirms                            ← publisher-confirm tracker
+internal/connpool                            ← role-split multi-TCP connection pool
+internal/headers                             ← x-death parser, otel propagation headers
+codec/                                       ← JSON (lax default per Postel's Law; NewJSONStrict opt-in), Protobuf, CloudEvents
+connection.go, channelpool.go                ← multi-TCP pool, role-split
+topology.go                                  ← Topology.Declare / AttachTo
+publisher.go, consumer.go, batch_consumer.go ← Publisher/Consumer/BatchConsumer + XFor[M] builders
+rpc.go, delay.go     (planned)               ← request/reply + delayed publish
+amqpmock/, amqptest/ (planned T37)           ← test doubles + testcontainers helper
 ```
 
 Three architectural invariants that span multiple files:
@@ -131,7 +133,7 @@ When running `/ship` and the decision is NO-GO, fix the blockers, then move non-
 
 ## Working style
 
-The project uses TDD + incremental implementation as a hard discipline (see `.cursor/rules/`). For any behavior change: write the failing test first, then the smallest implementation. For multi-file features: ship in vertical slices, each leaving the tree green. Each task in `tasks/plan.md` has explicit acceptance criteria — treat them as the test list.
+The project uses TDD + incremental implementation as a hard discipline. For any behavior change: write the failing test first, then the smallest implementation. For multi-file features: ship in vertical slices, each leaving the tree green. Each task in `tasks/plan.md` has explicit acceptance criteria — treat them as the test list.
 
 Recent commits follow `feat: <subject> (Txx)` / `fix: <subject> (Txx)`. Keep that format when committing task work so progress is greppable.
 
