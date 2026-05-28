@@ -1283,6 +1283,22 @@ shares the supervisor — sequence, do not parallelize.**
 - **Files:** `options_connection.go`, `connection.go`, SPEC §6.1.
 - **Deps:** T07. **(R10-17, P2.7)**
 
+### [ ] T73 — Codec-call panic safety: `defer recover` → `ErrInvalidMessage` · S
+Formalises the T09 panic-safety contract (todo.md T09 / SPEC §6 "Panic
+safety contract") as a standalone, trackable task. The recover wrapper
+is the safety net for **user-supplied** codecs — a third-party codec may
+panic and the library cannot statically know whether it will, so every
+`Codec.Encode`/`Codec.Decode` call must be wrapped. Built-in codecs
+(`NewJSON`, `NewJSONStrict`, `NewProtobuf`) must never panic by design;
+the recover is not a license for them to do so.
+- **Acceptance:**
+  - [x] **Consumer `Decode`** is wrapped in `defer recover` → `ErrInvalidMessage` (already implemented in `consumer.go`; the recovered value is wrapped as `fmt.Errorf("%w: codec panic: %T", ErrInvalidMessage, r)`). A unit test injects a panicking fake codec and asserts the delivery is nacked-no-requeue with no goroutine crash.
+  - [ ] **Publisher `Encode`** is wrapped in `defer recover` → `ErrInvalidMessage` (gap today: `publisher.go` calls `p.codec.Encode` directly with no recover). On a codec panic, `Publish` returns `ErrInvalidMessage` (wrapping the recovered value), increments `publisher_publish_seconds{outcome="error"}`, and does **not** open a channel or write a frame.
+  - [ ] A unit test in `publisher_test.go` injects a panicking fake codec and asserts `errors.Is(err, ErrInvalidMessage)` with `goleak.VerifyNone` clean.
+- **Verify:** `go test -race -run 'CodecPanic' .` exercises both the publisher and consumer panic paths with a fake codec whose `Encode`/`Decode` panic.
+- **Files:** edits to `publisher.go`, `publisher_test.go`; `consumer.go`/`consumer_test.go` already satisfy the consumer half.
+- **Deps:** T09, T13, T18.
+
 ### Checkpoint — Phase 11 (Rev 10) closed
 - [ ] All T57–T72 acceptance criteria ticked; `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane green; `goleak.VerifyNone` clean.
 - [ ] Reconnect trio (T61/T62/T63) landed in sequence with chaos coverage.
@@ -1297,9 +1313,9 @@ shares the supervisor — sequence, do not parallelize.**
 ---
 
 ## Quick stats
-- Total tasks: **81** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review).
+- Total tasks: **82** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover).
 - Phases: **11**.
-- Estimated sizing: 8× XS · 39× S · 23× M · 0× L (none too big).
+- Estimated sizing: 8× XS · 40× S · 23× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.
 - Bench gates (T44b): ≥ 30k msg/s single-conn, ≥ 100k msg/s with `WithPublisherConnections(4)+WithChannelPoolSize(16)`, `PublishBatch` ≥ 5× `Publish`.

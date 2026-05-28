@@ -72,7 +72,20 @@ func TestNewProtobuf_Encode_nonProtoMessage_returnsErrInvalidMessage(t *testing.
 func TestNewProtobuf_Decode_nonProtoMessage_returnsErrInvalidMessage(t *testing.T) {
 	c := codec.NewProtobuf()
 	var o order
-	err := c.Decode([]byte{0x08, 0x01}, &o)
+	// The wire bytes are irrelevant: the type assertion rejects the non-proto
+	// destination before any unmarshal is attempted.
+	err := c.Decode(nil, &o)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, codec.ErrInvalidMessage), "expected codec.ErrInvalidMessage, got: %v", err)
+}
+
+func TestNewProtobuf_Decode_nilProtoPointer_returnsErrInvalidMessage(t *testing.T) {
+	c := codec.NewProtobuf()
+	var ts *timestamppb.Timestamp // typed-nil proto.Message
+	// Must surface ErrInvalidMessage, never panic: proto.Unmarshal into a nil
+	// pointer dereferences nil. Mirrors the JSON codec, which errors (not panics)
+	// on a nil destination.
+	err := c.Decode([]byte{0x08, 0x01}, ts)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, codec.ErrInvalidMessage), "expected codec.ErrInvalidMessage, got: %v", err)
 }

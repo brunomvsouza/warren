@@ -38,6 +38,12 @@ func (c *protobufCodec) Decode(data []byte, v any) error {
 	if !ok {
 		return fmt.Errorf("%w: value of type %T does not implement proto.Message", ErrInvalidMessage, v)
 	}
+	// proto.Unmarshal dereferences the destination, so a typed-nil pointer would
+	// panic. ProtoReflect().IsValid() is false exactly for a nil concrete message
+	// (proto-native, no reflect on the hot path); reject it as ErrInvalidMessage.
+	if !m.ProtoReflect().IsValid() {
+		return fmt.Errorf("%w: Decode requires a non-nil %T destination", ErrInvalidMessage, m)
+	}
 	if err := proto.Unmarshal(data, m); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}

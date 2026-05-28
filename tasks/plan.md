@@ -962,6 +962,7 @@ supervisor and MUST be sequenced, not parallelized.** R10-18
 - **T70** `connection.go` + `consumer.go` + `batch_consumer.go`: graceful-shutdown completeness — specify + handle prefetched-but-undispatched deliveries on `Close` (drain or nack-requeue, documented), and flush a `BatchConsumer`'s pending partial batch on `Close`/final `FlushAfter`. **(R10-15, P2.5)**
 - **T71** `metrics/` + `channelpool.go` + `consumer.go`: add channel-pool acquire-wait/saturation metric, a `consumer_in_flight{queue}` gauge, and a `consumer_redelivered_total{queue}` counter (redelivery ratio = leading instability signal). Coordinates with Phase 10 T50/T52/T53. **(R10-16, P2.6)**
 - **T72** `options_connection.go` + `connection.go`: `net.Dialer` keepalive on the default dialer (document `TCP_USER_TIMEOUT` where available) so a write to a half-open socket fails promptly rather than relying on `ConfirmTimeout` as the only backstop. **(R10-17, P2.7)**
+- **T73** `publisher.go` + `consumer.go`: wrap every `Codec.Encode`/`Codec.Decode` call in a `defer recover` that converts a recovered value into `ErrInvalidMessage` (T09 panic-safety contract, formalised as a trackable task). The consumer path already recovers `Decode`; the publisher's `Encode` call does **not** — close that gap so a panicking **user-supplied** codec cannot crash the publish goroutine. Built-in codecs (`NewJSON`/`NewJSONStrict`/`NewProtobuf`) must never panic by design; the recover is the net for third-party codecs, not a license for the built-ins. **(post-T24 review)**
 
 **Checkpoint Phase 11:**
 - [ ] `go build ./...` + `make lint` clean; `go test -race ./...` and the integration lane pass; `goleak.VerifyNone` clean.
@@ -978,6 +979,7 @@ supervisor and MUST be sequenced, not parallelized.** R10-18
 - [ ] `x-alternate-exchange` (T68) and exchange-to-exchange bindings (T69) declare correctly (verified via `rabbitmqctl`/integration).
 - [ ] `Close` drains/nack-requeues prefetched-but-undispatched deliveries; `BatchConsumer` flushes a partial batch on `Close` (T70).
 - [ ] New observability metrics present and exercised (T71); default dialer sets keepalive (T72).
+- [ ] A panicking fake codec injected into both the publisher and consumer paths surfaces `ErrInvalidMessage` (not a crash); the publisher `Encode` call is wrapped in `defer recover` (T73).
 - [ ] SPEC §10 "Rev 10" decisions reflected; any per-task SPEC amendment landed in the same PR as its code.
 
 ## Out of scope (tracked for v0.2)
