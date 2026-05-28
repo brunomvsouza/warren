@@ -445,7 +445,7 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, raw amqp091.Delivery, h RawHandler[M], autoAck bool) {
 	decodeStart := time.Now()
 	var body M
-	if err := safeDecodeConsumer(c.codec, raw.Body, &body); err != nil {
+	if err := safeDecodeConsumer(c.codec, raw.Body, raw.Headers, &body); err != nil {
 		// Record actual decode duration so the metric is meaningful even for
 		// large or slow-to-fail payloads (previously hardcoded to 0).
 		c.cm.RecordHandler(c.queue, "decode_error", time.Since(decodeStart))
@@ -647,7 +647,10 @@ func handlerOutcome(err error) string {
 }
 
 // safeDecodeConsumer decodes payload, recovering from codec panics per T09 contract.
-func safeDecodeConsumer(c codec.Codec, payload []byte, out any) (err error) {
+// A HeaderCodec (e.g. CloudEvents binary mode) also receives the delivery headers
+// so ce-* attributes can be reconstituted; it must only read the headers, never
+// mutate them (the library does not rewrite consume-path headers).
+func safeDecodeConsumer(c codec.Codec, payload []byte, headers amqp091.Table, out any) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			// Use %T (type only) rather than %v to avoid embedding payload data in the
@@ -655,6 +658,9 @@ func safeDecodeConsumer(c codec.Codec, payload []byte, out any) (err error) {
 			err = fmt.Errorf("%w: codec panic: %T", ErrInvalidMessage, r)
 		}
 	}()
+	if hc, ok := c.(codec.HeaderCodec); ok {
+		return hc.DecodeWithHeaders(payload, headers, out)
+	}
 	return c.Decode(payload, out)
 }
 
