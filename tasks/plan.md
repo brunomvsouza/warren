@@ -955,14 +955,20 @@ test in one path. **The reconnect-path trio (T61→T62→T63) shares the
 supervisor and MUST be sequenced, not parallelized.** R10-18
 (async-publish ceiling) is deferred to `LATER.md` LATER-34.
 
+**Lens-01 re-review (2026-05-28):** the protocol re-review (Phase 12
+below) pulls **T60, T61, T65, T66** forward into its priority sequence
+(they each violate the §1 no-silent-failure bar in v0.1); their
+definitions remain here. It also extends **T58, T59, T63, T64** (see the
+amended bullets) and adds **T74–T83**.
+
 - **T57** `message.go` + `topology.go`: godoc on `Message.Delay` and `ExchangeKindDelayed` mirroring the SPEC §6.5 durability warning (scheduled messages lost on node failure; recommend durable-queue + TTL + DLX); optional declare-time warning when an `ExchangeDelayed` is declared. **(R10-1, P0.1)**
-- **T58** `topology.go`: `validate()` warning when `Type=QueueTypeQuorum && DeliveryLimit==0` (RabbitMQ 4.x applies a broker default of 20 — not unbounded). Align §9 poison-loop wording. **(R10-2, P0.2)**
-- **T59** `internal/confirms` / `publisher_test.go`: regression test that locks the return/ack ordering invariant — fails if the `basic.return` notify channel is buffered or the demux is split across goroutines (assert `MarkReturned` precedes `Ack` resolution for a mandatory-unroutable publish under load). **(R10-3, P0.3)**
+- **T58** `topology.go`: `validate()` warning when `Type=QueueTypeQuorum && DeliveryLimit==0` (RabbitMQ 4.x applies a broker default of 20 — not unbounded). Align §9 poison-loop wording. **Lens-01 (RMQ-06):** make the warning **version-aware** — read the broker version from the `connection.start` server-properties: on 4.x the default is 20 (silent drop at the 21st delivery), but on **3.13 a `DeliveryLimit==0` quorum queue is genuinely unbounded (infinite poison loop)**, the opposite failure mode. Fix the stale `topology.go:48-49` "Zero means unbounded" godoc; add a per-version poison-loop integration assertion (gate G3). **(R10-2, P0.2)**
+- **T59** `internal/confirms` / `publisher_test.go`: regression test that locks the return/ack ordering invariant — fails if the `basic.return` notify channel is buffered or the demux is split across goroutines (assert `MarkReturned` precedes `Ack` resolution for a mandatory-unroutable publish under load). **Lens-01 (RMQ-16):** also add a real-broker assertion (not just the mock tracker), pin the `amqp091-go` version in `go.mod`, and comment that the invariant depends on amqp091-go's single synchronous reader goroutine (a buffered or worker-pool dispatcher upstream would silently break it). **(R10-3, P0.3)**
 - **T60** `delivery.go` + `consumer.go`: idempotent resolved-once guard on `Delivery[M]` (mirrors `Batch[M]`). A handler-timeout verdict followed by a late handler `Ack`/`Nack`, or a double `Delivery.Ack/Nack/AckIf` via `ConsumeRaw`, is a no-op — never a second frame that channel-closes with `PRECONDITION_FAILED`. **(R10-5, P0.4)**
 - **T61** `connection.go` + `consumer.go`: channel-level recovery distinct from TCP reconnect. Consumer observes its own channel close (404/406/ack-error with the TCP connection still up) and reopens + re-`basic.qos` + re-`basic.consume`, incrementing `consumer_resubscribed_total`, without a full reconnect. **(R10-6, P1.4)** — *sequence with T62/T63.*
 - **T62** `connection.go` + `topology.go`: redeclare broker-global topology **once per recovery event** at the `*Connection` level instead of per pooled `managedConn` (today `AttachTo` registers the hook on every conn → N×pool declares on broker restart). Keep `basic.consume`/`basic.qos` reissue per consumer connection. **(R10-7, P1.2)** — *sequence with T61/T63.*
-- **T63** `connection.go`: bound the synchronous reconnect barrier with a max duration; on cap, blocked publishers get `ErrReconnecting` instead of stalling indefinitely behind a half-alive broker (matters most with `PublishTimeout=0` + `context.Background()`). **(R10-8, P1.6)** — *sequence with T61/T62.*
-- **T64** `topology.go`: quorum-queue structural validation in `validate()` — reject non-`Durable`, `Exclusive`, `AutoDelete`, or `x-max-priority` quorum queues with `ErrInvalidOptions`. Reconcile the existing "MaxPriority" validation reference (no such struct field) to check `Args["x-max-priority"]`. **(R10-9, P1.5)** — *coordinate with T58 (same `validate()`).*
+- **T63** `connection.go`: bound the synchronous reconnect barrier with a max duration; on cap, blocked publishers get `ErrReconnecting` instead of stalling indefinitely behind a half-alive broker (matters most with `PublishTimeout=0` + `context.Background()`). **Lens-01 (RMQ-17):** the cap must also cover **Khepri (4.1 default)**, where `queue.declare` is a Raft-quorum op that can block during partition recovery. **(R10-8, P1.6)** — *sequence with T61/T62.*
+- **T64** `topology.go`: quorum-queue structural validation in `validate()` — reject non-`Durable`, `Exclusive`, `AutoDelete` quorum queues with `ErrInvalidOptions`, and reject `x-max-priority` on quorum (via the `MaxPriority` field, already classic-gated at `topology.go:436`, **and** via a raw `Args["x-max-priority"]`). Require `Durable` on stream queues too. **Lens-01 (RMQ-20):** the `Queue.MaxPriority` field **does** exist in code (`topology.go:56`) — retire the stale "no such struct field" note and instead **document `Queue.MaxPriority` in SPEC §6.6** (spec/code drift). **(R10-9, P1.5)** — *coordinate with T58 (same `validate()`).*
 - **T65** `topology.go` + `consumer.go` + `metrics/`: auto-declared `<source>.dlq` becomes durable (quorum-capable) with configurable bounds; Consumer mirrors the `Replier` missing-DLX validation — when `MaxRedeliveries>0` and the wired `Topology` has no DLX for the source queue, warn at `Build` and emit a drop metric so poison drops are observable. **(R10-10, P1.3)** — *builds on T47 (DLX binding), T52 (`dlq_depth`).*
 - **T66** `connection.go` + `options_connection.go`: shuffle the `WithAddrs` list per connection and rotate addresses on reconnect, to avoid every client stampeding the same node on broker recovery. **(R10-11, P2.1)**
 - **T67** `connection.go`: define + implement `Dial` partial-pool-connect policy (succeed if ≥1 connection per role connects, supervisor reconnects the rest; or fail-fast — decision recorded in SPEC §6.1). **(R10-12, P2.2)**
@@ -990,6 +996,49 @@ supervisor and MUST be sequenced, not parallelized.** R10-18
 - [ ] New observability metrics present and exercised (T71); default dialer sets keepalive (T72).
 - [ ] A panicking fake codec injected into both the publisher and consumer paths surfaces `ErrInvalidMessage` (not a crash); the publisher `Encode` call is wrapped in `defer recover` (T73).
 - [ ] SPEC §10 "Rev 10" decisions reflected; any per-task SPEC amendment landed in the same PR as its code.
+
+### Phase 12 — Protocol-Correctness Re-review (Lens 01: RabbitMQ 3.13 + 4.x)
+
+Goal: close the protocol defects from the Lens-01 adversarial spec
+validation (`spec-validation/01-rabbitmq-amqp-protocol.md`, findings
+`RMQ-01..RMQ-31`). A reconciliation against the in-progress implementation
+showed several *spec* findings are already correct in code (the SPEC
+drifted) while a documented feature (`at-least-once` dead-lettering) is
+unimplemented and quorum queues have no structural validation. Owner
+decisions (2026-05-28): implement `at-least-once` with forced
+`reject-publish`; pull the four §1-violating defects (T60/T61/T65/T66) into
+this phase; keep the async publish API in `LATER.md` LATER-34 (§9 wording
+fixed only). Per-task SPEC amendments land in the same PR as the code
+(CLAUDE.md "amend SPEC first"); a SPEC §10 "Rev 11" note records the pass
+when the first task lands. **Differential 3.13-vs-4.x integration
+assertions are required**, not just "suite passes". Gate task T74 runs first.
+
+- **T74** verification gates (real broker, **3.13 and 4.x**): capture ground truth for G1 `x-death` delivery-limit reason atom (`delivery-limit` vs `delivery_limit`), G2 x-death `count` accumulation shape, G3 whether 4.x *classic* queues honour `x-delivery-limit`, G4 valid `{quorum, overflow, at-least-once}` declare permutations, G5 broker `max_message_size` defaults per version, G6 `prefetch_size!=0` reject-vs-ignore. Results table gates T75/T76/T58/T78/T80. **(Lens-01 gates, P0)**
+- **T75** `internal/headers/xdeath.go` + integration: x-death delivery-limit reason token (RMQ-01). If G1 shows the broker emits `delivery_limit`, fix the matched atom and normalise `-`↔`_`; **replace the fabricated unit test** (`makeEntry(...,"delivery-limit",...)`) with a real-broker test driving a quorum `x-delivery-limit` dead-letter and asserting `DeathCount()` increments. SPEC §6.3 + decision 34. **(RMQ-01, P0; dep G1)**
+- **T76** `topology.go`: implement `at-least-once` DLX strategy (decision 52, RMQ-05) — for quorum + DLX, inject `x-dead-letter-strategy: at-least-once` **and** force/validate `x-overflow=reject-publish` (auto-set with a warning, or `ErrInvalidOptions` on `drop-head`). Document the source-queue memory cost. SPEC §6.6 + decision 52. **(RMQ-05, P0; dep G4; coordinate T64/T65)**
+- **T77** `publisher.go`: reject a `Mandatory()` `PublishBatch` containing duplicate explicit `MessageID`s with `ErrInvalidMessage` (RMQ-15) — replace the documented-trap comment at `publisher.go:689-694`. SPEC §6.2 + decision 14. **(RMQ-15, P1)**
+- **T78** SPEC↔implementation reconciliation, **no behaviour change** (RMQ-02/03/04/14): align SPEC + code comments with the correct code — 311 permanent (§6.8 IsTransient godoc + PublishRetry trigger list); `DeathCount` "sum of the `count` sub-field" (§6.3); disk/memory alarm → `ErrConnectionBlocked`, not nack (§6.2, decision 20, `errors.go:38` comment); `PrefetchBytes` dropped client-side / broker **rejects** non-zero `prefetch_size` (§6/§6.3). Guard tests: 311-permanent + `Qos` size-arg == 0. **(RMQ-02/03/04/14, P1)**
+- **T79** SPEC §6.8: annotate reply-code sentinels channel-level (311/403/404/405/406) vs connection-level (320/402/501–505/506/530/540/541); document the recovery implication (ties to T61). **(RMQ-18, P2)**
+- **T80** SPEC §6.1: per-version `max_message_size` defaults (128 MiB 3.13 / 16 MiB 4.0+, per G5); "4096 is the AMQP-spec minimum; 131072 the default" (fix the stale "131072 is the minimum"). **(RMQ-12/13, P2; dep G5)**
+- **T81** version-divergence docs (RMQ-17/19/21/23/30/31): Khepri caveat; CloudEvents 0-9-1⇄1.0 bridge version note + round-trip interop test (coord. lens 03); pin §9 verification to the management HTTP API instead of `rabbitmqadmin` CLI (v2 rewrite in 4.0); mirrored-queue staleness (§6.2); transient-queues-deprecated-feature note; mixed-version-cluster caveat. **(P2)**
+- **T82** contract-precision SPEC fixes (RMQ-24/25/26/27/28/29): decision-17 default-"1" staleness; ack-vs-confirm wording (§6.2); sub-ms `Expiration`→`"0"` footgun (optionally reject `<1ms` non-zero, §6.5); Priority range + "quorum has no priority"; exclusive-reply-queue redeclare-on-reconnect (§6.7); prefetch-16 as guidance not a broker constant (§6.3). **(P3)**
+- **T83** SPEC §9 throughput-honesty wording (RMQ-11): qualify 30k/100k with local-broker/sub-ms-RTT, document the `pool/RTT` ceiling + a remote projection, cross-reference LATER-34. **(RMQ-11, P2)**
+
+**Pulled forward into this phase (definitions in Phase 11; each violates the §1 no-silent-failure bar):** T60 (double-ack guard, RMQ-08), T61 (channel-level recovery, RMQ-09 — couples with T62/T63), T65 (DLQ bounds + Consumer missing-DLX, RMQ-07; coordinate with T76), T66 (`WithAddrs` shuffle, RMQ-10).
+
+**Sequencing:** T74 first → gates T75/T76/T58/T78/T80. T64 → T76 → T65 (shared `validate()`/DLX path). T60 → T61 (couples with T62/T63). Others independent.
+
+**Checkpoint Phase 12:**
+- [ ] T74 gate results documented; each downstream task cites its gate.
+- [ ] x-death delivery-limit `DeathCount()` verified on a **real** 4.x broker; fabricated unit test replaced (T75).
+- [ ] Quorum + DLX declares `at-least-once` with `reject-publish`; an invalid `drop-head` combo is rejected/auto-fixed (T76).
+- [ ] Mandatory `PublishBatch` with duplicate `MessageID` returns `ErrInvalidMessage` (T77).
+- [ ] SPEC matches implementation: 311 permanent, `DeathCount` sums `count`, alarm → `ErrConnectionBlocked`, `prefetch_size` always 0 (T78).
+- [ ] Version-aware `DeliveryLimit==0` warning correct on **both** 3.13 and 4.x (T58); quorum structural validation + documented `Queue.MaxPriority` (T64).
+- [ ] §1 silent-failure defects closed: T60, T61, T65, T66.
+- [ ] §9 throughput numbers state their topology/RTT assumptions (T83); version caveats documented (T79/T80/T81/T82).
+- [ ] Integration lane green on **both** RabbitMQ 3.13 and 4.x with differential assertions; `go build ./...` + `make lint` clean; `goleak.VerifyNone` clean.
+- [ ] README "Available now / On the roadmap" synced where the contract changed (at-least-once feature, error classification, defaults).
 
 ## Out of scope (tracked for v0.2)
 

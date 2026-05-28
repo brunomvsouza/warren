@@ -1163,6 +1163,10 @@ corrections R10-1..R10-4 are already applied inline; these tasks make
 code/validation/tests/observability match. **Reconnect trio T61→T62→T63
 shares the supervisor — sequence, do not parallelize.**
 
+**Lens-01 re-review (2026-05-28):** T60, T61, T65, T66 are pulled forward
+into Phase 12's priority sequence (they violate the §1 no-silent-failure
+bar); their definitions remain here. T58, T59, T63, T64 are extended below.
+
 ### [ ] T57 — Delayed-exchange durability godoc/warning [P0] · XS
 - **Acceptance:**
   - [ ] Godoc on `Message.Delay` and `ExchangeKindDelayed` mirrors the SPEC §6.5 warning: scheduled messages live in a non-replicated node-local table and are lost on node failure; recommends durable-queue + `x-message-ttl` + DLX.
@@ -1173,18 +1177,20 @@ shares the supervisor — sequence, do not parallelize.**
 
 ### [ ] T58 — Quorum `DeliveryLimit==0` default-20 warning [P0] · XS
 - **Acceptance:**
-  - [ ] `Topology.validate()` logs a warning when `Type=QueueTypeQuorum && DeliveryLimit==0` (RabbitMQ 4.x applies a broker default of 20, not unbounded).
+  - [ ] `Topology.validate()` logs a warning when `Type=QueueTypeQuorum && DeliveryLimit==0`.
+  - [ ] **Version-aware (Lens-01 RMQ-06):** read the broker version from `connection.start` server-properties — on 4.x warn "broker default 20, drops at 21"; on **3.13** warn "unbounded — infinite poison loop". The stale `topology.go:48-49` "Zero means unbounded" godoc is corrected.
   - [ ] SPEC §9 poison-loop wording aligned with the corrected §6.3/§6.6.
-- **Verify:** Table test: quorum + `DeliveryLimit==0` → warning; quorum + `DeliveryLimit>0` → no warning; classic → no warning.
-- **Files:** `topology.go`, `topology_test.go`.
-- **Deps:** T14, T15, T20. **(R10-2, P0.2)** — coordinate with T64 (same `validate()`).
+- **Verify:** Table test: quorum + `DeliveryLimit==0` → warning; quorum + `DeliveryLimit>0` → no warning; classic → no warning. Per-version poison-loop **integration** assertion on 3.13 and 4.x (gate G3).
+- **Files:** `topology.go`, `connection.go` (broker-version helper), `topology_test.go`.
+- **Deps:** T14, T15, T20. **(R10-2, P0.2)** — coordinate with T64 (same `validate()`); dep gate G3/T74.
 
 ### [ ] T59 — Return/ack ordering invariant regression test [P0] · S
 - **Acceptance:**
   - [ ] Test fails if the `basic.return` notify channel is made buffered, or if confirm/return demux is split across two goroutines.
   - [ ] Under concurrent mandatory-unroutable publishes, every publish resolves `ErrUnroutable` (zero false successes); asserts `MarkReturned` precedes the ack resolution.
-- **Verify:** Run with `-race -count=100`; a deliberately-buffered return channel variant in the test makes it red.
-- **Files:** `internal/confirms/tracker_test.go`, `publisher_test.go`.
+  - [ ] **Lens-01 (RMQ-16):** a real-broker assertion (not just the mock tracker) covers the same path; `amqp091-go` is pinned in `go.mod`; a comment records the dependency on amqp091-go's single synchronous reader goroutine (a buffered/worker-pool dispatcher upstream would silently break the invariant).
+- **Verify:** Run with `-race -count=100`; a deliberately-buffered return channel variant in the test makes it red. Real-broker variant on the integration lane.
+- **Files:** `internal/confirms/tracker_test.go`, `publisher_test.go`, `go.mod`.
 - **Deps:** T11, T13. **(R10-3, P0.3)**
 
 ### [ ] T60 — Single-delivery double-verdict idempotency guard [P0] · S
@@ -1214,16 +1220,18 @@ shares the supervisor — sequence, do not parallelize.**
 ### [ ] T63 — Reconnect barrier max-duration cap [P1] · S
 - **Acceptance:**
   - [ ] The synchronous redeclare barrier is bounded by a configurable max duration; on cap, blocked `Publish` calls return `ErrReconnecting` rather than stalling indefinitely.
+  - [ ] **Lens-01 (RMQ-17):** the cap covers **Khepri (4.1 default)**, where `queue.declare` is a Raft-quorum op that can block during partition recovery.
 - **Verify:** Unit test with a mock channel whose redeclare blocks longer than the cap asserts `Publish` returns `ErrReconnecting` at the cap (with `PublishTimeout=0` + `context.Background()`).
 - **Files:** `connection.go`, `options_connection.go`, `connection_internal_test.go`.
 - **Deps:** T07, T62. **(R10-8, P1.6)** — sequence with T61/T62.
 
 ### [ ] T64 — Quorum-queue structural validation + MaxPriority fix [P1] · S
 - **Acceptance:**
-  - [ ] `Topology.validate()` returns `ErrInvalidOptions` for a quorum queue that is non-`Durable`, `Exclusive`, `AutoDelete`, or carries `x-max-priority`.
-  - [ ] The existing "MaxPriority" validation reference is reconciled to inspect `Args["x-max-priority"]` (no such struct field exists).
-- **Verify:** Table-driven test covering each rejected quorum combination + a valid quorum queue passing.
-- **Files:** `topology.go`, `topology_test.go`.
+  - [ ] `Topology.validate()` returns `ErrInvalidOptions` for a quorum queue that is non-`Durable`, `Exclusive`, `AutoDelete`, or carries `x-max-priority` (via the `MaxPriority` field **and** a raw `Args["x-max-priority"]`).
+  - [ ] Stream queues are required to be `Durable` too.
+  - [ ] **Lens-01 (RMQ-20):** the `Queue.MaxPriority` field **does** exist in code (`topology.go:56`) — retire the stale "no such struct field" note; instead **document `Queue.MaxPriority` in SPEC §6.6** (spec/code drift).
+- **Verify:** Table-driven test covering each rejected quorum/stream combination + a valid quorum queue passing.
+- **Files:** `topology.go`, `topology_test.go`, SPEC §6.6.
 - **Deps:** T14, T15. **(R10-9, P1.5)** — coordinate with T58 (same `validate()`).
 
 ### [ ] T65 — DLQ durability/bounds + Consumer missing-DLX parity [P1] · M
@@ -1307,6 +1315,103 @@ the recover is not a license for them to do so.
 - [ ] Reconnect trio (T61/T62/T63) landed in sequence with chaos coverage.
 - [ ] Each per-task SPEC amendment landed in the same PR as its code; SPEC §10 "Rev 10" stays the source of record.
 
+## Phase 12 — Protocol-Correctness Re-review (Lens 01: RabbitMQ 3.13 + 4.x)
+
+Closes the Lens-01 protocol findings (`spec-validation/01-rabbitmq-amqp-protocol.md`,
+`RMQ-01..RMQ-31`). Reconciliation: several *spec* findings are already
+correct in code (SPEC drifted → doc-only fixes), while `at-least-once`
+dead-lettering is unimplemented and quorum has no structural validation.
+Owner decisions: implement `at-least-once` with forced `reject-publish`;
+pull T60/T61/T65/T66 forward (defined in Phase 11); async API stays
+LATER-34. **Differential 3.13-vs-4.x integration assertions required.**
+Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
+
+### [ ] T74 — Verification gates G1–G6 (real broker, 3.13 + 4.x) [P0] · S
+- **Acceptance:**
+  - [ ] Ground-truth captured on **both** broker versions for: G1 `x-death` delivery-limit reason atom (`delivery-limit` vs `delivery_limit`); G2 x-death `count` accumulation shape; G3 4.x *classic* queue `x-delivery-limit` honoring; G4 valid `{quorum, overflow, at-least-once}` declare permutations; G5 broker `max_message_size` defaults per version; G6 `prefetch_size!=0` reject-vs-ignore.
+  - [ ] Results table committed (under `spec-validation/` or task notes); downstream tasks cite their gate.
+- **Verify:** `make integration-up` + `AMQP_TEST_URL=… make test-integration` against the 3.13 and 4.x images.
+- **Files:** `*_integration_test.go`, `spec-validation/` (results table).
+- **Deps:** T07d, T14, T15. **(Lens-01 gates, P0)**
+
+### [ ] T75 — x-death delivery-limit reason token (RMQ-01) [P0] · S
+- **Acceptance:**
+  - [ ] If G1 shows the broker emits `delivery_limit`, the matched atom in `internal/headers/xdeath.go:83` is corrected and `-`↔`_` normalised defensively.
+  - [ ] The **fabricated** unit test (`makeEntry(...,"delivery-limit",...)`) is replaced by a real-broker integration test driving a quorum `x-delivery-limit` dead-letter and asserting `DeathCount()` increments.
+- **Verify:** Integration on 4.x: a poison message past `DeliveryLimit` dead-letters and `DeathCount()` > 0 with the real reason.
+- **Files:** `internal/headers/xdeath.go`, `internal/headers/xdeath_test.go`, a new integration test, SPEC §6.3 + decision 34.
+- **Deps:** T17, T74 (G1). **(RMQ-01, P0)**
+
+### [ ] T76 — at-least-once DLX strategy implemented (RMQ-05) [P0] · M
+- **Acceptance:**
+  - [ ] For a quorum queue with a DLX, `Declare` injects `x-dead-letter-strategy: at-least-once`.
+  - [ ] `x-overflow=reject-publish` is forced/validated for that queue (auto-set with a warning, or `ErrInvalidOptions` if the user set `drop-head`) — at-least-once is invalid with drop-head.
+  - [ ] The source-queue memory cost of at-least-once is documented.
+- **Verify:** Unit: injection + overflow rule. Integration: quorum + DLX declares successfully and dead-letters at-least-once.
+- **Files:** `topology.go`, `topology_test.go`, a new integration test, SPEC §6.6 + decision 52.
+- **Deps:** T14, T15, T47, T74 (G4). **(RMQ-05, P0)** — coordinate with T64/T65.
+
+### [ ] T77 — PublishBatch+Mandatory duplicate-MessageID validation (RMQ-15) [P1] · S
+- **Acceptance:**
+  - [ ] A `Mandatory()` `PublishBatch` containing duplicate explicit `MessageID`s returns `ErrInvalidMessage` before publishing (the documented-trap comment at `publisher.go:689-694` is replaced by enforcement).
+- **Verify:** Unit test: duplicate explicit IDs in a mandatory batch → `errors.Is(err, ErrInvalidMessage)`; auto-stamped IDs still pass.
+- **Files:** `publisher.go`, `publisher_test.go`, SPEC §6.2 + decision 14.
+- **Deps:** T13. **(RMQ-15, P1)**
+
+### [ ] T78 — SPEC↔implementation reconciliation (no behaviour change) (RMQ-02/03/04/14) [P1] · S
+- **Acceptance:**
+  - [ ] SPEC §6.8 IsTransient godoc + PublishRetry trigger list mark **311 permanent** (matches `errors.go:248`).
+  - [ ] SPEC §6.3 says `DeathCount` is the **sum of the `count` sub-field** (matches `xdeath.go:77-88`).
+  - [ ] SPEC §6.2 + decision 20 + the `errors.go:38` comment say a disk/memory alarm surfaces `ErrConnectionBlocked`, **not** `ErrPublishNacked`.
+  - [ ] SPEC §6/§6.3 state `PrefetchBytes` is dropped client-side and the broker **rejects** non-zero `prefetch_size` (the code already sends 0 at `consumer.go:367`).
+- **Verify:** Guard unit tests: 311 `IsPermanent` (confirm existing); a test asserting the `Qos` size arg is 0.
+- **Files:** SPEC §6.2/§6.3/§6.8, `errors.go` (comment), `consumer_test.go`.
+- **Deps:** —. **(RMQ-02/03/04/14, P1)**
+
+### [ ] T79 — Reply-code channel/connection scope annotation (RMQ-18) [P2] · XS
+- **Acceptance:**
+  - [ ] SPEC §6.8 annotates each reply-code sentinel as channel-level (311/403/404/405/406) or connection-level (320/402/501–505/506/530/540/541), with the recovery implication noted (ties to T61).
+- **Verify:** Doc review; cross-reference check against T61.
+- **Files:** SPEC §6.8 (`errors.go` godoc).
+- **Deps:** —. **(RMQ-18, P2)**
+
+### [ ] T80 — Sizing/limits factual fixes (RMQ-12/13) [P2] · XS
+- **Acceptance:**
+  - [ ] SPEC §6.1 states the per-version broker `max_message_size` defaults (128 MiB 3.13 / 16 MiB 4.0+, per G5) and that >default needs the broker raised; reconciled with the ≥100 MiB pointer-out guidance.
+  - [ ] SPEC §6.1 fixes "131072 is the AMQP-spec minimum" → "4096 is the minimum; 131072 the default".
+- **Verify:** Doc review against G5 results.
+- **Files:** SPEC §6.1.
+- **Deps:** T74 (G5). **(RMQ-12/13, P2)**
+
+### [ ] T81 — Version-divergence documentation (RMQ-17/19/21/23/30/31) [P2] · S
+- **Acceptance:**
+  - [ ] Khepri caveat (declares are Raft-quorum ops); CloudEvents 0-9-1⇄1.0 bridge version note + a round-trip interop test (coord. lens 03); §9 verification pinned to the management HTTP API instead of `rabbitmqadmin` CLI (v2 rewrite in 4.0); mirrored-queue staleness fixed (§6.2); transient-queues-deprecated-feature note; mixed-version-cluster caveat.
+- **Verify:** Doc review; the CloudEvents interop round-trip test passes on both versions.
+- **Files:** SPEC §6.1/§6.2/§6.9/§9, a CloudEvents interop test.
+- **Deps:** T26. **(RMQ-17/19/21/23/30/31, P2)**
+
+### [ ] T82 — Contract-precision SPEC fixes (RMQ-24/25/26/27/28/29) [P3] · S
+- **Acceptance:**
+  - [ ] decision-17 default-"1" staleness fixed; ack-vs-confirm wording (§6.2); sub-ms `Expiration`→`"0"` footgun documented (optionally reject `<1ms` non-zero, §6.5); Priority range + "quorum has no priority" (§6.5); exclusive-reply-queue redeclare-on-reconnect (§6.7); prefetch-16 reworded as guidance not a broker constant (§6.3).
+- **Verify:** Doc review; if `<1ms` reject is implemented, a unit test asserts `ErrInvalidMessage`.
+- **Files:** SPEC §6.2/§6.3/§6.5/§6.7/§10, optionally `message.go` + `message_test.go`.
+- **Deps:** —. **(RMQ-24/25/26/27/28/29, P3)**
+
+### [ ] T83 — §9 throughput-honesty wording (RMQ-11) [P2] · XS
+- **Acceptance:**
+  - [ ] SPEC §9 qualifies the 30k/100k targets with the local-broker/sub-ms-RTT assumption, documents the `pool/RTT` ceiling + a remote projection, and cross-references LATER-34.
+- **Verify:** Doc review.
+- **Files:** SPEC §9.
+- **Deps:** —. **(RMQ-11, P2)**
+
+### Checkpoint — Phase 12 (Lens 01) closed
+- [ ] T74 gate results documented; downstream tasks cite their gate.
+- [ ] Poison path correct on **both** 3.13 and 4.x: T75 (real-broker x-death), T58 (version-aware warning), T64 (quorum validation).
+- [ ] DLX correct: T76 (at-least-once + reject-publish), T65 (durable bounded DLQ + Consumer missing-DLX).
+- [ ] §1 silent-failure defects closed: T60, T61, T65, T66.
+- [ ] SPEC matches implementation (T78); version caveats + honest §9 numbers (T79/T80/T81/T82/T83).
+- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 **and** 4.x) green; `goleak.VerifyNone` clean; README synced.
+
 ### Checkpoint — v0.1.0 shipped
 - [ ] Every SPEC §9 success criterion ticked.
 - [ ] `v0.1.0` tag on `main`.
@@ -1316,8 +1421,8 @@ the recover is not a license for them to do so.
 ---
 
 ## Quick stats
-- Total tasks: **82** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover).
-- Phases: **11**.
+- Total tasks: **92** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review).
+- Phases: **12**.
 - Estimated sizing: 8× XS · 40× S · 23× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.
