@@ -8,6 +8,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -76,6 +79,36 @@ func TestNewProtobuf_Encode_nilProtoPointer_returnsErrInvalidMessage(t *testing.
 	// silently publish an empty body. Encode must reject it with
 	// ErrInvalidMessage, mirroring Decode's nil-destination guard.
 	_, err := c.Encode(ts)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, codec.ErrInvalidMessage), "expected codec.ErrInvalidMessage, got: %v", err)
+}
+
+func TestNewProtobuf_Encode_marshalError_returnsErrInvalidMessage(t *testing.T) {
+	c := codec.NewProtobuf()
+	// Build a proto2 message with a single required field via a synthesized
+	// descriptor, then leave it unset. proto.Marshal (AllowPartial=false by
+	// default) returns a RequiredNotSetError, exercising Encode's marshal-error
+	// branch with a non-nil, valid message that fails to serialize.
+	fdp := &descriptorpb.FileDescriptorProto{
+		Name:    proto.String("codec_test_required.proto"),
+		Syntax:  proto.String("proto2"),
+		Package: proto.String("codec.test"),
+		MessageType: []*descriptorpb.DescriptorProto{{
+			Name: proto.String("RequiredOnly"),
+			Field: []*descriptorpb.FieldDescriptorProto{{
+				Name:   proto.String("must_be_set"),
+				Number: proto.Int32(1),
+				Label:  descriptorpb.FieldDescriptorProto_LABEL_REQUIRED.Enum(),
+				Type:   descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+			}},
+		}},
+	}
+	fd, err := protodesc.NewFile(fdp, nil)
+	require.NoError(t, err)
+	msg := dynamicpb.NewMessage(fd.Messages().Get(0))
+	require.True(t, msg.ProtoReflect().IsValid(), "message must be non-nil so it passes the nil-guard and reaches proto.Marshal")
+
+	_, err = c.Encode(msg)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, codec.ErrInvalidMessage), "expected codec.ErrInvalidMessage, got: %v", err)
 }
