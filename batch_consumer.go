@@ -270,7 +270,7 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 		if c.handlerTimeout > 0 {
 			hCtx, hCancel := context.WithTimeout(spanCtx, c.handlerTimeout)
 			handlerDone := make(chan error, 1)
-			go func() { handlerDone <- safeCallBatchHandler(h, hCtx, batch) }()
+			go func() { handlerDone <- safeCallBatchHandler(hCtx, h, batch) }()
 
 			select {
 			case handlerErr := <-handlerDone:
@@ -281,11 +281,11 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 				hCancel()
 				elapsed := time.Since(start)
 				if errors.Is(hCtx.Err(), context.DeadlineExceeded) {
-					// Only emit timeout metrics and apply the timeout verdict when the
-					// handler has not already applied its own verdict (e.g. called
-					// batch.Ack() before the deadline expired). Emitting timeout metrics
-					// for a batch that was already acked would produce misleading
-					// dashboard spikes that do not correspond to a real nack.
+					// The handler exceeded HandlerTimeout. Emit timeout metrics and apply
+					// the timeout verdict only when the handler has not already applied its
+					// own verdict (e.g. called batch.Ack() before the deadline expired):
+					// emitting timeout metrics for an already-acked batch would produce
+					// misleading dashboard spikes that do not correspond to a real nack.
 					batch.mu.Lock()
 					alreadyAcked := batch.acked
 					batch.mu.Unlock()
@@ -315,19 +315,24 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 						} else {
 							batch.mu.Unlock()
 						}
-						// Stamp the batch span with the timeout outcome (SPEC §6.9). The
-						// handler may already have acked manually before the deadline; in
-						// that case alreadyAcked is true and we do not reach here, leaving
-						// the verdict to the goroutine completion path on the next flush.
-						finishConsumeSpan(span, outcomeTimeout, context.DeadlineExceeded)
 					}
+					// Stamp the batch span with the timeout outcome regardless of whether
+					// the handler acked manually before the deadline: in both cases the
+					// handler exceeded HandlerTimeout and the span must carry a terminal
+					// outcome (SPEC §6.9, "ended in every termination path"). This flush
+					// invocation owns the span and ends it via the deferred span.End();
+					// there is no later path that would stamp it.
+					finishConsumeSpan(span, outcomeTimeout, context.DeadlineExceeded)
 				}
+				// else: the outer ctx was cancelled (consumer lifecycle end, not a message
+				// outcome). No verdict is stamped on the span — mirroring Consumer.dispatch's
+				// outer-ctx-cancel path — and the deferred span.End() still closes it.
 				<-handlerDone // drain goroutine
 			}
 			return
 		}
 
-		handlerErr := safeCallBatchHandler(h, spanCtx, batch)
+		handlerErr := safeCallBatchHandler(spanCtx, h, batch)
 		c.applyBatchVerdict(span, batch, handlerErr, time.Since(start))
 	}
 
@@ -453,7 +458,7 @@ func (c *BatchConsumer[M]) startBatchSpan(ctx context.Context, deliveries []*Del
 // outcome (SPEC §6.9). A recovered panic maps to nack-without-requeue. The panic
 // value is reported by type only so a panicking handler cannot leak message
 // content into the error string or span.
-func safeCallBatchHandler[M any](h BatchHandler[M], ctx context.Context, batch *Batch[M]) (err error) {
+func safeCallBatchHandler[M any](ctx context.Context, h BatchHandler[M], batch *Batch[M]) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("warren: batch handler panic: %T", r)

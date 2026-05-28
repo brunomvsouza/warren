@@ -2,12 +2,14 @@ package warren
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/goleak"
@@ -184,4 +186,147 @@ func TestBatchConsumer_processBatchSpan_handlerPanic_endsSpan(t *testing.T) {
 	outcome, _ := span.attr("messaging.rabbitmq.outcome")
 	assert.Equal(t, "nack_no_requeue", outcome.AsString(), "a panic maps to nack without requeue")
 	assert.Equal(t, codes.Error, span.status)
+}
+
+// — process_batch span: timeout after a manual ack still carries an outcome ——————
+
+// When the handler acks manually before the deadline but keeps running past
+// HandlerTimeout, the timeout branch must still stamp the span with a terminal
+// outcome: the span is owned by this flush and ended here, so a missing outcome
+// would be permanent (there is no later path that would stamp it).
+func TestBatchConsumer_processBatchSpan_timeoutAfterManualAck_stampsTimeout(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	tr := &recordingTracer{}
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		Size(2).
+		HandlerTimeout(50 * time.Millisecond).
+		Tracer(tr).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(hctx context.Context, b *Batch[string]) error {
+			// Ack manually before the deadline, then block past it: the handler
+			// exceeds HandlerTimeout but has already applied its own verdict.
+			_ = b.Ack()
+			<-hctx.Done()
+			return nil
+		})
+	}()
+
+	deliveryCh <- markerDelivery(1, "a", 11, 21)
+	deliveryCh <- markerDelivery(2, "b", 12, 22)
+
+	// Wait until the span carries an outcome — the whole point of the fix.
+	assert.Eventually(t, func() bool {
+		s := tr.only()
+		if s == nil {
+			return false
+		}
+		_, ok := s.attr("messaging.rabbitmq.outcome")
+		return ok
+	}, 2*time.Second, 10*time.Millisecond, "a timed-out batch span must carry an outcome even when the handler acked manually")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	span := tr.only()
+	require.NotNil(t, span)
+	assert.True(t, span.ended)
+	outcome, ok := span.attr("messaging.rabbitmq.outcome")
+	require.True(t, ok)
+	assert.Equal(t, "timeout", outcome.AsString())
+	assert.Equal(t, codes.Error, span.status)
+}
+
+// — process_batch span: non-linking tracer falls back to a plain Start ————————
+
+// nonLinkingTracer implements only warrenotel.Tracer (NOT warrenotel.LinkingTracer)
+// so startBatchSpan's fallback path — a plain Start with no Links — is exercised.
+type nonLinkingTracer struct {
+	mu    sync.Mutex
+	spans []*recordingSpan
+}
+
+func (t *nonLinkingTracer) Start(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, warrenotel.Span) {
+	s := &recordingSpan{name: name}
+	s.attrs = append(s.attrs, attrs...)
+	t.mu.Lock()
+	t.spans = append(t.spans, s)
+	t.mu.Unlock()
+	return ctx, s
+}
+
+func (t *nonLinkingTracer) only() *recordingSpan {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.spans) != 1 {
+		return nil
+	}
+	return t.spans[0]
+}
+
+func TestBatchConsumer_processBatchSpan_nonLinkingTracerFallback(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	tr := &nonLinkingTracer{}
+	// Guard: this tracer must NOT satisfy LinkingTracer, otherwise the fallback
+	// path under test would not actually be exercised.
+	_, isLinking := interface{}(tr).(warrenotel.LinkingTracer)
+	require.False(t, isLinking, "nonLinkingTracer must not implement LinkingTracer")
+
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		Size(2).
+		Tracer(tr).
+		Codec(codec.NewJSON()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error { return nil })
+	}()
+
+	deliveryCh <- markerDelivery(1, "a", 11, 21)
+	deliveryCh <- markerDelivery(2, "b", 12, 22)
+
+	assert.Eventually(t, func() bool { return tr.only() != nil }, 2*time.Second, 10*time.Millisecond,
+		"expected the process_batch span from the non-linking fallback")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	span := tr.only()
+	require.NotNil(t, span)
+	assert.Equal(t, "q process_batch", span.name)
+	assert.True(t, span.ended)
+	assert.Empty(t, span.links, "a non-linking tracer must produce a span with no Links")
+
+	count, ok := span.attr("messaging.batch.message_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(2), count.AsInt64())
+
+	outcome, ok := span.attr("messaging.rabbitmq.outcome")
+	require.True(t, ok)
+	assert.Equal(t, "ack", outcome.AsString())
+	assert.Equal(t, codes.Ok, span.status)
 }
