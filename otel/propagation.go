@@ -49,7 +49,19 @@ func (p Propagator) Inject(ctx context.Context, h map[string]any) {
 // Returns context.Background() enriched with the extracted span context,
 // or an empty context if no valid traceparent is present.
 func (p Propagator) Extract(h map[string]any) context.Context {
-	return p.textMap().Extract(context.Background(), headerCarrier(h))
+	return p.ExtractTo(context.Background(), h)
+}
+
+// ExtractTo extracts a W3C trace context from h into ctx, returning a context
+// that carries both the extracted (remote) span context and everything ctx
+// already held — its values, deadline, and cancellation. The Consumer uses it
+// so the handler context remains a descendant of the consumer context (outer
+// cancellation and HandlerTimeout still propagate) while parenting the process
+// span on the producer's span context for trace continuity.
+//
+// When h carries no valid traceparent, ctx is returned unchanged (no allocation).
+func (p Propagator) ExtractTo(ctx context.Context, h map[string]any) context.Context {
+	return p.textMap().Extract(ctx, headerCarrier(h))
 }
 
 // ActiveContext reports whether ctx carries a valid span context that Inject

@@ -200,6 +200,7 @@ func (b *BatchConsumerBuilder[M]) Build() (*BatchConsumer[M], error) {
 		codec:            cfg.c,
 		cm:               cfg.cm,
 		tracer:           cfg.tracer,
+		propagator:       otel.NewPropagator(),
 		mc:               mc,
 		closedCh:         make(chan struct{}),
 	}

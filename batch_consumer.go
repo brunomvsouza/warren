@@ -10,6 +10,8 @@ import (
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
 
 	"github.com/brunomvsouza/warren/codec"
 	"github.com/brunomvsouza/warren/metrics"
@@ -155,9 +157,10 @@ type BatchConsumer[M any] struct {
 	counterBDisabled bool
 	counterState     atomic.Pointer[redeliveryCounter]
 
-	codec  codec.Codec
-	cm     metrics.ConsumerMetrics
-	tracer otel.Tracer
+	codec      codec.Codec
+	cm         metrics.ConsumerMetrics
+	tracer     otel.Tracer
+	propagator otel.Propagator
 
 	mc *managedConn
 
@@ -257,17 +260,22 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 			}
 		}
 
+		// Open the <queue> process_batch span with one Link per message's producer
+		// trace (fan-in semantics, SPEC §6.9). defer ends it even on a handler panic.
+		spanCtx, span := c.startBatchSpan(ctx, toFlush)
+		defer span.End()
+
 		start := time.Now()
 
 		if c.handlerTimeout > 0 {
-			hCtx, hCancel := context.WithTimeout(ctx, c.handlerTimeout)
+			hCtx, hCancel := context.WithTimeout(spanCtx, c.handlerTimeout)
 			handlerDone := make(chan error, 1)
-			go func() { handlerDone <- h(hCtx, batch) }()
+			go func() { handlerDone <- safeCallBatchHandler(h, hCtx, batch) }()
 
 			select {
 			case handlerErr := <-handlerDone:
 				hCancel()
-				c.applyBatchVerdict(batch, handlerErr, time.Since(start))
+				c.applyBatchVerdict(span, batch, handlerErr, time.Since(start))
 
 			case <-hCtx.Done():
 				hCancel()
@@ -307,6 +315,11 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 						} else {
 							batch.mu.Unlock()
 						}
+						// Stamp the batch span with the timeout outcome (SPEC §6.9). The
+						// handler may already have acked manually before the deadline; in
+						// that case alreadyAcked is true and we do not reach here, leaving
+						// the verdict to the goroutine completion path on the next flush.
+						finishConsumeSpan(span, outcomeTimeout, context.DeadlineExceeded)
 					}
 				}
 				<-handlerDone // drain goroutine
@@ -314,8 +327,8 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 			return
 		}
 
-		handlerErr := h(ctx, batch)
-		c.applyBatchVerdict(batch, handlerErr, time.Since(start))
+		handlerErr := safeCallBatchHandler(h, spanCtx, batch)
+		c.applyBatchVerdict(span, batch, handlerErr, time.Since(start))
 	}
 
 	for {
@@ -382,12 +395,14 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 
 // applyBatchVerdict applies the auto-verdict after the handler returns, provided the
 // handler has not already acked/nacked manually (idempotent guard via batch.acked).
-func (c *BatchConsumer[M]) applyBatchVerdict(batch *Batch[M], handlerErr error, elapsed time.Duration) {
+// It also stamps the terminal outcome on the batch process span (SPEC §6.9).
+func (c *BatchConsumer[M]) applyBatchVerdict(span otel.Span, batch *Batch[M], handlerErr error, elapsed time.Duration) {
 	batch.mu.Lock()
 	if batch.acked {
 		// Handler or a per-delivery ack already fired; record the metric and bail.
 		batch.mu.Unlock()
 		c.cm.RecordHandler(c.queue, handlerOutcome(handlerErr), elapsed)
+		finishConsumeSpan(span, consumeVerdictOutcome(handlerErr), handlerErr)
 		return
 	}
 	batch.acked = true
@@ -398,6 +413,7 @@ func (c *BatchConsumer[M]) applyBatchVerdict(batch *Batch[M], handlerErr error, 
 	handlerErr = c.applyBatchCounterB(batch, handlerErr)
 
 	c.cm.RecordHandler(c.queue, handlerOutcome(handlerErr), elapsed)
+	finishConsumeSpan(span, consumeVerdictOutcome(handlerErr), handlerErr)
 
 	if handlerErr == nil {
 		_ = batch.ackAll()
@@ -405,6 +421,45 @@ func (c *BatchConsumer[M]) applyBatchVerdict(batch *Batch[M], handlerErr error, 
 		requeue := errors.Is(handlerErr, ErrRequeue)
 		_ = batch.nackAll(requeue)
 	}
+}
+
+// startBatchSpan opens the <queue> process_batch span. When the configured tracer
+// implements otel.LinkingTracer the span receives one Link per message, each
+// pointing at that message's producer trace context (extracted from its headers).
+// This models batch fan-in correctly: a batch has many parents, not one (SPEC §6.9
+// "BatchConsumer Links"). A non-linking tracer transparently falls back to a span
+// with no links.
+func (c *BatchConsumer[M]) startBatchSpan(ctx context.Context, deliveries []*Delivery[M]) (context.Context, otel.Span) {
+	name := c.queue + " process_batch"
+	attrs := []attribute.KeyValue{
+		semconv.MessagingSystemKey.String("rabbitmq"),
+		semconv.MessagingDestinationName(c.queue),
+		semconv.MessagingOperationTypeKey.String("process"),
+		semconv.MessagingBatchMessageCount(len(deliveries)),
+	}
+	lt, ok := c.tracer.(otel.LinkingTracer)
+	if !ok {
+		return c.tracer.Start(ctx, name, attrs...)
+	}
+	links := make([]otel.Link, 0, len(deliveries))
+	for _, d := range deliveries {
+		links = append(links, otel.Link{Context: c.propagator.Extract(d.raw.Headers)})
+	}
+	return lt.StartWithLinks(ctx, name, links, attrs...)
+}
+
+// safeCallBatchHandler invokes h, recovering a handler panic into an error so the
+// flush loop survives and the process_batch span can be ended with a failure
+// outcome (SPEC §6.9). A recovered panic maps to nack-without-requeue. The panic
+// value is reported by type only so a panicking handler cannot leak message
+// content into the error string or span.
+func safeCallBatchHandler[M any](h BatchHandler[M], ctx context.Context, batch *Batch[M]) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("warren: batch handler panic: %T", r)
+		}
+	}()
+	return h(ctx, batch)
 }
 
 // applyBatchCounterB enforces the in-process redelivery counter (counter B) for the

@@ -30,6 +30,8 @@ type recordingSpan struct {
 	mu      sync.Mutex
 	name    string
 	sc      trace.SpanContext
+	parent  trace.SpanContext
+	links   []warrenotel.Link
 	attrs   []attribute.KeyValue
 	status  codes.Code
 	statMsg string
@@ -83,14 +85,32 @@ type recordingTracer struct {
 }
 
 func (t *recordingTracer) Start(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, warrenotel.Span) {
+	return t.start(ctx, name, nil, attrs)
+}
+
+// StartWithLinks satisfies warrenotel.LinkingTracer so BatchConsumer attaches a
+// Link per incoming message; the recorded links let tests assert fan-in.
+func (t *recordingTracer) StartWithLinks(ctx context.Context, name string, links []warrenotel.Link, attrs ...attribute.KeyValue) (context.Context, warrenotel.Span) {
+	return t.start(ctx, name, links, attrs)
+}
+
+func (t *recordingTracer) start(ctx context.Context, name string, links []warrenotel.Link, attrs []attribute.KeyValue) (context.Context, warrenotel.Span) {
 	t.mu.Lock()
 	t.n++
 	n := t.n
 	t.mu.Unlock()
 
+	// Honour an existing (possibly remote) parent span context so a child span
+	// inherits the trace-id — this is what makes publisher→consumer continuity
+	// assertable. With no parent we mint a fresh trace-id keyed off n.
+	parent := trace.SpanContextFromContext(ctx)
 	var tid trace.TraceID
+	if parent.IsValid() {
+		tid = parent.TraceID()
+	} else {
+		tid[0], tid[15] = 1, n
+	}
 	var sid trace.SpanID
-	tid[0], tid[15] = 1, n
 	sid[0], sid[7] = 1, n
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID:    tid,
@@ -99,7 +119,7 @@ func (t *recordingTracer) Start(ctx context.Context, name string, attrs ...attri
 	})
 	ctx = trace.ContextWithSpanContext(ctx, sc)
 
-	s := &recordingSpan{name: name, sc: sc}
+	s := &recordingSpan{name: name, sc: sc, parent: parent, links: links}
 	s.attrs = append(s.attrs, attrs...)
 
 	t.mu.Lock()
@@ -107,6 +127,9 @@ func (t *recordingTracer) Start(ctx context.Context, name string, attrs ...attri
 	t.mu.Unlock()
 	return ctx, s
 }
+
+// compile-time guard: the recording tracer must implement the linking extension.
+var _ warrenotel.LinkingTracer = (*recordingTracer)(nil)
 
 func (t *recordingTracer) only() *recordingSpan {
 	t.mu.Lock()

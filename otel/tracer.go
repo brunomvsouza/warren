@@ -40,6 +40,30 @@ type Tracer interface {
 	Start(ctx context.Context, spanName string, attrs ...attribute.KeyValue) (context.Context, Span)
 }
 
+// Link associates the span being started with another span context — typically
+// the producer span of an incoming message, recovered via Propagator.Extract on
+// that message's headers. BatchConsumer creates one Link per message in a batch
+// so a single batch span fans in to every producer trace (SPEC §6.9
+// "BatchConsumer Links").
+type Link struct {
+	// Context carries the linked span context, typically the result of
+	// Propagator.Extract on an incoming message's headers. A Context with no
+	// valid span context contributes no Link.
+	Context context.Context
+}
+
+// LinkingTracer is an optional extension of Tracer. A Tracer that can attach
+// OTel span Links implements StartWithLinks; BatchConsumer uses it to link the
+// batch process span to every incoming message's trace context (SPEC §6.9
+// "BatchConsumer Links"). Tracers that do not implement it transparently fall
+// back to Start with no links, so the interface stays backward-compatible.
+type LinkingTracer interface {
+	Tracer
+	// StartWithLinks begins a new span carrying the given links and returns an
+	// updated context and the span.
+	StartWithLinks(ctx context.Context, spanName string, links []Link, attrs ...attribute.KeyValue) (context.Context, Span)
+}
+
 // NoOpTracer is a Tracer whose methods are no-ops. It is the default Tracer
 // used by Connection when no WithTracer option is provided.
 type NoOpTracer struct{}

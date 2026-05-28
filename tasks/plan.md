@@ -715,16 +715,16 @@ SDK and the canonical CloudEvents AMQP Protocol Binding.
 - **T28** OTel integration in `Consumer` (extract span context from headers + handler span). For `BatchConsumer`, the span must contain **Links** to the extracted `traceparent` of every message in the batch.
 
 **Checkpoint Phase 6:**
-- [ ] Protobuf round-trip: encode → publish → consume → decode →
+- [x] Protobuf round-trip: encode → publish → consume → decode →
       identical message.
-- [ ] CloudEvents structured: body is full envelope; content-type is
+- [x] CloudEvents structured: body is full envelope; content-type is
       `application/cloudevents+json`.
-- [ ] CloudEvents binary: body is `data` only; `cloudEvents:id`,
+- [x] CloudEvents binary: body is `data` only; `cloudEvents:id`,
       `cloudEvents:source`, `cloudEvents:type`, `cloudEvents:specversion`
       present as AMQP headers; `datacontenttype` on the content-type
       property.
-- [ ] Span continuity: trace-id and parent-span-id consistent from
-      publisher → consumer.
+- [x] Span continuity: trace-id and parent-span-id consistent from
+      publisher → consumer (T28; unit + `integration` DLX test).
 
 ---
 

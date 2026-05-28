@@ -77,6 +77,39 @@ func TestPropagator_emptyHeaders_noValidContext(t *testing.T) {
 	assert.False(t, sc.IsValid(), "empty headers must not produce a valid SpanContext")
 }
 
+// — ExtractTo: extraction rooted at a caller-supplied base context ——————————
+
+func TestPropagator_ExtractTo_preservesBaseContext(t *testing.T) {
+	sc := validSpanContext()
+	src := trace.ContextWithSpanContext(context.Background(), sc)
+	p := warrenotel.NewPropagator()
+	h := map[string]any{}
+	p.Inject(src, h)
+
+	type ctxKey struct{}
+	base := context.WithValue(context.Background(), ctxKey{}, "base-val")
+
+	got := p.ExtractTo(base, h)
+
+	// The remote span context is extracted into the returned context …
+	gotSC := trace.SpanContextFromContext(got)
+	assert.Equal(t, sc.TraceID(), gotSC.TraceID(), "TraceID must be extracted into the base context")
+	// … and the base context's values are preserved (not discarded like Extract).
+	assert.Equal(t, "base-val", got.Value(ctxKey{}), "ExtractTo must preserve the base context values")
+}
+
+func TestPropagator_ExtractTo_basePropagatesCancellation(t *testing.T) {
+	p := warrenotel.NewPropagator()
+	base, cancel := context.WithCancel(context.Background())
+	got := p.ExtractTo(base, map[string]any{})
+	cancel()
+	select {
+	case <-got.Done():
+	default:
+		t.Fatal("cancelling the base context must cancel the ExtractTo result")
+	}
+}
+
 func TestPropagator_ActiveContext(t *testing.T) {
 	p := warrenotel.NewPropagator()
 	assert.False(t, p.ActiveContext(context.Background()),
