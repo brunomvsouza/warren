@@ -418,3 +418,28 @@ a non-Go producer fixture.
 
 ---
 
+### LATER-37 — Publisher size cap measures the body only; HeaderCodec attribute headers bypass it
+
+**Context:** `publisher.go:encodeMsg` enforces `maxMessageSizeBytes` against `len(body)` only. For a
+`HeaderCodec` such as the binary CloudEvents codec, the event attributes and extensions travel as
+`cloudEvents:`-prefixed AMQP headers rather than in the body, so a publish with many or large
+extension headers can exceed the intended on-wire size while passing the body cap.
+
+**Impact:** The per-publish guardrail's contract ("reject before opening a channel when the message
+is too large") is partially circumvented when a HeaderCodec carries significant data in headers. Low
+severity: header sizes are still bounded by amqp091 frame limits and by `validateHeaders`, the body
+(usually the bulk of a message) is still capped, and the gap is not CloudEvents-specific — it
+applies to any HeaderCodec. No correctness impact.
+
+**Evidence:** `/ship` code-reviewer (2026-05-28, T25/T26 CloudEvents review) — Important finding,
+`publisher.go:454`.
+
+**Suggested solution:** Either (a) document in the `WithMaxMessageSizeBytes` godoc that the cap
+measures the encoded body only, not codec-emitted headers; or (b) for HeaderCodecs, add the
+serialized header (and content-type) byte sizes into the size check before the `too_large` verdict.
+Prefer (a) unless a header-heavy codec makes the gap material in practice.
+
+**Prerequisites:** None. Standalone publisher-side hardening.
+
+---
+

@@ -99,6 +99,13 @@ func (c *ceStructuredCodec) Decode(data []byte, v any) error {
 	if err := json.Unmarshal(data, ev); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
+	// The SDK's UnmarshalJSON rejects a missing/unknown specversion but not the
+	// other required attributes, so an envelope like {"specversion":"1.0"} would
+	// otherwise decode into a malformed event with no signal. Validate symmetrically
+	// mirrors Encode and the binary DecodeWithHeaders path.
+	if err := ev.Validate(); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidMessage, err)
+	}
 	return nil
 }
 
@@ -162,6 +169,9 @@ func (c *ceBinaryCodec) EncodeWithHeaders(v any) ([]byte, map[string]any, string
 		headers[ceAMQPPrefix+"time"] = types.FormatTime(t)
 	}
 	for name, val := range ev.Extensions() {
+		// Defensive: ev.Validate() above already rejects (and SetExtension never
+		// stores) any value without a canonical CloudEvents type, so types.Format
+		// should not fail here. Kept to guard against SDK type-handling drift.
 		s, ferr := types.Format(val)
 		if ferr != nil {
 			return nil, nil, "", fmt.Errorf("%w: extension %q: %w", ErrInvalidMessage, name, ferr)

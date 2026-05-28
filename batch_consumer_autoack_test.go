@@ -926,6 +926,71 @@ func TestBatchConsumer_CodecPanic_NackNoRequeue(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+// TestBatchConsumer_HeaderCodec_DecodesBinaryCloudEvent verifies the batch path
+// routes a HeaderCodec through DecodeWithHeaders on the happy path: a binary
+// CloudEvents delivery (attributes in cloudEvents: headers, data in the body)
+// decodes into the batch with its attributes and data intact.
+func TestBatchConsumer_HeaderCodec_DecodesBinaryCloudEvent(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[codec.CloudEvent](conn).
+		Queue("q").
+		Size(1).
+		Codec(codec.NewCloudEventsBinary()).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	var mu sync.Mutex
+	var got []codec.CloudEvent
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, b *Batch[codec.CloudEvent]) error {
+			mu.Lock()
+			got = append(got, b.Messages()...)
+			mu.Unlock()
+			return nil
+		})
+	}()
+
+	deliveryCh <- amqp091.Delivery{
+		DeliveryTag:  1,
+		Acknowledger: &fakeAcknowledger{ackFn: func(uint64, bool) error { return nil }},
+		Body:         []byte(`{"k":1}`),
+		ContentType:  "application/json",
+		Headers: amqp091.Table{
+			"cloudEvents:specversion": "1.0",
+			"cloudEvents:id":          "evt-b",
+			"cloudEvents:source":      "/svc",
+			"cloudEvents:type":        "t",
+		},
+	}
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) == 1
+	}, time.Second, 10*time.Millisecond, "expected the binary CloudEvent to decode into one batch")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, got, 1)
+	assert.Equal(t, "evt-b", got[0].ID())
+	assert.Equal(t, "application/json", got[0].DataContentType())
+	assert.Equal(t, []byte(`{"k":1}`), got[0].Data())
+}
+
 // TestBatchConsumer_AlreadyStarted_Error verifies that calling Consume twice
 // returns ErrInvalidOptions.
 func TestBatchConsumer_AlreadyStarted_Error(t *testing.T) {

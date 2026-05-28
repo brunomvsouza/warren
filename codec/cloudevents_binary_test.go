@@ -272,6 +272,23 @@ func TestCloudEventsBinary_Encode_AcceptsEventByValue(t *testing.T) {
 	assert.Equal(t, "id-v", headers["cloudEvents:id"])
 }
 
+func TestCloudEventsBinary_Encode_RejectsUnformattableExtension(t *testing.T) {
+	// An extension value that has no canonical CloudEvents type (here a struct) is
+	// rejected with ErrInvalidMessage. The SDK's SetExtension does not even store
+	// such a value, so ev.Validate() reports it before the encode loop reaches
+	// types.Format; that types.Format error path is therefore defensive only.
+	c := newBinary(t)
+	ev := cloudevents.NewEvent()
+	ev.SetID("id-e")
+	ev.SetSource("/s")
+	ev.SetType("t")
+	ev.SetExtension("bad", struct{ X int }{X: 1})
+
+	_, _, _, err := c.EncodeWithHeaders(&ev)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
+}
+
 func TestCloudEventsBinary_RoundTrip_DataSchema(t *testing.T) {
 	c := newBinary(t)
 	original := cloudevents.NewEvent()

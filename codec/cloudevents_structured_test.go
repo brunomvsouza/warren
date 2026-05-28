@@ -128,6 +128,18 @@ func TestCloudEventsStructured_Decode_MissingSpecVersion(t *testing.T) {
 	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
 }
 
+func TestCloudEventsStructured_Decode_RejectsInvalidEvent(t *testing.T) {
+	// specversion present but the required id/source/type are absent: the SDK's
+	// UnmarshalJSON accepts this, so only Validate() rejects it. Decode must
+	// surface the error instead of handing back a malformed event, mirroring
+	// Encode and the binary DecodeWithHeaders path.
+	c := codec.NewCloudEventsStructured()
+	var ev codec.CloudEvent
+	err := c.Decode([]byte(`{"specversion":"1.0"}`), &ev)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
+}
+
 // Structured mode serialises through the SDK's JSON event format, which preserves
 // the JSON type of an extension (contrast with binary mode, which narrows it to a
 // string — see TestCloudEventsBinary_RoundTrip_NonStringExtensionNarrowsToString).

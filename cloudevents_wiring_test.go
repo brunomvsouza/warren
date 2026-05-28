@@ -106,6 +106,17 @@ func TestPublisher_encodeMsg_NoContentTypeWhenCodecOmitsIt(t *testing.T) {
 	assert.Equal(t, "id", msg.Headers["cloudEvents:id"])
 }
 
+func TestPublisher_encodeMsg_CodecContentTypeOverridesCaller(t *testing.T) {
+	p := &Publisher[codec.CloudEvent]{codec: codec.NewCloudEventsBinary()}
+	ev := newBinaryEvent(t) // datacontenttype application/json (set via SetData)
+
+	// The CloudEvents datacontenttype is authoritative for the body the codec
+	// produced, so it overrides a caller-supplied Message.ContentType.
+	msg, _, err := p.encodeMsg(Message[codec.CloudEvent]{Body: &ev, ContentType: "text/plain"})
+	require.NoError(t, err)
+	assert.Equal(t, "application/json", msg.ContentType)
+}
+
 func TestConsumer_dispatch_HeaderCodecDecodesCE(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
