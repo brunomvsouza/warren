@@ -138,7 +138,7 @@ v1.27.0+**.
   - [ ] `Tracer` interface wraps the subset of OTel APIs used by Publisher/Consumer (start span, end span, set attributes, record error).
   - [ ] `NoOpTracer` is the package-level zero value; methods are no-ops.
   - [ ] `Propagator` struct with `Inject(ctx, Headers)` and `Extract(Headers) ctx` matching OTel Messaging semantic conventions **v1.27.0** (uses `go.opentelemetry.io/otel/semconv/v1.27.0`).
-  - [ ] Header keys used by `Propagator`: `traceparent`, `tracestate`. Unit test asserts no collision with CloudEvents binary-mode `ce-*` headers.
+  - [ ] Header keys used by `Propagator`: `traceparent`, `tracestate`. Unit test asserts no collision with CloudEvents binary-mode `cloudEvents:`-prefixed headers.
   - [ ] Package godoc references SPEC §6.9 for the span-attribute matrix on the wire; **Publisher/Consumer populate those attributes in T27/T28** (not required for T05 merge).
 - **Verify:** Unit tests assert round-trip `Inject → Extract` preserves traceparent. Snapshot test against `go.opentelemetry.io/otel/semconv/v1.27.0` attribute keys (will fail loudly if the semconv pin is bumped without intention). **Full span attributes on publish/consume paths are acceptance-tested in T27/T28.**
 - **Files:** `otel/tracer.go`, `otel/propagation.go`, `otel/*_test.go`.
@@ -697,22 +697,22 @@ before Phase 5 can close.
 
 ### [x] T25 — `codec/cloudevents.go` — structured mode · S
 - **Acceptance:**
-  - [x] `codec.NewCloudEventsStructured()` encodes the full CloudEvent JSON envelope into the message body. Encode/Decode operate on a `codec.CloudEvent` value.
+  - [x] `codec.NewCloudEventsStructured()` encodes the full CloudEvent JSON envelope into the message body. Encode/Decode operate on the official SDK's `cloudevents.Event` (re-exported as `codec.CloudEvent`), delegating JSON serialization to the SDK event format.
   - [x] `ContentType()` returns `application/cloudevents+json`.
-  - [x] JSON-typed `data` is inlined under the `data` member; non-JSON `data` is base64-encoded under `data_base64`, per the CloudEvents JSON format spec.
-- **Verify:** Round-trip test against representative CloudEvents v1.0 JSON events (the upstream `cloudevents/spec` test vectors are not vendored; round-trip covers the same `data`/`data_base64`/extension paths).
+  - [x] `data` / `data_base64`, extensions, and `time` follow the CloudEvents JSON format spec (handled by the SDK).
+- **Verify:** Round-trip test against representative CloudEvents v1.0 events (JSON data, binary `data_base64`, extensions, time).
 - **Files:** `codec/cloudevents.go`, `codec/cloudevents_structured_test.go`.
 - **Deps:** T09.
 
 ### [x] T26 — `codec/cloudevents.go` — binary mode · M
 - **Acceptance:**
-  - [x] `codec.NewCloudEventsBinary()` puts `data` in the body and CloudEvent attributes (`id`, `source`, `type`, `specversion`, `subject`, `time`, `datacontenttype`, plus extensions) into AMQP headers prefixed `ce-*`.
-  - [x] Decode reconstitutes the full CloudEvent from body + headers.
-  - [x] Follows the CloudEvents AMQP Protocol Binding spec.
-  - [x] Introduces the optional `codec.HeaderCodec` interface (`EncodeWithHeaders`/`DecodeWithHeaders`, embeds `Codec`); the binary codec's plain `Encode`/`Decode` reject use outside a header-aware publisher/consumer with `ErrInvalidMessage` (no silent attribute loss).
-  - [x] Publisher (`encodeMsg`) and Consumer (`safeDecodeConsumer`) detect `HeaderCodec` and route headers, so the codec works end-to-end.
-- **Verify:** Round-trip + cross-encoding test (structured-encoded message decodes via binary decoder fails cleanly with `ErrInvalidMessage`) + an end-to-end publisher→consumer test (no broker) asserting `ce-*` headers and `data` body round-trip. Fuzz target `FuzzCodecCloudEventsBinary` feeds arbitrary body+headers into `DecodeWithHeaders` and asserts no panic.
-- **Files:** edits to `codec/cloudevents.go`, `codec/codec.go` (`HeaderCodec`), `publisher.go`, `consumer.go`; `codec/cloudevents_binary_test.go`, `codec/cloudevents_binary_fuzz_test.go`.
+  - [x] `codec.NewCloudEventsBinary()` implements the CloudEvents AMQP Protocol Binding binary mode: `data` in the body, `datacontenttype` → AMQP content-type property, all other attributes/extensions → `cloudEvents:`-prefixed AMQP headers (official Go SDK default prefix).
+  - [x] Decode reconstitutes the full `cloudevents.Event` from body + headers + content-type property.
+  - [x] Interoperates with non-Go AMQP-1.0 CloudEvents clients via RabbitMQ's 0-9-1 ⇄ 1.0 header/property bridging.
+  - [x] Introduces the optional `codec.HeaderCodec` interface (`EncodeWithHeaders`/`DecodeWithHeaders`, both carrying a `contentType`, embeds `Codec`); the binary codec's plain `Encode`/`Decode` reject use outside a header-aware publisher/consumer with `ErrInvalidMessage` (no silent attribute loss).
+  - [x] Publisher (`encodeMsg`) and Consumer (`safeDecodeConsumer`, streaming + batch) detect `HeaderCodec` and route headers + content-type, so the codec works end-to-end.
+- **Verify:** Round-trip + cross-encoding test (structured-encoded message decodes via binary decoder fails cleanly with `ErrInvalidMessage`) + an end-to-end publisher→consumer test (no broker) asserting `cloudEvents:`-prefixed headers, content-type property, and `data` body round-trip. Fuzz target `FuzzCodecCloudEventsBinary` feeds arbitrary body+headers into `DecodeWithHeaders` and asserts no panic.
+- **Files:** edits to `codec/cloudevents.go`, `codec/codec.go` (`HeaderCodec`), `publisher.go`, `consumer.go`, `batch_consumer.go`; `codec/cloudevents_binary_test.go`, `codec/cloudevents_binary_fuzz_test.go`, `cloudevents_wiring_test.go`.
 - **Deps:** T25.
 
 ### [ ] T27 — OTel in Publisher · S

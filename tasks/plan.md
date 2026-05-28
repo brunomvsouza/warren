@@ -701,9 +701,16 @@ documented Ack/Nack-with-`multiple=true` semantics.
 Goal: Protobuf + CloudEvents (both modes) codecs; OTel spans across
 publish→consume with header propagation.
 
+**Codec interop principle (SPEC §10 decision 4):** codec/wire-format
+decisions are grounded in interop with **non-Go (or non-warren)
+clients**, following the authoritative binding/format spec; an official
+upstream library is preferred over a hand-rolled mapping when it
+improves fidelity. The CloudEvents codecs therefore use the official Go
+SDK and the canonical CloudEvents AMQP Protocol Binding.
+
 - **T24** `codec/protobuf.go` + round-trip tests against a representative `.proto`
-- **T25** `codec/cloudevents.go` structured mode — `codec.NewCloudEventsStructured()` (`application/cloudevents+json`); operates on a `codec.CloudEvent` value
-- **T26** `codec/cloudevents.go` binary mode — `codec.NewCloudEventsBinary()` (`ce-*` AMQP headers). Introduces the optional `codec.HeaderCodec` interface (`EncodeWithHeaders`/`DecodeWithHeaders`) and wires it into `publisher.go` (`encodeMsg` merges returned headers into `Message.Headers`) and `consumer.go` (`safeDecodeConsumer` passes `Delivery.Headers` to `DecodeWithHeaders`) so the codec is functional end-to-end.
+- **T25** `codec/cloudevents.go` structured mode — `codec.NewCloudEventsStructured()` (`application/cloudevents+json`); operates on the official SDK's `cloudevents.Event` type (re-exported as `codec.CloudEvent`) and delegates JSON serialization to the SDK event format
+- **T26** `codec/cloudevents.go` binary mode — `codec.NewCloudEventsBinary()` per the **CloudEvents AMQP Protocol Binding**: `data` in the body, `datacontenttype` → AMQP content-type property, all other attributes/extensions → `cloudEvents:`-prefixed AMQP headers (official Go SDK default; interoperates with non-Go AMQP-1.0 clients via RabbitMQ's protocol bridging). Introduces the optional `codec.HeaderCodec` interface (`EncodeWithHeaders`/`DecodeWithHeaders`, both carrying a `contentType`) and wires it into `publisher.go` (`encodeMsg` merges returned headers into `Message.Headers` and overrides `Message.ContentType`) and `consumer.go`/`batch_consumer.go` (`safeDecodeConsumer` passes `Delivery.Headers` + content-type to `DecodeWithHeaders`) so the codec is functional end-to-end.
 - **T27** OTel integration in `Publisher` (publish span + inject context into AMQP headers)
 - **T28** OTel integration in `Consumer` (extract span context from headers + handler span). For `BatchConsumer`, the span must contain **Links** to the extracted `traceparent` of every message in the batch.
 
@@ -712,8 +719,10 @@ publish→consume with header propagation.
       identical message.
 - [ ] CloudEvents structured: body is full envelope; content-type is
       `application/cloudevents+json`.
-- [ ] CloudEvents binary: body is `data` only; `ce-id`, `ce-source`,
-      `ce-type`, `ce-specversion` present as AMQP headers.
+- [ ] CloudEvents binary: body is `data` only; `cloudEvents:id`,
+      `cloudEvents:source`, `cloudEvents:type`, `cloudEvents:specversion`
+      present as AMQP headers; `datacontenttype` on the content-type
+      property.
 - [ ] Span continuity: trace-id and parent-span-id consistent from
       publisher → consumer.
 

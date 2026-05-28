@@ -1996,35 +1996,50 @@ value.
     workloads).
   - `codec.NewProtobuf()` — proto3 binary; `ContentType` =
     `application/x-protobuf`.
+    The built-in CloudEvents codecs operate on the canonical
+    `cloudevents.Event` type from the official Go SDK
+    (`github.com/cloudevents/sdk-go/v2`), re-exported as
+    `codec.CloudEvent`. Using the upstream type and its JSON
+    serialization keeps the wire format faithful to clients in other
+    languages — see §10 decision "Codec interop is grounded in the
+    canonical binding spec".
   - `codec.NewCloudEventsStructured()` — full CloudEvent JSON envelope
     is the payload body; content-type `application/cloudevents+json`.
-    Encode/Decode operate on a `codec.CloudEvent` value.
-  - `codec.NewCloudEventsBinary()` — payload body carries only `data`;
-    CloudEvent attributes are mapped to AMQP headers prefixed `ce-*`
-    per the CloudEvents AMQP Protocol Binding spec. `ContentType()`
-    returns `""` (the event's `datacontenttype` travels as the
-    `ce-datacontenttype` header, not the AMQP content-type property).
+    Serialization is delegated to the SDK's JSON event format, so
+    `data` / `data_base64`, extensions, and `time` follow the spec
+    exactly.
+  - `codec.NewCloudEventsBinary()` — implements binary content mode of
+    the **CloudEvents AMQP Protocol Binding**: the event `data` is the
+    AMQP body, `datacontenttype` maps to the AMQP **content-type
+    property**, and every other context attribute (and extension) maps
+    to an AMQP header prefixed **`cloudEvents:`** (the official Go SDK
+    default; RabbitMQ bridges 0-9-1 headers ⇄ AMQP 1.0
+    application-properties, so a non-Go AMQP-1.0 CloudEvents client
+    interoperates). `ContentType()` returns `""` because the per-event
+    content type is supplied dynamically by `EncodeWithHeaders`.
 
   **Header-aware codecs (`HeaderCodec`).** A codec whose wire format
-  spans both the body and AMQP headers implements the optional
-  `HeaderCodec` interface (embeds `Codec`):
+  spans the body, AMQP headers, and the content-type property
+  implements the optional `HeaderCodec` interface (embeds `Codec`):
 
   ```go
   type HeaderCodec interface {
       Codec
-      EncodeWithHeaders(v any) (body []byte, headers map[string]any, err error)
-      DecodeWithHeaders(body []byte, headers map[string]any, v any) error
+      EncodeWithHeaders(v any) (body []byte, headers map[string]any, contentType string, err error)
+      DecodeWithHeaders(body []byte, headers map[string]any, contentType string, v any) error
   }
   ```
 
   Publishers and consumers detect `HeaderCodec` by type assertion: on
-  publish the returned headers are merged into `Message.Headers`; on
-  consume the delivery's headers are passed to `DecodeWithHeaders`. A
-  codec that does not implement `HeaderCodec` uses the plain
-  `Encode`/`Decode` path unchanged. `NewCloudEventsBinary()` is the
-  built-in `HeaderCodec`; its plain `Encode`/`Decode` reject use
-  outside a header-aware publisher/consumer with `ErrInvalidMessage`,
-  so the `ce-*` attributes can never be silently dropped.
+  publish the returned headers are merged into `Message.Headers` and a
+  non-empty `contentType` overrides `Message.ContentType`; on consume
+  the delivery's headers and content-type property are passed to
+  `DecodeWithHeaders`. A codec that does not implement `HeaderCodec`
+  uses the plain `Encode`/`Decode` path unchanged.
+  `NewCloudEventsBinary()` is the built-in `HeaderCodec`; its plain
+  `Encode`/`Decode` reject use outside a header-aware
+  publisher/consumer with `ErrInvalidMessage`, so the
+  `cloudEvents:`-prefixed attributes can never be silently dropped.
 
   **Panic safety contract.** Every `Codec.Encode` / `Codec.Decode`
   (and `HeaderCodec.EncodeWithHeaders` / `DecodeWithHeaders`) call is
@@ -2085,8 +2100,8 @@ value.
   `messaging.message.conversation_id` (CorrelationID),
   `messaging.message.body.size`, `network.peer.address`,
   `network.peer.port`. Header propagation uses `traceparent` and
-  `tracestate` keys; CloudEvents binary-mode `ce-*` headers do not
-  conflict.
+  `tracestate` keys; CloudEvents binary-mode `cloudEvents:`-prefixed
+  headers do not conflict.
 
   **Tracing continuity post-mortem (load-bearing).** The library treats
   dead-lettered and poisoned messages as first-class trace artefacts so
@@ -2481,10 +2496,11 @@ Coverage and tooling:
 - [ ] `codec.NewCloudEventsStructured()` and
       `codec.NewCloudEventsBinary()` support both modes per the
       CloudEvents AMQP Protocol Binding spec; the binary codec
-      implements `HeaderCodec` so `ce-*` attributes round-trip through
-      AMQP headers. `codec.NewJSON()` is lax by default (Postel's Law —
-      accepts unknown fields on `Decode`); `codec.NewJSONStrict()` is
-      the opt-in `DisallowUnknownFields` mode.
+      implements `HeaderCodec` so `cloudEvents:`-prefixed attributes
+      round-trip through AMQP headers and `datacontenttype` through the
+      content-type property. `codec.NewJSON()` is lax by default
+      (Postel's Law — accepts unknown fields on `Decode`);
+      `codec.NewJSONStrict()` is the opt-in `DisallowUnknownFields` mode.
 - [ ] AMQP reply codes from the broker are surfaced as wraps of the
       §6.8 reply-code sentinels (`ErrAccessRefused`, `ErrNotFound`,
       `ErrPreconditionFailed`, etc.) and parseable via `AMQPCode(err)`.
@@ -2554,10 +2570,22 @@ the next reader so the rationale survives the conversation:
    `WithTracer` swaps in a real one. Single code path, no `if tracer
    != nil` branching.
 
-4. **CloudEvents codec: both modes** — structured
-   (`application/cloudevents+json` envelope as body) and binary
-   (`data` in body, attributes in `ce-*` AMQP headers). The latter is
-   the real interop story with non-Go clients.
+4. **Codec interop is grounded in the canonical binding spec.** Codec
+   and wire-format decisions — especially for cross-ecosystem formats
+   like CloudEvents — are made to interoperate with **non-Go (or
+   non-warren) clients**, not for warren↔warren convenience. Built-in
+   codecs follow the authoritative binding/format spec, and an
+   **official upstream library is preferred over a hand-rolled mapping**
+   when it improves fidelity. Concretely, the CloudEvents codecs use the
+   official Go SDK's `cloudevents.Event` type and JSON event format, and
+   the binary codec implements the **CloudEvents AMQP Protocol Binding**:
+   structured mode puts the full `application/cloudevents+json` envelope
+   in the body; binary mode puts `data` in the body, maps
+   `datacontenttype` to the AMQP content-type property, and maps every
+   other attribute (and extension) to a `cloudEvents:`-prefixed AMQP
+   header (the SDK default — RabbitMQ bridges 0-9-1 headers ⇄ AMQP 1.0
+   application-properties). Any deliberate divergence from the canonical
+   binding MUST be called out and justified by an interop need.
 
 5. **Versioning: first tag is `v0.1.0`**, stabilising to `v1.0.0` once
    all success criteria are checked.
