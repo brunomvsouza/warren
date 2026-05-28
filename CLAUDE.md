@@ -137,6 +137,8 @@ The project uses TDD + incremental implementation as a hard discipline. For any 
 
 Recent commits follow `feat: <subject> (Txx)` / `fix: <subject> (Txx)`. Keep that format when committing task work so progress is greppable.
 
+At the end of every modification, check whether `README.md` needs an update — specifically when the change touches the **external contract** (public API surface, exported options, errors, codecs, CLI/`make` targets) or **user-facing documentation** (a new `examples/<feature>/`, a feature moving from roadmap to available, a changed reliability/observability guarantee). Keep the README's "Available now" / "On the roadmap" split, status line, and examples table in sync with what actually ships. Internal-only refactors that leave the public surface unchanged do not require a README edit.
+
 ## Language
 
 All project documents (`SPEC.md`, `tasks/plan.md`, `tasks/todo.md`, `LATER.md`, `CLAUDE.md`, `GEMINI.md`, godoc comments, commit messages, PR descriptions) are written in **English**. Any text added to these files — including new tasks, LATER entries, inline comments, and acceptance criteria — must be in English.
