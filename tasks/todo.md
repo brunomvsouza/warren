@@ -695,22 +695,22 @@ before Phase 5 can close.
 - **Files:** `codec/protobuf.go`, `codec/protobuf_test.go`, `codec/protobuf_fuzz_test.go`.
 - **Deps:** T09.
 
-### [ ] T25 — `codec/cloudevents.go` — structured mode · S
+### [x] T25 — `codec/cloudevents.go` — structured mode · S
 - **Acceptance:**
-  - [ ] `codec.NewCloudEventsStructured()` encodes the full CloudEvent JSON envelope into the message body. Encode/Decode operate on a `codec.CloudEvent` value.
-  - [ ] `ContentType()` returns `application/cloudevents+json`.
-  - [ ] JSON-typed `data` is inlined under the `data` member; non-JSON `data` is base64-encoded under `data_base64`, per the CloudEvents JSON format spec.
+  - [x] `codec.NewCloudEventsStructured()` encodes the full CloudEvent JSON envelope into the message body. Encode/Decode operate on a `codec.CloudEvent` value.
+  - [x] `ContentType()` returns `application/cloudevents+json`.
+  - [x] JSON-typed `data` is inlined under the `data` member; non-JSON `data` is base64-encoded under `data_base64`, per the CloudEvents JSON format spec.
 - **Verify:** Round-trip test against representative CloudEvents v1.0 JSON events (the upstream `cloudevents/spec` test vectors are not vendored; round-trip covers the same `data`/`data_base64`/extension paths).
 - **Files:** `codec/cloudevents.go`, `codec/cloudevents_structured_test.go`.
 - **Deps:** T09.
 
-### [ ] T26 — `codec/cloudevents.go` — binary mode · M
+### [x] T26 — `codec/cloudevents.go` — binary mode · M
 - **Acceptance:**
-  - [ ] `codec.NewCloudEventsBinary()` puts `data` in the body and CloudEvent attributes (`id`, `source`, `type`, `specversion`, `subject`, `time`, `datacontenttype`, plus extensions) into AMQP headers prefixed `ce-*`.
-  - [ ] Decode reconstitutes the full CloudEvent from body + headers.
-  - [ ] Follows the CloudEvents AMQP Protocol Binding spec.
-  - [ ] Introduces the optional `codec.HeaderCodec` interface (`EncodeWithHeaders`/`DecodeWithHeaders`, embeds `Codec`); the binary codec's plain `Encode`/`Decode` reject use outside a header-aware publisher/consumer with `ErrInvalidMessage` (no silent attribute loss).
-  - [ ] Publisher (`encodeMsg`) and Consumer (`safeDecodeConsumer`) detect `HeaderCodec` and route headers, so the codec works end-to-end.
+  - [x] `codec.NewCloudEventsBinary()` puts `data` in the body and CloudEvent attributes (`id`, `source`, `type`, `specversion`, `subject`, `time`, `datacontenttype`, plus extensions) into AMQP headers prefixed `ce-*`.
+  - [x] Decode reconstitutes the full CloudEvent from body + headers.
+  - [x] Follows the CloudEvents AMQP Protocol Binding spec.
+  - [x] Introduces the optional `codec.HeaderCodec` interface (`EncodeWithHeaders`/`DecodeWithHeaders`, embeds `Codec`); the binary codec's plain `Encode`/`Decode` reject use outside a header-aware publisher/consumer with `ErrInvalidMessage` (no silent attribute loss).
+  - [x] Publisher (`encodeMsg`) and Consumer (`safeDecodeConsumer`) detect `HeaderCodec` and route headers, so the codec works end-to-end.
 - **Verify:** Round-trip + cross-encoding test (structured-encoded message decodes via binary decoder fails cleanly with `ErrInvalidMessage`) + an end-to-end publisher→consumer test (no broker) asserting `ce-*` headers and `data` body round-trip. Fuzz target `FuzzCodecCloudEventsBinary` feeds arbitrary body+headers into `DecodeWithHeaders` and asserts no panic.
 - **Files:** edits to `codec/cloudevents.go`, `codec/codec.go` (`HeaderCodec`), `publisher.go`, `consumer.go`; `codec/cloudevents_binary_test.go`, `codec/cloudevents_binary_fuzz_test.go`.
 - **Deps:** T25.
