@@ -11,11 +11,76 @@ import (
 	"unicode/utf8"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
 
 	"github.com/brunomvsouza/warren/codec"
 	"github.com/brunomvsouza/warren/metrics"
 	"github.com/brunomvsouza/warren/otel"
 )
+
+// Consumer-span outcome labels (SPEC §6.9). They mirror the verdict space of the
+// consumer_handler_seconds metric so an operator can filter traces the same way
+// they filter metrics. The attribute key matches the publisher's outcome label.
+const (
+	outcomeAck             = "ack"
+	outcomeNackRequeue     = "nack_requeue"
+	outcomeNackNoRequeue   = "nack_no_requeue"
+	outcomeMaxRedeliveries = "max_redeliveries"
+	outcomeTimeout         = "timeout"
+	outcomeChannelClosed   = "handler_aborted_channel_closed"
+)
+
+// finishConsumeSpan stamps the terminal outcome on a consume span: the
+// messaging.rabbitmq.outcome attribute always, and on failure the error.type
+// attribute, an Error status, and a recorded error (SPEC §6.9).
+func finishConsumeSpan(span otel.Span, outcome string, err error) {
+	span.SetAttributes(attribute.String("messaging.rabbitmq.outcome", outcome))
+	if err == nil {
+		span.SetStatus(otelcodes.Ok, "")
+		return
+	}
+	span.SetAttributes(semconv.ErrorTypeKey.String(consumeErrorType(err)))
+	span.SetStatus(otelcodes.Error, err.Error())
+	span.RecordError(err)
+}
+
+// consumeVerdictOutcome maps a (post-counter-B) handler verdict error to the
+// span outcome label. ErrPoison and any non-sentinel handler error both resolve
+// to nack_no_requeue, matching d.AckIf's nack-without-requeue default.
+func consumeVerdictOutcome(err error) string {
+	switch {
+	case err == nil:
+		return outcomeAck
+	case errors.Is(err, ErrMaxRedeliveries):
+		return outcomeMaxRedeliveries
+	case errors.Is(err, ErrRequeue):
+		return outcomeNackRequeue
+	default:
+		return outcomeNackNoRequeue
+	}
+}
+
+// consumeErrorType maps a verdict error to the error.type span attribute. Known
+// sentinels resolve to their exported name for assertive alerting; anything else
+// falls back to "error" (the value is never embedded, to avoid leaking content).
+func consumeErrorType(err error) string {
+	switch {
+	case errors.Is(err, ErrMaxRedeliveries):
+		return "ErrMaxRedeliveries"
+	case errors.Is(err, ErrRequeue):
+		return "ErrRequeue"
+	case errors.Is(err, ErrPoison):
+		return "ErrPoison"
+	case errors.Is(err, ErrChannelClosed):
+		return "ErrChannelClosed"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "DeadlineExceeded"
+	default:
+		return "error"
+	}
+}
 
 // Handler is the function signature for typed message handlers.
 // Return nil to ack, ErrRequeue to nack with requeue, or any other error to nack without requeue.
@@ -143,9 +208,10 @@ type Consumer[M any] struct {
 	// Replaced atomically on every channel open so "channel close resets counter B".
 	counterState atomic.Pointer[redeliveryCounter]
 
-	codec  codec.Codec
-	cm     metrics.ConsumerMetrics
-	tracer otel.Tracer
+	codec      codec.Codec
+	cm         metrics.ConsumerMetrics
+	tracer     otel.Tracer
+	propagator otel.Propagator
 
 	// mc is the consumer-role managed connection this consumer is pinned to.
 	mc *managedConn
@@ -193,6 +259,7 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 		codec:            b.c,
 		cm:               b.cm,
 		tracer:           b.tracer,
+		propagator:       otel.NewPropagator(),
 		mc:               mc,
 		closedCh:         make(chan struct{}),
 	}
@@ -455,6 +522,29 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 
 	d := newDelivery[M](&body, c.queue, raw, c.closedCh)
 
+	// hCtxBase is the WithCancelCause context used to propagate ErrChannelClosed
+	// to the handler goroutine when the AMQP channel closes mid-handler (timeout path).
+	hCtxBase, cancelCause := context.WithCancelCause(ctx)
+	defer cancelCause(nil)
+
+	// Parent the process span on the producer's trace context (extracted from the
+	// incoming headers) so the trace-id is continuous publisher → consumer, while
+	// keeping the handler context a descendant of the consumer context so outer
+	// cancellation and HandlerTimeout still propagate (SPEC §6.9).
+	parentCtx := c.propagator.ExtractTo(hCtxBase, raw.Headers)
+
+	hCtx := parentCtx
+	if c.handlerTimeout > 0 {
+		var timeoutCancel context.CancelFunc
+		hCtx, timeoutCancel = context.WithTimeout(parentCtx, c.handlerTimeout)
+		defer timeoutCancel()
+	}
+
+	// Open the <queue> process span; it wraps counter A, the handler, and every
+	// verdict path. defer guarantees it is ended even on a handler panic.
+	spanCtx, span := c.tracer.Start(hCtx, c.queue+" process", c.processSpanAttrs(raw)...)
+	defer span.End()
+
 	// — Counter A (x-death, cross-process) ————————————————————————————
 	// Fires BEFORE calling the handler. Short-circuits without invoking the
 	// handler when the message has already bounced through DLX n+ times.
@@ -464,6 +554,7 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 			"warren: max redeliveries exceeded for queue %q (cause=x-death, death_count=%d, limit=%d)",
 			c.queue, d.DeathCount(), c.maxRedeliveries,
 		)
+		finishConsumeSpan(span, outcomeMaxRedeliveries, ErrMaxRedeliveries)
 		_ = raw.Nack(false, false)
 		return
 	}
@@ -493,23 +584,11 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		}
 	}
 
-	// hCtxBase is the WithCancelCause context used to propagate ErrChannelClosed
-	// to the handler goroutine when the AMQP channel closes mid-handler (timeout path).
-	hCtxBase, cancelCause := context.WithCancelCause(ctx)
-	defer cancelCause(nil)
-
-	hCtx := hCtxBase
-	if c.handlerTimeout > 0 {
-		var timeoutCancel context.CancelFunc
-		hCtx, timeoutCancel = context.WithTimeout(hCtxBase, c.handlerTimeout)
-		defer timeoutCancel()
-	}
-
 	start := time.Now()
 
 	if c.handlerTimeout == 0 {
 		// Fast path: call handler inline; avoids per-message goroutine + channel.
-		handlerErr := h(hCtx, d)
+		handlerErr := safeCallHandler(spanCtx, h, d)
 		elapsed := time.Since(start)
 		// Non-blocking check: did the AMQP channel close while the handler ran?
 		channelClosed := false
@@ -523,15 +602,18 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		if channelClosed && handlerErr != nil {
 			c.cm.RecordHandlerAbortedChannelClosed(c.queue)
 			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
+			finishConsumeSpan(span, outcomeChannelClosed, ErrChannelClosed)
 			return // no ack — broker will redeliver
 		}
 		if autoAck {
 			processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
 			c.cm.RecordHandler(c.queue, handlerOutcome(processedErr), elapsed)
+			finishConsumeSpan(span, consumeVerdictOutcome(processedErr), processedErr)
 			_ = d.AckIf(processedErr)
 		} else {
 			// ConsumeRaw: handler is responsible for ack/nack.
 			c.cm.RecordHandler(c.queue, "raw", elapsed)
+			finishConsumeSpan(span, consumeVerdictOutcome(handlerErr), handlerErr)
 		}
 		return
 	}
@@ -539,7 +621,7 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 	// Timeout path: run handler in a goroutine so we can enforce the deadline.
 	// A nil chanDone is never selected in the select below (Go semantics).
 	handlerDone := make(chan error, 1)
-	go func() { handlerDone <- h(hCtx, d) }()
+	go func() { handlerDone <- safeCallHandler(spanCtx, h, d) }()
 
 	select {
 	case handlerErr := <-handlerDone:
@@ -556,14 +638,17 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		if channelClosed && handlerErr != nil {
 			c.cm.RecordHandlerAbortedChannelClosed(c.queue)
 			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
+			finishConsumeSpan(span, outcomeChannelClosed, ErrChannelClosed)
 			return
 		}
 		if autoAck {
 			processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
 			c.cm.RecordHandler(c.queue, handlerOutcome(processedErr), elapsed)
+			finishConsumeSpan(span, consumeVerdictOutcome(processedErr), processedErr)
 			_ = d.AckIf(processedErr)
 		} else {
 			c.cm.RecordHandler(c.queue, "raw", elapsed)
+			finishConsumeSpan(span, consumeVerdictOutcome(handlerErr), handlerErr)
 		}
 
 	case <-chanDone: // nil channel: never selected when chanDone is nil
@@ -571,6 +656,7 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		cancelCause(ErrChannelClosed) // cancel handler ctx before draining
 		c.cm.RecordHandlerAbortedChannelClosed(c.queue)
 		c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
+		finishConsumeSpan(span, outcomeChannelClosed, ErrChannelClosed)
 		<-handlerDone
 
 	case <-hCtx.Done():
@@ -587,12 +673,47 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 				c.cm.RecordHandler(c.queue, "timeout_nack_no_requeue", elapsed)
 				_ = raw.Nack(false, false)
 			}
+			finishConsumeSpan(span, outcomeTimeout, context.DeadlineExceeded)
 		default:
-			// Outer ctx cancelled; no ack — broker will redeliver.
+			// Outer ctx cancelled; no ack — broker will redeliver. No verdict is
+			// recorded on the span: this is consumer lifecycle end, not a message
+			// outcome. The deferred span.End() still closes the span.
 		}
 		cancelCause(nil) // signal handler goroutine before draining
 		<-handlerDone
 	}
+}
+
+// processSpanAttrs builds the messaging attributes for a <queue> process span
+// (SPEC §6.9). message.id and conversation_id are included only when present.
+func (c *Consumer[M]) processSpanAttrs(raw amqp091.Delivery) []attribute.KeyValue {
+	attrs := []attribute.KeyValue{
+		semconv.MessagingSystemKey.String("rabbitmq"),
+		semconv.MessagingDestinationName(c.queue),
+		semconv.MessagingOperationTypeKey.String("process"),
+	}
+	if raw.MessageId != "" {
+		attrs = append(attrs, semconv.MessagingMessageID(raw.MessageId))
+	}
+	if raw.CorrelationId != "" {
+		attrs = append(attrs, semconv.MessagingMessageConversationID(raw.CorrelationId))
+	}
+	return attrs
+}
+
+// safeCallHandler invokes h, recovering a handler panic into an error so the
+// consumer goroutine survives and the process span can be ended with a failure
+// outcome (SPEC §6.9 "ended in every termination path including panics"). A
+// recovered panic maps to nack-without-requeue (it is not ErrRequeue), matching
+// the poison-message contract. The panic value is reported by type only so a
+// panicking handler cannot leak message content into the error string or span.
+func safeCallHandler[M any](ctx context.Context, h RawHandler[M], d *Delivery[M]) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("warren: handler panic: %T", r)
+		}
+	}()
+	return h(ctx, d)
 }
 
 // applyCounterB enforces the in-process redelivery counter (counter B).
