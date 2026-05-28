@@ -1197,9 +1197,10 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Acceptance:**
   - [ ] `Delivery[M]` has a resolved-once guard (mirrors `Batch[M]`): the second of any `Ack`/`Nack`/`AckIf`, or a handler-timeout verdict followed by a late handler verdict, is a no-op returning a sentinel (e.g. `ErrAlreadyClosed`-class), never a wire frame.
   - [ ] Channel stays open after the double call.
+  - [ ] **Lens-02 (DS-04):** SPEC §6.3 documents the double verdict (incl. a late verdict after `HandlerTimeout`, esp. via `ConsumeRaw`) as a no-op, and states that **pre-fix** it channel-closes (406/`PRECONDITION_FAILED`), taking out *every* in-flight handler on that channel — collateral loss, not just a duplicate.
 - **Verify:** Integration test: `HandlerTimeout` fires, handler later returns `nil`; assert no second frame, channel not closed, no `PRECONDITION_FAILED`. Unit test: double `Delivery.Ack` via `ConsumeRaw` is a no-op.
-- **Files:** `delivery.go`, `consumer.go`, `delivery_test.go`, `consumer_test.go`.
-- **Deps:** T18, T19. **(R10-5, P0.4)**
+- **Files:** `delivery.go`, `consumer.go`, `delivery_test.go`, `consumer_test.go`, SPEC §6.3.
+- **Deps:** T18, T19. **(R10-5, P0.4)** — *pulled into Phase 12; Lens-02 adds the §6.3 wording.*
 
 ### [ ] T61 — Channel-level recovery (distinct from TCP reconnect) [P1] · M
 - **Acceptance:**
@@ -1213,17 +1214,19 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Acceptance:**
   - [ ] Broker-global topology is redeclared **once per recovery event** at the `*Connection` level, not once per pooled `managedConn`.
   - [ ] `basic.consume`/`basic.qos` reissue stays per consumer connection.
+  - [ ] **Lens-02 (DS-09):** SPEC §6.1 notes this compounds with DS-10 (T66) into a recovery storm; the chaos lane exercises a full-cluster restart against a just-recovered (possibly Khepri-quorum-forming) broker and asserts declares stay == topology size.
 - **Verify:** Integration/chaos test with `WithPublisherConnections(4)+WithConsumerConnections(4)` and an instrumented declare counter (or broker-side `queue.declare` count) asserts declares == topology size, not 8×.
 - **Files:** `connection.go`, `topology.go`, `connection_internal_test.go`.
-- **Deps:** T07, T16. **(R10-7, P1.2)** — sequence with T61/T63.
+- **Deps:** T07, T16, T84 (chaos lane). **(R10-7, P1.2)** — sequence with T61/T63; *pulled into Phase 13 (v0.1).*
 
 ### [ ] T63 — Reconnect barrier max-duration cap [P1] · S
 - **Acceptance:**
   - [ ] The synchronous redeclare barrier is bounded by a configurable max duration; on cap, blocked `Publish` calls return `ErrReconnecting` rather than stalling indefinitely.
   - [ ] **Lens-01 (RMQ-17):** the cap covers **Khepri (4.1 default)**, where `queue.declare` is a Raft-quorum op that can block during partition recovery.
-- **Verify:** Unit test with a mock channel whose redeclare blocks longer than the cap asserts `Publish` returns `ErrReconnecting` at the cap (with `PublishTimeout=0` + `context.Background()`).
-- **Files:** `connection.go`, `options_connection.go`, `connection_internal_test.go`.
-- **Deps:** T07, T62. **(R10-8, P1.6)** — sequence with T61/T62.
+  - [ ] **Lens-02 (DS-02):** SPEC names the cap option, its default, and the post-cap connection state (force-reconnect vs degraded), and states explicitly that `ConfirmTimeout` does **not** cover the barrier (the frame is still unwritten) — the cap is a distinct mechanism.
+- **Verify:** Unit test with a mock channel whose redeclare blocks longer than the cap asserts `Publish` returns `ErrReconnecting` at the cap (with `PublishTimeout=0` + `context.Background()`). Chaos: a half-alive-broker proxy (accepts the socket, stalls `queue.declare`) asserts the same on a real broker; `goleak` clean.
+- **Files:** `connection.go`, `options_connection.go`, `connection_internal_test.go`, SPEC §6.1/§6.2.
+- **Deps:** T07, T62, T84 (half-alive proxy). **(R10-8, P1.6)** — sequence with T61/T62; *pulled into Phase 13 (v0.1).*
 
 ### [ ] T64 — Quorum-queue structural validation + MaxPriority fix [P1] · S
 - **Acceptance:**
@@ -1245,9 +1248,10 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 ### [ ] T66 — `WithAddrs` shuffle + reconnect rotation [P2] · S
 - **Acceptance:**
   - [ ] The address list is shuffled per connection at `Dial`; reconnect rotates to the next address rather than always retrying index 0.
-- **Verify:** Unit test asserts N connections start from a distribution of addresses; reconnect picks a different address.
+  - [ ] **Lens-02 (DS-10):** SPEC §6.1 notes this compounds with DS-09 (T62) into a recovery storm; the chaos lane asserts no `addr[0]` stampede on a full-cluster restart.
+- **Verify:** Unit test asserts N connections start from a distribution of addresses; reconnect picks a different address. Chaos: a full-cluster restart shows reconnections spread across addresses.
 - **Files:** `connection.go`, `options_connection.go`, `connection_internal_test.go`.
-- **Deps:** T07, T07d. **(R10-11, P2.1)**
+- **Deps:** T07, T07d. **(R10-11, P2.1)** — *already pulled into Phase 12.*
 
 ### [ ] T67 — `Dial` partial-pool-connect policy [P2] · S
 - **Acceptance:**
@@ -1274,18 +1278,20 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Acceptance:**
   - [ ] `Close` handles prefetched-but-undispatched deliveries deterministically (drain or nack-requeue), documented in SPEC §6.1.
   - [ ] `BatchConsumer` flushes its pending partial batch on `Close`/final `FlushAfter`.
-- **Verify:** Integration: prefetch N, dispatch < N, `Close`; assert undispatched are nack-requeued (redelivered), not silently dropped. Batch partial flush asserted with `goleak` clean.
-- **Files:** `connection.go`, `consumer.go`, `batch_consumer.go`, SPEC §6.1/§6.4.
-- **Deps:** T18, T22. **(R10-15, P2.5)**
+  - [ ] **Lens-02 (DS-03):** the choice is resolved to **nack-requeue (`requeue=true`)** the undispatched buffer before channel close (never drop → no silent loss); `consumer_shutdown_requeued_total` increments; the forced-close (ctx-deadline) abandoned-in-flight duplicate window is named in SPEC (see DS-16/T85).
+- **Verify:** Integration: prefetch N, dispatch < N, `Close`; assert undispatched are nack-requeued (redelivered), not silently dropped. Batch partial flush asserted with `goleak` clean. Gated by G2 (capture the current v0.1 behaviour first).
+- **Files:** `connection.go`, `consumer.go`, `batch_consumer.go`, `metrics/`, SPEC §6.1/§6.4.
+- **Deps:** T18, T22, T84 (G2). **(R10-15, P2.5)** — *pulled into Phase 13 (v0.1).*
 
 ### [ ] T71 — Observability gaps: pool-wait, in-flight, redelivered [P2] · M
 - **Acceptance:**
   - [ ] Channel-pool acquire-wait/saturation metric exposed.
   - [ ] `consumer_in_flight{queue}` gauge (active handlers) exposed.
   - [ ] `consumer_redelivered_total{queue}` counter increments on `Redelivered()==true` deliveries.
+  - [ ] **Lens-02 (DS-14):** `consumer_redelivered_total` is the redelivery-class duplicate-budget signal `publisher_retry_total` does not cover — required for the §1 "duplicate budget never invisible" claim to hold for the dominant duplicate source.
 - **Verify:** Unit/integration assert each metric moves under the relevant condition (pool saturation, busy handlers, a forced redelivery).
 - **Files:** `metrics/`, `channelpool.go`, `consumer.go`.
-- **Deps:** T04, T08, T18. **(R10-16, P2.6)** — coordinates with T50/T52/T53.
+- **Deps:** T04, T08, T18. **(R10-16, P2.6)** — coordinates with T50/T52/T53; *pulled into Phase 13 (v0.1).*
 
 ### [ ] T72 — TCP keepalive / dialer hardening [P2] · XS
 - **Acceptance:**
@@ -1393,9 +1399,10 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 ### [ ] T82 — Contract-precision SPEC fixes (RMQ-24/25/26/27/28/29) [P3] · S
 - **Acceptance:**
   - [ ] decision-17 default-"1" staleness fixed; ack-vs-confirm wording (§6.2); sub-ms `Expiration`→`"0"` footgun documented (optionally reject `<1ms` non-zero, §6.5); Priority range + "quorum has no priority" (§6.5); exclusive-reply-queue redeclare-on-reconnect (§6.7); prefetch-16 reworded as guidance not a broker constant (§6.3).
+  - [ ] **Lens-02 (DS-07):** the §6.2 ack-vs-confirm wording is the **single source** for Phase 13 T88's queue-type confirm-semantics table — coordinate, do not duplicate or contradict.
 - **Verify:** Doc review; if `<1ms` reject is implemented, a unit test asserts `ErrInvalidMessage`.
 - **Files:** SPEC §6.2/§6.3/§6.5/§6.7/§10, optionally `message.go` + `message_test.go`.
-- **Deps:** —. **(RMQ-24/25/26/27/28/29, P3)**
+- **Deps:** —. **(RMQ-24/25/26/27/28/29, P3)** — *coordinate with Phase 13 T88.*
 
 ### [ ] T83 — §9 throughput-honesty wording (RMQ-11) [P2] · XS
 - **Acceptance:**
@@ -1412,6 +1419,117 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 - [ ] SPEC matches implementation (T78); version caveats + honest §9 numbers (T79/T80/T81/T82/T83).
 - [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 **and** 4.x) green; `goleak.VerifyNone` clean; README synced.
 
+## Phase 13 — Distributed-Systems Re-review (Lens 02: failure modes, consistency, ordering, duplicates)
+
+Closes the Lens-02 adversarial spec validation
+(`spec-validation/02-distributed-systems.md`, `DS-01..DS-17`; brief
+`spec-validation/02-distributed-systems-plan.md`). Lens verdict: **NO-GO for the
+§1 bar as written; GO-WITH-CHANGES** once the High findings land. Owner decisions
+(2026-05-28): pull **T62/T63/T70/T71** forward into v0.1; stand up a new **`chaos`
+build tag** (3-node cluster + fault injector + half-alive proxy) because a
+single-broker lane cannot falsify DS-05/06/07/13; build the **opt-in
+structured-error RPC reply mode** now (DS-12); invest in **per-entity redeclare**
+(DS-08). No new `LATER.md` entries. Failure-mode claims are tested against a real
+broker/cluster, not a mock. **Gate task T84 runs first**; no SPEC edit to an
+affected section lands before its gate returns. Per-task SPEC amendment lands in
+the same PR; a SPEC §10 "Rev 12" note records the pass.
+
+### [ ] T84 — Chaos lane + verification gates G1–G6 (real broker + 3-node cluster, 3.13 + 4.x) [P0] · L
+- **Acceptance:**
+  - [ ] A `chaos` build tag + `make test-chaos` target stands up a 3-node RabbitMQ cluster (configurable `cluster_partition_handling`), a fault injector (`toxiproxy`/`iptables`/`rabbitmqctl stop_app`), and a half-alive-broker proxy. (Size **L** — split into a fixture sub-task and a gate-capture sub-task before starting.)
+  - [ ] Ground truth captured on **both** versions for: **G1** SAC-failover reorder/duplicate with `Prefetch>1` (classic **and** quorum); **G2** the *current* `Close` behaviour for prefetched-but-undispatched deliveries (requeue or drop?); **G3** quorum publish pinned to a minority-partition node (hang/timeout/error + duplicate-on-heal); **G4** the client signal per `pause_minority`/`autoheal`/`ignore`; **G5** a poison crash-loop defeating process-local Counter B; **G6** the `Caller`'s handling of a second reply for an already-resolved `CorrelationID`.
+  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate.
+- **Verify:** `make test-chaos` green on the 3.13 and 4.x cluster images; the gate table is reviewable.
+- **Files:** `docker-compose.chaos.yml`, `Makefile`, `*_chaos_test.go`, `amqptest/`, `spec-validation/` (results table).
+- **Deps:** T07d, T14, T15. **(Lens-02 gates, P0)**
+
+### [ ] T85 — Dedupe-pattern rework: crash-unsafe LRU + persistent example (DS-01/DS-15/DS-16) [P0] · M
+- **Acceptance:**
+  - [ ] SPEC §6.2.1 splits **publish-retry** duplicates (bounded by outage+reconnect+retry → in-memory LRU OK) from **crash/requeue redelivery** duplicates (unbounded gap, and the crash wipes the in-memory cache → ~zero protection); states that handlers with external side-effects (DB/HTTP/payments) **require persistent dedupe**, not "paranoid"; recommends bounding queue residency with a TTL.
+  - [ ] **DS-15:** the "UUIDv7 makes eviction-by-recency trivial" non-sequitur is dropped (an `lru.Cache` evicts by access order, not the key's timestamp); SPEC §6.2.1/§6.5 document that `MessageID`/`Timestamp` ordering is per-publisher wall clock — not global, not monotonic across NTP steps — and only ID *uniqueness* is load-bearing for dedupe.
+  - [ ] **DS-16:** the forced-close (ctx-deadline) abandoned-in-flight duplicate window is named in §6.2.1.
+  - [ ] `examples/idempotent_consume/` ships a persistent (Redis/DB) variant.
+- **Verify:** A chaos test crashes the consumer mid-handler and asserts the persistent path dedupes the redelivery while the in-memory path does not.
+- **Files:** SPEC §6.2.1/§6.5, `examples/idempotent_consume/`, a chaos test.
+- **Deps:** T38b, T84. **(DS-01/DS-15/DS-16, P0)**
+
+### [ ] T86 — Cluster partition-handling modes subsection + §1 carve-out (DS-05) [P0] · M
+- **Acceptance:**
+  - [ ] A new SPEC §6.1 subsection documents the client-side observation per `pause_minority`/`autoheal`/`ignore` (per G4), with an explicit **§1 carve-out** that under `ignore` acked messages can be lost silently on heal (mirroring the R10-1 delayed-message carve-out).
+  - [ ] SPEC recommends against `ignore`; recommends `pause_minority` + `WithAddrs` failover.
+  - [ ] README reliability copy updated for the partition carve-out.
+- **Verify:** Chaos test asserts the client sees a classifiable reconnect under `pause_minority`/`autoheal`; doc review of the `ignore` carve-out against G4.
+- **Files:** SPEC §6.1, `README.md`, a chaos test.
+- **Deps:** T84 (G4). **(DS-05, P0)**
+
+### [ ] T87 — SAC ordering qualification (DS-06) [P0] · M
+- **Acceptance:**
+  - [ ] SPEC §6.3/§6.6 + decision 30 drop "strict ordering with failover"; state per-channel ordering holds **steady-state only**, and at the failover boundary up to `Prefetch` messages from the dead active consumer are redelivered (duplicates) and may reorder relative to messages published during the gap.
+  - [ ] SPEC recommends `Prefetch(1)` with SAC when cross-failover order matters (reduces, never eliminates).
+  - [ ] `examples/ordered_consume/` README states the boundary caveat.
+- **Verify:** G1 chaos test asserts the documented reorder/duplicate behaviour per queue-type per broker-version.
+- **Files:** SPEC §6.3/§6.6/§10, `examples/ordered_consume/`, a chaos test.
+- **Deps:** T84 (G1), T38c. **(DS-06, P0)**
+
+### [ ] T88 — Queue-type confirm-semantics table + minority-partition window (DS-07) [P1] · S
+- **Acceptance:**
+  - [ ] SPEC §6.2 carries a queue-type confirm-semantics table: **quorum** = confirm after Raft majority-commit; **classic durable+persistent** = after fsync/batch; **transient/non-durable** = immediate, no durability.
+  - [ ] The **quorum minority-partition** window is named (per G3): no quorum → publish unconfirmed → `ErrConfirmTimeout` → `PublishRetry` → duplicate on heal — tied to DS-05.
+- **Verify:** G3 confirms the timeout→retry→duplicate path; the table is reviewed against the RabbitMQ quorum-queue docs; no contradiction with T82's ack-vs-confirm wording.
+- **Files:** SPEC §6.2, a chaos test.
+- **Deps:** T84 (G3). **(DS-07, P1)** — coordinate with T82 (merge the ack-vs-confirm wording, do not duplicate).
+
+### [ ] T89 — Per-entity redeclare (degraded-mode blast radius) (DS-08) [P1] · M
+- **Acceptance:**
+  - [ ] On a genuine durable-definition conflict, only publishes routing to the conflicting entity fail; the rest of the role's publish path stays live (replaces the whole-role degraded halt).
+  - [ ] SPEC §6.1 + decision 28 document the new granularity and that `ForceReconnect()` is ineffective for non-transient conflicts.
+- **Verify:** Integration test: declare a conflicting durable queue; assert publishes to a *different* entity still succeed while publishes to the conflicting entity return `ErrTopologyRedeclareFailed`.
+- **Files:** `connection.go`, `topology.go`, `connection_internal_test.go`, SPEC §6.1/§10.
+- **Deps:** T62. **(DS-08, P1)** — sequence after T62 (shared redeclare path).
+
+### [ ] T90 — RPC orphan-reply handling (DS-11) [P1] · M
+- **Acceptance:**
+  - [ ] The `Caller` discards a reply whose `CorrelationID` has no pending entry, emitting a metric/log; a UUIDv7 `CorrelationID` is never reused, so a late reply cannot bind to a subsequent `Call`.
+  - [ ] In `UseExclusiveReplyQueue()` mode the orphan reply is ack-and-dropped (not left unacked).
+  - [ ] SPEC §6.7 specifies the above.
+- **Verify:** G6 chaos test (Replier publishes-confirms then crashes before ack → second reply) with concurrent `Call`s asserts the orphan does not resolve/disturb another in-flight call; repeated for `UseExclusiveReplyQueue()`.
+- **Files:** `rpc.go`, `metrics/`, `rpc_test.go`, a chaos test, SPEC §6.7.
+- **Deps:** T84 (G6). **(DS-11, P1)**
+
+### [ ] T91 — Opt-in structured-error RPC reply mode (DS-12) [P1] · M
+- **Acceptance:**
+  - [ ] An opt-in mode lets a `Replier` send a structured error reply so a deterministic handler rejection is distinguishable at the `Caller` from timeout/loss, instead of collapsing all three into `ErrCallTimeout`.
+  - [ ] SPEC §6.7 + decision 16 document the mode and warn that **without** it callers MUST NOT blind-retry without idempotency + a bounded budget (the non-converging re-run-and-re-DLX hazard). Revises part of decision 16.
+- **Verify:** Integration test: a Replier handler returns a deterministic error in structured-error mode; the `Caller` receives a distinguishable error, not `ErrCallTimeout`; default mode unchanged.
+- **Files:** `rpc.go`, `rpc_test.go`, a `*_integration_test.go`, SPEC §6.7/§10.
+- **Deps:** T84. **(DS-12, P1)**
+
+### [ ] T92 — Poison Counter-B crash-loop honesty (DS-13) [P1] · S
+- **Acceptance:**
+  - [ ] SPEC §1/§6.3/§9 state that Counter B (process-local, resets per restart) does **not** bound a poison message that crashes the consumer process; the only crash-safe bound is quorum `x-delivery-limit`.
+  - [ ] The §1 "no silent poison loop" + §9 "at most `MaxRedeliveries+1` deliveries" claims are downgraded to "per-process-lifetime, classic-queue; crash-safe only with quorum `x-delivery-limit`".
+- **Verify:** G5 chaos test demonstrates the unbounded reprocessing across restarts on a classic queue; a quorum counterpart shows the broker-side bound holds.
+- **Files:** SPEC §1/§6.3/§9, a chaos test.
+- **Deps:** T84 (G5). **(DS-13, P1)** — coordinate with T58 (version-aware delivery-limit).
+
+### [ ] T93 — `PublishBatch` order-under-retry caveat (DS-17) [P3] · XS
+- **Acceptance:**
+  - [ ] SPEC §6.2 + decision 43 note the input-order guarantee holds only absent a mid-batch channel close; a caller-retried slot (decision 43) loses its position, so callers needing order must re-publish the whole batch, not just failed indices.
+- **Verify:** Doc review.
+- **Files:** SPEC §6.2/§10.
+- **Deps:** —. **(DS-17, P3)** — may ride T85.
+
+### Checkpoint — Phase 13 (Lens 02) closed
+- [ ] T84 chaos lane (`make test-chaos`: 3-node cluster + fault injector + half-alive proxy) green on 3.13 **and** 4.x; gate results table committed; downstream tasks cite their gate.
+- [ ] Active §1 violations closed: DS-02/T63 (bounded barrier, `ErrReconnecting` within the cap; `ConfirmTimeout` does not cover the barrier), DS-03/T70 (`Close` nack-requeues undispatched, never drops; `consumer_shutdown_requeued_total`).
+- [ ] Missing failure domains filled: DS-05/T86 (partition-mode subsection + `ignore` carve-out), DS-07/T88 (queue-type confirm table + minority-partition window).
+- [ ] Overclaims corrected: DS-06/T87 (SAC qualified, `examples/ordered_consume/` caveat), DS-13/T92 (poison crash-loop honesty), DS-15 (UUIDv7 eviction wording, in T85).
+- [ ] Dedupe remedy + correctness windows: DS-01/T85 (crash-unsafe LRU + persistent example), DS-04/T60 (§6.3 wording + `ConsumeRaw` test), DS-11/T90 (orphan reply), DS-16 (forced-close window, in T85), DS-17/T93 (batch order-under-retry).
+- [ ] Recovery-storm + escalated features: DS-09/T62 + DS-10/T66 + DS-14/T71 (de-amplification + shuffle + redelivery metric), DS-08/T89 (per-entity redeclare), DS-12/T91 (structured-error reply mode).
+- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 **and** 4.x) **and** the new chaos lane green; `goleak.VerifyNone` clean.
+- [ ] README "Available now / On the roadmap" + reliability copy synced (partition carve-out, SAC caveat, `consumer_redelivered_total`, structured-error RPC mode).
+- [ ] SPEC §10 "Rev 12" note records the Lens-02 pass; no duplicate tasks created (T60/T62/T63/T66/T70/T71/T82 amended in place); no new `LATER.md` entries.
+
 ### Checkpoint — v0.1.0 shipped
 - [ ] Every SPEC §9 success criterion ticked.
 - [ ] `v0.1.0` tag on `main`.
@@ -1421,7 +1539,7 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 ---
 
 ## Quick stats
-- Total tasks: **92** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review).
+- Total tasks: **102** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane).
 - Phases: **12**.
 - Estimated sizing: 8× XS · 40× S · 23× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
