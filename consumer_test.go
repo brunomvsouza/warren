@@ -996,8 +996,10 @@ func TestConsumer_counterBKey_continuationBytesMessageId_doesNotCollide(t *testi
 	// so without the empty-result guard, counterBKeyForMsgID would return "mid:".
 	invalidUTF8 := strings.Repeat("\x80", maxMsgIDKeyLen+1)
 	key := counterBKeyForMsgID(invalidUTF8)
-	assert.NotEqual(t, "mid:", key,
-		"pure continuation bytes must not collapse to the bare 'mid:' key")
+	// The contract is that counterBKeyForMsgID returns "" (not the degenerate
+	// "mid:" key) so the call site falls back to the unique delivery-tag key.
+	assert.Empty(t, key,
+		"pure continuation bytes must yield an empty key so the caller uses the dlv: fallback; got %q", key)
 }
 
 // TestConsumer_counterBKeyForDeliveryTag_longConsumerTag_isTruncated verifies

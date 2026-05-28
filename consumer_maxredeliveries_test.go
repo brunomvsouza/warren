@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -605,6 +606,85 @@ func TestConsumer_MaxRedeliveries_CounterB_EmptyMessageID_FallbackKey(t *testing
 	}
 	assert.Equal(t, 0, cm.maxRedeliveries["in-process"],
 		"counter B must NOT fire when MessageID is absent (fallback key changes per delivery)")
+}
+
+func TestConsumer_MaxRedeliveries_CounterB_ContinuationByteMessageID_DoesNotFalselyFire(t *testing.T) {
+	// A MessageID composed entirely of UTF-8 continuation bytes, longer than
+	// maxMsgIDKeyLen, truncates to an empty string. counterBKeyForMsgID returns ""
+	// for it, so dispatch falls back to the per-delivery "dlv:<tag>" key. With
+	// distinct delivery tags the fallback key changes every time, so counter B
+	// must NOT accumulate and must NOT rewrite the verdict to Nack(false).
+	//
+	// Without the empty-result guard, every such message would collapse onto the
+	// degenerate "mid:" slot, the counter would accumulate across distinct
+	// deliveries, and the (n+1)-th would falsely fire ErrMaxRedeliveries.
+	defer goleak.VerifyNone(t)
+
+	const n = 3
+	conn := newFakeConsumerConn(t)
+	cm := &maxRedeliveriesCountingMetrics{}
+	c, err := ConsumerFor[string](conn).
+		Queue("testq").
+		MaxRedeliveries(n).
+		Metrics(cm).
+		Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, n+2)
+	c.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var nackCalls []bool
+	var mu sync.Mutex
+
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = c.Consume(ctx, func(_ context.Context, _ string) error { return ErrRequeue })
+	}()
+
+	// All-continuation-byte MessageID longer than the truncation limit.
+	badMsgID := strings.Repeat("\x80", maxMsgIDKeyLen+1)
+	lastNack := make(chan struct{})
+	for i := range n + 1 {
+		isLast := i == n
+		deliveryCh <- amqp091.Delivery{
+			Body:        []byte(`"hello"`),
+			MessageId:   badMsgID,
+			DeliveryTag: uint64(i + 1), // distinct tags → distinct dlv: fallback keys
+			Acknowledger: &fakeAcknowledger{
+				nackFn: func(_ uint64, _, requeue bool) error {
+					mu.Lock()
+					nackCalls = append(nackCalls, requeue)
+					if isLast {
+						close(lastNack)
+					}
+					mu.Unlock()
+					return nil
+				},
+			},
+		}
+	}
+
+	select {
+	case <-lastNack:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for last nack")
+	}
+	cancel()
+	<-consumeDone
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, nackCalls, n+1, "expected exactly n+1 nack calls")
+	for i, requeue := range nackCalls {
+		assert.True(t, requeue,
+			"delivery %d: continuation-byte MessageID → dlv: fallback is not stable across redeliveries → must remain Nack(requeue=true)", i+1)
+	}
+	assert.Equal(t, 0, cm.maxRedeliveries["in-process"],
+		"counter B must NOT fire for a continuation-byte MessageID that truncates to empty")
 }
 
 // — Counter B: wrapped ErrRequeue via fmt.Errorf is detected correctly ——
