@@ -20,9 +20,12 @@ import (
 	"github.com/brunomvsouza/warren/otel"
 )
 
-// Consumer-span outcome labels (SPEC §6.9). They mirror the verdict space of the
-// consumer_handler_seconds metric so an operator can filter traces the same way
-// they filter metrics. The attribute key matches the publisher's outcome label.
+// Consumer-span outcome labels (SPEC §6.9). They largely track the verdict space of
+// the consumer_handler_seconds metric so an operator can filter traces much the same
+// way they filter metrics. The mapping is not identical: on the ConsumeRaw path the
+// metric records the literal "raw" label (the handler owns the ack/nack), while the
+// span outcome is still derived from the handler's returned verdict via
+// consumeVerdictOutcome. The attribute key matches the publisher's outcome label.
 const (
 	outcomeAck             = "ack"
 	outcomeNackRequeue     = "nack_requeue"
