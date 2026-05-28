@@ -67,6 +67,45 @@ func TestPublisher_encodeMsg_PlainCodecUnchanged(t *testing.T) {
 	assert.NotContains(t, msg.Headers, "cloudEvents:id")
 }
 
+// unsafeHeaderCodec is a HeaderCodec whose EncodeWithHeaders returns a header
+// value type amqp091 cannot serialise, exercising the publisher's validation of
+// codec-returned headers.
+type unsafeHeaderCodec struct{}
+
+func (unsafeHeaderCodec) Encode(any) ([]byte, error) { return nil, codec.ErrInvalidMessage }
+func (unsafeHeaderCodec) Decode([]byte, any) error   { return codec.ErrInvalidMessage }
+func (unsafeHeaderCodec) ContentType() string        { return "" }
+func (unsafeHeaderCodec) EncodeWithHeaders(any) ([]byte, map[string]any, string, error) {
+	return []byte("body"), map[string]any{"x-bad": struct{ X int }{X: 1}}, "", nil
+}
+func (unsafeHeaderCodec) DecodeWithHeaders([]byte, map[string]any, string, any) error { return nil }
+
+var _ codec.HeaderCodec = unsafeHeaderCodec{}
+
+func TestPublisher_encodeMsg_RejectsUnsafeHeaderCodecHeaders(t *testing.T) {
+	p := &Publisher[string]{codec: unsafeHeaderCodec{}}
+	s := "x"
+	_, _, err := p.encodeMsg(Message[string]{Body: &s})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidMessage)
+}
+
+func TestPublisher_encodeMsg_NoContentTypeWhenCodecOmitsIt(t *testing.T) {
+	p := &Publisher[codec.CloudEvent]{codec: codec.NewCloudEventsBinary()}
+	ev := cloudevents.NewEvent()
+	ev.SetID("id")
+	ev.SetSource("/s")
+	ev.SetType("t")
+
+	msg, body, err := p.encodeMsg(Message[codec.CloudEvent]{Body: &ev})
+	require.NoError(t, err)
+
+	// No datacontenttype on the event -> empty body and no content-type property.
+	assert.Empty(t, body)
+	assert.Empty(t, msg.ContentType)
+	assert.Equal(t, "id", msg.Headers["cloudEvents:id"])
+}
+
 func TestConsumer_dispatch_HeaderCodecDecodesCE(t *testing.T) {
 	defer goleak.VerifyNone(t)
 

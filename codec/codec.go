@@ -39,7 +39,9 @@ type Codec interface {
 type HeaderCodec interface {
 	Codec
 	// EncodeWithHeaders serialises v into a body, a set of AMQP headers, and a
-	// content-type. Returns ErrInvalidMessage on failure.
+	// content-type. Returns ErrInvalidMessage on failure. Header values must be
+	// AMQP field-table compatible types; the publisher validates them and rejects
+	// the publish with ErrInvalidMessage otherwise.
 	EncodeWithHeaders(v any) (body []byte, headers map[string]any, contentType string, err error)
 	// DecodeWithHeaders deserialises body plus headers plus content-type into v.
 	// It must only read headers, never mutate the provided map. Returns

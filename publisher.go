@@ -428,6 +428,12 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 	// content-type that travel alongside the body. Merge headers into a fresh map
 	// so the caller's Headers map is never mutated; codec headers win on conflict.
 	if len(ceHeaders) > 0 {
+		// Codec-returned headers bypassed the earlier validateHeaders pass; validate
+		// (and coerce) them before merging so a third-party HeaderCodec cannot inject
+		// a value type amqp091 fails to serialise at publish time.
+		if err := validateHeaders(Headers(ceHeaders)); err != nil {
+			return msg, nil, err
+		}
 		merged := make(Headers, len(msg.Headers)+len(ceHeaders))
 		for k, v := range msg.Headers {
 			merged[k] = v

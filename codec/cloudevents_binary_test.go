@@ -90,6 +90,30 @@ func TestCloudEventsBinary_RoundTrip_Extensions(t *testing.T) {
 	assert.Equal(t, "high", decoded.Extensions()["priority"])
 }
 
+func TestCloudEventsBinary_RoundTrip_NoDataNoContentType(t *testing.T) {
+	c := newBinary(t)
+
+	// An event with no data carries no datacontenttype; per the binding the body
+	// is empty and the content-type property is absent.
+	original := cloudevents.NewEvent()
+	original.SetID("id-empty")
+	original.SetSource("/s")
+	original.SetType("t")
+
+	body, headers, contentType, err := c.EncodeWithHeaders(&original)
+	require.NoError(t, err)
+	assert.Empty(t, body)
+	assert.Empty(t, contentType)
+	assert.NotContains(t, headers, "cloudEvents:datacontenttype")
+	assert.Equal(t, "id-empty", headers["cloudEvents:id"])
+
+	var decoded codec.CloudEvent
+	require.NoError(t, c.DecodeWithHeaders(body, headers, contentType, &decoded))
+	assert.Equal(t, "id-empty", decoded.ID())
+	assert.Empty(t, decoded.DataContentType())
+	assert.Empty(t, decoded.Data())
+}
+
 func TestCloudEventsBinary_Decode_MissingSpecVersionFails(t *testing.T) {
 	c := newBinary(t)
 	var ev codec.CloudEvent
