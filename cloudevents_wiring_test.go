@@ -147,6 +147,49 @@ func TestConsumer_dispatch_HeaderCodecDecodesCE(t *testing.T) {
 	assert.Equal(t, []byte(`{"k":1}`), got.Data())
 }
 
+func TestConsumer_dispatch_HeaderCodecDecodeFailure_NackNoRequeue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	consumer, err := ConsumerFor[codec.CloudEvent](conn).Queue("q").Codec(codec.NewCloudEventsBinary()).Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	nacked := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = consumer.Consume(ctx, func(_ context.Context, _ codec.CloudEvent) error { return nil })
+	}()
+
+	// Missing cloudEvents:specversion -> DecodeWithHeaders fails -> nack without requeue.
+	deliveryCh <- amqp091.Delivery{
+		Body:    []byte("body"),
+		Headers: amqp091.Table{"cloudEvents:id": "x"},
+		Acknowledger: &fakeAcknowledger{
+			nackFn: func(_ uint64, multiple, requeue bool) error {
+				assert.False(t, multiple)
+				assert.False(t, requeue)
+				close(nacked)
+				cancel()
+				return nil
+			},
+		},
+	}
+
+	select {
+	case <-nacked:
+	case <-time.After(time.Second):
+		t.Fatal("expected nack after CloudEvents binary decode failure")
+	}
+	<-done
+}
+
 func TestCloudEventsBinary_EndToEnd_PublishToConsume(t *testing.T) {
 	defer goleak.VerifyNone(t)
 

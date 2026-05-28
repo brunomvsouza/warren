@@ -119,6 +119,34 @@ func TestCloudEventsStructured_Decode_InvalidJSON(t *testing.T) {
 	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
 }
 
+func TestCloudEventsStructured_Decode_MissingSpecVersion(t *testing.T) {
+	// Valid JSON but not a CloudEvent (no specversion) -> the SDK rejects it.
+	c := codec.NewCloudEventsStructured()
+	var ev codec.CloudEvent
+	err := c.Decode([]byte(`{"id":"x","source":"/s","type":"t"}`), &ev)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
+}
+
+// Structured mode serialises through the SDK's JSON event format, which preserves
+// the JSON type of an extension (contrast with binary mode, which narrows it to a
+// string — see TestCloudEventsBinary_RoundTrip_NonStringExtensionNarrowsToString).
+func TestCloudEventsStructured_RoundTrip_PreservesExtensionType(t *testing.T) {
+	c := codec.NewCloudEventsStructured()
+	original := cloudevents.NewEvent()
+	original.SetID("id-x")
+	original.SetSource("/s")
+	original.SetType("t")
+	original.SetExtension("count", 7)
+
+	body, err := c.Encode(&original)
+	require.NoError(t, err)
+
+	var decoded codec.CloudEvent
+	require.NoError(t, c.Decode(body, &decoded))
+	assert.Equal(t, int32(7), decoded.Extensions()["count"], "structured mode preserves the numeric extension type")
+}
+
 func TestCloudEventsStructured_NotHeaderCodec(t *testing.T) {
 	// Structured mode carries everything in the body; it must NOT be a HeaderCodec.
 	_, ok := codec.NewCloudEventsStructured().(codec.HeaderCodec)

@@ -877,6 +877,55 @@ func TestBatchConsumer_DecodeError_NacksAndContinues(t *testing.T) {
 	assert.Equal(t, 1, batchesSeen, "exactly 1 batch for the 2 valid messages")
 }
 
+// TestBatchConsumer_CodecPanic_NackNoRequeue verifies the T09 panic-safety
+// contract on the batch path: a codec that panics during Decode is recovered by
+// safeDecodeConsumer, the offending delivery is nacked individually without
+// requeue, and the consumer goroutine survives (goleak clean).
+func TestBatchConsumer_CodecPanic_NackNoRequeue(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+
+	conn := newFakeConsumerConn(t)
+	bc, err := BatchConsumerFor[string](conn).
+		Queue("q").
+		Size(2).
+		Codec(panicCodec{}).
+		Build()
+	require.NoError(t, err)
+	bc.deliveryCh = deliveryCh
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	nacked := make(chan struct{})
+	fa := &fakeAcknowledger{
+		nackFn: func(_ uint64, multiple, requeue bool) error {
+			assert.False(t, multiple, "decode-failed delivery must be nacked individually")
+			assert.False(t, requeue, "decode failure must not requeue")
+			close(nacked)
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error { return nil })
+	}()
+
+	deliveryCh <- amqp091.Delivery{DeliveryTag: 1, Acknowledger: fa, Body: []byte(`"boom"`)}
+
+	select {
+	case <-nacked:
+	case <-time.After(time.Second):
+		t.Fatal("expected nack after codec panic in batch consumer")
+	}
+
+	cancel()
+	require.NoError(t, <-done)
+}
+
 // TestBatchConsumer_AlreadyStarted_Error verifies that calling Consume twice
 // returns ErrInvalidOptions.
 func TestBatchConsumer_AlreadyStarted_Error(t *testing.T) {

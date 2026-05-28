@@ -360,3 +360,61 @@ this entry is closed.
 
 ---
 
+### LATER-35 — No consumer-side message-size guard (inbound deserialization backpressure)
+
+**Context:** `publisher.go` enforces `maxMessageSizeBytes` before sending, but the consume path
+(`consumer.go:dispatch` → `safeDecodeConsumer`, and the equivalent in `batch_consumer.go`) has no
+symmetric cap. For the structured CloudEvents codec (and any future body-parsing codec), the full
+delivery body is handed to the SDK's `event.UnmarshalJSON` (json-iterator) and parsed in memory
+before the handler runs. The binary CloudEvents codec is NOT affected — it stores the body as raw
+`DataEncoded` bytes without parsing.
+
+**Impact:** Memory/CPU pressure under a malicious-or-buggy producer model. An authorized producer
+(or a compromised upstream) can publish a very large / deeply-nested JSON body that a consumer
+parses fully before deciding anything. Bounded today by RabbitMQ frame size and prefetch count, so
+this is defense-in-depth, not a remote-unauthenticated crash. Not a blocker.
+
+**Evidence:** `/ship` security-audit (2026-05-28, T25/T26 CloudEvents review) — LOW finding.
+
+**Suggested solution:** Add an optional consumer-side `MaxMessageSizeBytes` (builder option on
+`ConsumerFor`/`BatchConsumerFor`) that rejects-and-nacks (no requeue) before invoking the codec,
+mirroring the publisher guardrail. Record a `decode_error`/`too_large` outcome metric so it is
+observable. Re-check the SDK's `jsoniter.ConfigFastest` parsing behaviour whenever
+`cloudevents/sdk-go/v2` is bumped.
+
+**Prerequisites:** None. Standalone consumer-side hardening; coordinates with the consumer builder
+options surface.
+
+---
+
+### LATER-36 — Binary CloudEvents mode narrows non-string extension types to strings
+
+**Context:** `codec/cloudevents.go` — `NewCloudEventsBinary().EncodeWithHeaders` formats every
+context attribute and extension via the SDK's `types.Format`, so a typed extension (e.g. an
+integer or boolean) is written to the `cloudEvents:`-prefixed AMQP header as its canonical string
+form, and `DecodeWithHeaders` reads it back as a string (non-string header values are treated as
+absent). Structured mode preserves the JSON type. The CloudEvents AMQP Protocol Binding does allow
+non-string AMQP property types for Integer/Boolean extension attributes, so a fully spec-faithful
+binary codec would preserve the type both ways.
+
+**Impact:** A non-Go producer that sends an integer/boolean CloudEvents *extension* as a typed AMQP
+property would have it round-trip through a warren consumer as a string; conversely, warren always
+emits string-typed extension headers. Core attributes (id/source/type/specversion/subject/
+dataschema/time/datacontenttype) are unaffected — they are String/URI/Timestamp by spec. This is a
+fidelity gap only for typed *extensions*, documented in the codec godoc, and accepted for now.
+
+**Evidence:** `/ship` test-engineer coverage analysis (2026-05-28, T25/T26) — finding #8; behaviour
+is now pinned by `TestCloudEventsBinary_RoundTrip_NonStringExtensionNarrowsToString` and contrasted
+with `TestCloudEventsStructured_RoundTrip_PreservesExtensionType`.
+
+**Suggested solution:** If full type fidelity is desired, change `EncodeWithHeaders` to write the
+native AMQP type for scalar extension values (int → AMQP long, bool → AMQP boolean) and
+`DecodeWithHeaders`/`ceHeaderString` to pass the typed value to `SetExtension` for the
+amqp091-supported scalar types, treating tables/slices as invalid. This is a wire-format change and
+must amend SPEC §6.9 first; it widens the round-trip contract and needs new round-trip tests against
+a non-Go producer fixture.
+
+**Prerequisites:** SPEC §6.9 amendment (codec interop, decision 4). Standalone after that.
+
+---
+

@@ -111,6 +111,13 @@ type ceBinaryCodec struct{}
 // datacontenttype maps to the AMQP content-type property, and every other
 // context attribute (and extension) maps to a cloudEvents:-prefixed AMQP header.
 //
+// Attributes are carried as strings (formatted via the SDK's canonical
+// types.Format), so a non-string extension is narrowed to its string form on the
+// wire and round-trips back as a string; on decode, a cloudEvents: header whose
+// value is not a string is treated as absent. For type-preserving extensions use
+// NewCloudEventsStructured. The decoder validates the reconstructed event and
+// returns ErrInvalidMessage for any attribute the CloudEvents spec rejects.
+//
 // It implements HeaderCodec and is meant to be used through the library's
 // publisher and consumer, which route the headers and content-type
 // automatically. Its plain Encode/Decode reject use (with ErrInvalidMessage) so
@@ -216,7 +223,10 @@ func (c *ceBinaryCodec) DecodeWithHeaders(body []byte, headers map[string]any, c
 		if _, std := ceStandardAttrs[name]; std {
 			continue
 		}
-		s, _ := ceHeaderString(headers, k)
+		s, ok := ceHeaderString(headers, k)
+		if !ok {
+			continue
+		}
 		ev.SetExtension(name, s)
 	}
 
@@ -228,12 +238,26 @@ func (c *ceBinaryCodec) DecodeWithHeaders(body []byte, headers map[string]any, c
 		ev.DataBase64 = false
 	}
 
+	// The SDK setters record invalid attribute names/values internally instead of
+	// returning an error; Validate() is the only place they surface. Without this,
+	// a header the SDK rejects (e.g. an extension name with a hyphen) would be
+	// silently dropped and the consumer would receive a malformed event with no
+	// signal. Validate symmetrically mirrors EncodeWithHeaders, which also validates.
+	if err := ev.Validate(); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidMessage, err)
+	}
+
 	*out = ev
 	return nil
 }
 
-// ceHeaderString reads a cloudEvents: header value, coercing string and []byte
-// (the two forms amqp091 produces for AMQP short/long strings) to string.
+// ceHeaderString reads a cloudEvents: header value as a string. EncodeWithHeaders
+// always writes attributes as strings (via types.Format), and the CloudEvents AMQP
+// binding carries the core attributes as strings, so only string and []byte (the
+// two forms amqp091 produces for AMQP short/long strings) are accepted. Any other
+// value type is treated as absent rather than coerced via fmt: a required attribute
+// arriving non-string is then reported as missing by Validate, and a non-string
+// extension is dropped rather than turned into a surprising stringified value.
 func ceHeaderString(headers map[string]any, key string) (string, bool) {
 	v, ok := headers[key]
 	if !ok {
@@ -245,7 +269,7 @@ func ceHeaderString(headers map[string]any, key string) (string, bool) {
 	case []byte:
 		return string(s), true
 	default:
-		return fmt.Sprintf("%v", v), true
+		return "", false
 	}
 }
 

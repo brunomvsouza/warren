@@ -206,3 +206,107 @@ func TestCloudEventsBinary_Decode_RejectsNilDestination(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
 }
+
+// A header that names an invalid CloudEvents extension (e.g. with a hyphen) is
+// rejected by the SDK setter, which records the error internally rather than
+// returning it. DecodeWithHeaders must surface it via Validate() instead of
+// silently dropping the attribute and returning a malformed event.
+func TestCloudEventsBinary_Decode_InvalidExtensionName_Rejected(t *testing.T) {
+	c := newBinary(t)
+	headers := map[string]any{
+		"cloudEvents:specversion":  "1.0",
+		"cloudEvents:id":           "id-1",
+		"cloudEvents:source":       "/s",
+		"cloudEvents:type":         "t",
+		"cloudEvents:bad-ext-name": "v", // hyphen: invalid CE attribute name
+	}
+	var ev codec.CloudEvent
+	err := c.DecodeWithHeaders([]byte("body"), headers, "", &ev)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
+}
+
+// A header whose value is neither string nor []byte (amqp091 may surface ints,
+// bools, etc. from a non-conformant producer) is treated as absent rather than
+// coerced via fmt. Here a required attribute (specversion) arriving non-string is
+// missing -> clean rejection; an optional extension arriving non-string is dropped.
+func TestCloudEventsBinary_Decode_NonStringExtensionTreatedAsAbsent(t *testing.T) {
+	c := newBinary(t)
+	headers := map[string]any{
+		"cloudEvents:specversion": "1.0",
+		"cloudEvents:id":          "id-1",
+		"cloudEvents:source":      "/s",
+		"cloudEvents:type":        "t",
+		"cloudEvents:count":       int32(7), // non-string extension value
+	}
+	var ev codec.CloudEvent
+	require.NoError(t, c.DecodeWithHeaders([]byte("body"), headers, "", &ev))
+	assert.NotContains(t, ev.Extensions(), "count", "non-string extension value must not be coerced into the event")
+}
+
+func TestCloudEventsBinary_Encode_RejectsInvalidEvent(t *testing.T) {
+	// Missing required attributes (id/source/type) -> Validate fails -> ErrInvalidMessage.
+	c := newBinary(t)
+	ev := cloudevents.NewEvent()
+	_, _, _, err := c.EncodeWithHeaders(&ev)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
+}
+
+func TestCloudEventsBinary_Encode_RejectsNilEvent(t *testing.T) {
+	c := newBinary(t)
+	_, _, _, err := c.EncodeWithHeaders((*cloudevents.Event)(nil))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, codec.ErrInvalidMessage)
+}
+
+func TestCloudEventsBinary_Encode_AcceptsEventByValue(t *testing.T) {
+	// asEvent accepts a value cloudevents.Event in addition to a pointer.
+	c := newBinary(t)
+	ev := cloudevents.NewEvent()
+	ev.SetID("id-v")
+	ev.SetSource("/s")
+	ev.SetType("t")
+	_, headers, _, err := c.EncodeWithHeaders(ev) // value, not pointer
+	require.NoError(t, err)
+	assert.Equal(t, "id-v", headers["cloudEvents:id"])
+}
+
+func TestCloudEventsBinary_RoundTrip_DataSchema(t *testing.T) {
+	c := newBinary(t)
+	original := cloudevents.NewEvent()
+	original.SetID("id-ds")
+	original.SetSource("/s")
+	original.SetType("t")
+	original.SetDataSchema("https://example.com/schema.json")
+	require.NoError(t, original.SetData(cloudevents.ApplicationJSON, map[string]any{"k": 1}))
+
+	body, headers, contentType, err := c.EncodeWithHeaders(&original)
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.com/schema.json", headers["cloudEvents:dataschema"])
+
+	var decoded codec.CloudEvent
+	require.NoError(t, c.DecodeWithHeaders(body, headers, contentType, &decoded))
+	assert.Equal(t, original.DataSchema(), decoded.DataSchema())
+}
+
+// Binary mode carries every attribute as an AMQP string (per EncodeWithHeaders'
+// types.Format), so a non-string extension round-trips back as its string form.
+// This locks the documented type-narrowing behaviour (contrast with structured
+// mode, which preserves the JSON type).
+func TestCloudEventsBinary_RoundTrip_NonStringExtensionNarrowsToString(t *testing.T) {
+	c := newBinary(t)
+	original := cloudevents.NewEvent()
+	original.SetID("id-n")
+	original.SetSource("/s")
+	original.SetType("t")
+	original.SetExtension("count", 7) // int extension
+
+	body, headers, contentType, err := c.EncodeWithHeaders(&original)
+	require.NoError(t, err)
+	assert.Equal(t, "7", headers["cloudEvents:count"], "extension is formatted to its canonical string form on the wire")
+
+	var decoded codec.CloudEvent
+	require.NoError(t, c.DecodeWithHeaders(body, headers, contentType, &decoded))
+	assert.Equal(t, "7", decoded.Extensions()["count"], "binary mode narrows a non-string extension to its string form")
+}
