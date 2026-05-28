@@ -251,5 +251,167 @@ func decodeJSONString(key string, rv json.RawMessage, dst *string) error {
 	return nil
 }
 
-// ensure interface is satisfied at compile time.
-var _ Codec = (*ceStructuredCodec)(nil)
+// ceHeaderPrefix is the AMQP-header namespace for CloudEvents binary mode.
+const ceHeaderPrefix = "ce-"
+
+// ceStandardHeaders are the ce-* headers that map to typed CloudEvent fields
+// rather than to Extensions.
+var ceStandardHeaders = map[string]struct{}{
+	"ce-specversion":     {},
+	"ce-id":              {},
+	"ce-source":          {},
+	"ce-type":            {},
+	"ce-datacontenttype": {},
+	"ce-dataschema":      {},
+	"ce-subject":         {},
+	"ce-time":            {},
+}
+
+// ceBinaryCodec implements CloudEvents binary content mode: the event data is
+// the AMQP body and the context attributes are ce-* headers.
+type ceBinaryCodec struct{}
+
+// NewCloudEventsBinary returns a codec for CloudEvents binary content mode. The
+// event data is carried as the AMQP message body and the context attributes are
+// mapped to AMQP headers prefixed "ce-" (ce-id, ce-source, ce-type,
+// ce-specversion, and the optional ce-subject, ce-time, ce-datacontenttype,
+// ce-dataschema, plus ce-<extension>).
+//
+// It implements HeaderCodec and is meant to be used through the library's
+// publisher and consumer, which route the headers automatically. Its plain
+// Encode/Decode reject use (with ErrInvalidMessage) so the ce-* attributes can
+// never be silently dropped by a caller that bypasses the header-aware path.
+//
+// ContentType returns "" because the event's datacontenttype travels in the
+// ce-datacontenttype header, not the AMQP content-type property.
+func NewCloudEventsBinary() Codec {
+	return &ceBinaryCodec{}
+}
+
+func (c *ceBinaryCodec) ContentType() string { return "" }
+
+func (c *ceBinaryCodec) Encode(any) ([]byte, error) {
+	return nil, fmt.Errorf("%w: CloudEvents binary mode requires a header-aware publisher; the ce-* attributes cannot be carried by Encode alone", ErrInvalidMessage)
+}
+
+func (c *ceBinaryCodec) Decode([]byte, any) error {
+	return fmt.Errorf("%w: CloudEvents binary mode requires a header-aware consumer; the ce-* attributes cannot be read by Decode alone", ErrInvalidMessage)
+}
+
+func (c *ceBinaryCodec) EncodeWithHeaders(v any) ([]byte, map[string]any, error) {
+	ev, err := asCloudEvent(v)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	headers := make(map[string]any, 8+len(ev.Extensions))
+
+	// Extensions first so a standard attribute can never be shadowed.
+	for k, val := range ev.Extensions {
+		headers[ceHeaderPrefix+k] = val
+	}
+
+	headers["ce-specversion"] = ev.specVersionOrDefault()
+	headers["ce-id"] = ev.ID
+	headers["ce-source"] = ev.Source
+	headers["ce-type"] = ev.Type
+	if ev.DataContentType != "" {
+		headers["ce-datacontenttype"] = ev.DataContentType
+	}
+	if ev.DataSchema != "" {
+		headers["ce-dataschema"] = ev.DataSchema
+	}
+	if ev.Subject != "" {
+		headers["ce-subject"] = ev.Subject
+	}
+	if !ev.Time.IsZero() {
+		headers["ce-time"] = ev.Time.UTC().Format(time.RFC3339Nano)
+	}
+
+	return ev.Data, headers, nil
+}
+
+func (c *ceBinaryCodec) DecodeWithHeaders(body []byte, headers map[string]any, v any) error {
+	ev, err := asCloudEventDest(v)
+	if err != nil {
+		return err
+	}
+	*ev = CloudEvent{}
+
+	// specversion presence is what distinguishes a binary CloudEvent from any
+	// other message: a structured envelope (no ce-* headers) fails here.
+	specVersion, ok := ceHeaderString(headers, "ce-specversion")
+	if !ok {
+		return fmt.Errorf("%w: missing ce-specversion header; not a binary CloudEvent", ErrInvalidMessage)
+	}
+	ev.SpecVersion = specVersion
+
+	if s, ok := ceHeaderString(headers, "ce-id"); ok {
+		ev.ID = s
+	}
+	if s, ok := ceHeaderString(headers, "ce-source"); ok {
+		ev.Source = s
+	}
+	if s, ok := ceHeaderString(headers, "ce-type"); ok {
+		ev.Type = s
+	}
+	if s, ok := ceHeaderString(headers, "ce-datacontenttype"); ok {
+		ev.DataContentType = s
+	}
+	if s, ok := ceHeaderString(headers, "ce-dataschema"); ok {
+		ev.DataSchema = s
+	}
+	if s, ok := ceHeaderString(headers, "ce-subject"); ok {
+		ev.Subject = s
+	}
+	if s, ok := ceHeaderString(headers, "ce-time"); ok {
+		ts, err := time.Parse(time.RFC3339Nano, s)
+		if err != nil {
+			return fmt.Errorf("%w: invalid ce-time %q: %w", ErrInvalidMessage, s, err)
+		}
+		ev.Time = ts
+	}
+
+	for k := range headers {
+		if !strings.HasPrefix(k, ceHeaderPrefix) {
+			continue
+		}
+		if _, std := ceStandardHeaders[k]; std {
+			continue
+		}
+		s, _ := ceHeaderString(headers, k)
+		if ev.Extensions == nil {
+			ev.Extensions = make(map[string]string)
+		}
+		ev.Extensions[strings.TrimPrefix(k, ceHeaderPrefix)] = s
+	}
+
+	if len(body) > 0 {
+		ev.Data = body
+	}
+	return nil
+}
+
+// ceHeaderString reads a ce-* header value, coercing string and []byte (the two
+// forms amqp091 produces for AMQP short/long strings) to string.
+func ceHeaderString(headers map[string]any, key string) (string, bool) {
+	v, ok := headers[key]
+	if !ok {
+		return "", false
+	}
+	switch s := v.(type) {
+	case string:
+		return s, true
+	case []byte:
+		return string(s), true
+	default:
+		return fmt.Sprintf("%v", v), true
+	}
+}
+
+// ensure interfaces are satisfied at compile time.
+var (
+	_ Codec       = (*ceStructuredCodec)(nil)
+	_ Codec       = (*ceBinaryCodec)(nil)
+	_ HeaderCodec = (*ceBinaryCodec)(nil)
+)
