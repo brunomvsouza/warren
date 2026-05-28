@@ -8,7 +8,7 @@
 
 Warren wraps [`github.com/rabbitmq/amqp091-go`](https://github.com/rabbitmq/amqp091-go) with a type-safe API and a **hardened operational layer** built for high-scale reliability. It embeds the "SRE batteries" every production team needs: supervised reconnect with publisher confirms, centralized topology declaration, pluggable codecs, channel pooling across role-split TCP connections, **intelligent error classification (transient vs. permanent)**, **safety guardrails (credential redaction, fail-fast validation, payload caps)**, and native observability (logging, Prometheus, OpenTelemetry).
 
-> **Current Status:** Active development toward [`v0.1.0`](SPEC.md). Implementation follows [`tasks/plan.md`](tasks/plan.md). **Connection**, **Publisher**, **Topology**, and **Consumer** are usable today; RPC, batch APIs, and additional codecs are in progress.
+> **Current Status:** Active development toward [`v0.1.0`](SPEC.md). Implementation follows [`tasks/plan.md`](tasks/plan.md). **Connection**, **Publisher**, **Topology**, **Consumer** (with `MaxRedeliveries` + handler timeouts), **batch publish/consume**, and the **JSON / Protobuf / CloudEvents codecs** are usable today; RPC, delayed-message helpers, consumer-side OpenTelemetry, and the test tooling are in progress.
 
 [![CI](https://github.com/brunomvsouza/warren/actions/workflows/ci.yml/badge.svg)](https://github.com/brunomvsouza/warren/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/brunomvsouza/warren)](https://goreportcard.com/report/github.com/brunomvsouza/warren)
@@ -168,22 +168,22 @@ Warren is built with "production-first" principles, embedding several reliabilit
 
 ### Available now
 
-- **Connection** — `Dial`, multi-address failover, TLS, PLAIN and EXTERNAL (mTLS) SASL, role-split TCP pool, heartbeat and frame sizing, `Health` / `Close` / `ForceReconnect`
+- **Connection** — `Dial`, role-split TCP pool, PLAIN SASL, heartbeat and frame sizing, `Health` / `Close` / `ForceReconnect` (TLS, cluster failover, and SASL EXTERNAL options are wired up under production hardening — see roadmap)
 - **Publisher** — `PublisherFor[M]`, publisher confirms, mandatory + returns, `PublishRetry`, confirm/publish timeouts, concurrent-safe `Publish`, payload size guardrail
 - **Topology** — declarative exchanges, queues, bindings, dead-letter expansion; `Declare` + `AttachTo` for reconnect redeclare; degraded state on persistent redeclare failure
-- **Consumer** — `ConsumerFor[M]`, prefetch, concurrency, handler error mapping (`ErrRequeue`), re-subscribe loop, `ConsumeRaw`
-- **Codec** — lax JSON by default (Postel's Law — unknown fields are tolerated so producer-first deploys do not poison v1 DLQs); opt-in `codec.NewJSONStrict()` for compliance pipelines
+- **Consumer** — `ConsumerFor[M]`, prefetch, concurrency, handler error mapping (`ErrRequeue`), re-subscribe loop, `ConsumeRaw`; `MaxRedeliveries` (quorum `DeliveryLimit` + `x-death` + in-process counters) and per-handler `HandlerTimeout` with a configurable `HandlerTimeoutVerdict`
+- **Batch** — `Publisher.PublishBatch` (always-all, single-channel, `[]PublishResult` + `ErrBatchTooLarge`) and `BatchConsumerFor[M]` with size- and timer-based flush triggers and `multiple=true` acking
+- **Codec** — lax JSON by default (Postel's Law — unknown fields are tolerated so producer-first deploys do not poison v1 DLQs); opt-in `codec.NewJSONStrict()`; `codec.NewProtobuf()`; CloudEvents in both `codec.NewCloudEventsStructured()` and `codec.NewCloudEventsBinary()` modes (AMQP protocol binding via the `HeaderCodec` interface)
 - **Errors** — AMQP reply-code sentinels, `AMQPCode`, transient/permanent classifiers
-- **Observability** — pluggable `log.Logger`, Prometheus metrics (default), OpenTelemetry tracer + W3C propagation helpers
-- **Examples** — [`examples/publish`](examples/publish/main.go), [`examples/topology`](examples/topology/main.go), [`examples/deadletter`](examples/deadletter/main.go)
+- **Observability** — pluggable `log.Logger`, Prometheus metrics (default), OpenTelemetry tracer + W3C propagation helpers; **publisher** spans inject trace context into AMQP headers
+- **Examples** — [`examples/publish`](examples/publish/main.go), [`examples/consume`](examples/consume/main.go), [`examples/topology`](examples/topology/main.go), [`examples/deadletter`](examples/deadletter/main.go), [`examples/batch_publish`](examples/batch_publish/main.go), [`examples/batch_consume`](examples/batch_consume/main.go)
 
 ### On the roadmap (`v0.1.0`)
 
-- **Consumer Hardening** — `MaxRedeliveries` (quorum + in-process counters), handler timeouts, `OnCancel` metrics
-- **Batch** — `PublishBatch` (always-all), `BatchConsumerFor[M]`
-- **Patterns** — RPC (direct reply-to), delayed-message exchange helpers
-- **Codecs** — Protobuf, CloudEvents (structured + binary)
-- **Tooling** — `amqpmock/`, `amqptest/`, conformance suite, chaos/reconnect benchmarks
+- **Consumer observability** — consumer-side OpenTelemetry spans (extract context from headers + handler span, batch span Links), `OnCancel` metrics
+- **Patterns** — RPC (`Caller`/`Replier` over direct reply-to), delayed-message exchange helpers
+- **Production hardening** — TLS / `amqps://`, multi-address cluster failover, SASL EXTERNAL (mTLS), remaining connection options, panic isolation for user callbacks, `AutoAck()` opt-in
+- **Tooling** — `amqpmock/`, `amqptest/` (testcontainers), conformance suite, chaos/reconnect benchmarks
 
 See [`tasks/todo.md`](tasks/todo.md) for the live checklist.
 
@@ -194,8 +194,11 @@ See [`tasks/todo.md`](tasks/todo.md) for the live checklist.
 | Example | Demonstrates |
 | --- | --- |
 | [`examples/publish`](examples/publish/main.go) | Typed publish, confirms, mandatory, returns, `PublishRetry` |
+| [`examples/consume`](examples/consume/main.go) | Typed consume, three handler verdicts (Ack / Nack / `ErrRequeue`), `MaxRedeliveries`, `HandlerTimeout` |
 | [`examples/topology`](examples/topology/main.go) | Multi-exchange topology, idempotent declare, reconnect redeclare |
 | [`examples/deadletter`](examples/deadletter/main.go) | Dead-letter exchange / queue wiring |
+| [`examples/batch_publish`](examples/batch_publish/main.go) | `PublishBatch` always-all, `[]PublishResult`, `ErrBatchTooLarge` |
+| [`examples/batch_consume`](examples/batch_consume/main.go) | `BatchConsumerFor[M]` with `Size` + `FlushAfter` triggers and `multiple=true` ack |
 
 ```bash
 # Build all examples (no broker required)
