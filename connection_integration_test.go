@@ -4,6 +4,7 @@ package warren_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -47,6 +48,25 @@ func TestDial_health_close_integration(t *testing.T) {
 	closeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	require.NoError(t, conn.Close(closeCtx))
+}
+
+func TestDial_channelPoolSizeExceedsNegotiatedChannelMax_integration(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	url := amqpTestURL(t)
+	ctx := context.Background()
+
+	// WithChannelMax(0) (the default) lets the broker negotiate the ceiling
+	// (RabbitMQ defaults to 2047). A pool of 3000 passes the pre-handshake check
+	// (channelMax==0, below the 4096 static cap) but must be rejected against the
+	// negotiated value once the handshake completes.
+	_, err := warren.Dial(ctx,
+		warren.WithAddr(url),
+		warren.WithChannelPoolSize(3000),
+	)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions),
+		"pool size above the broker-negotiated channel-max must return ErrInvalidOptions; got: %v", err)
 }
 
 func TestDial_health_afterClose_returnsErrAlreadyClosed_integration(t *testing.T) {
