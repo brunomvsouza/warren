@@ -792,3 +792,39 @@ documents) and T162 (the error-remedy/knob policy the runbook reuses).
 
 ---
 
+### LATER-49 — Standing multi-node load environment + load-generator fleet (dedicated 3-node cluster + sustained-traffic generators for the heavy campaigns)
+
+**Context:** Lens-13 (load & reliability testing) found that every clustered §9 reliability claim is validated only
+on a single-node testcontainers harness (LT-01), and the heavy workload shapes (soak/endurance ≥24h, peak-multiple
+sustained, spike, stress-to-failure, composite) have no defined load environment or release-gating cadence
+(LT-02/12). T166 (Phase 24) lands the multi-node cluster harness *contract* + the cluster campaign *specs* against
+an **ephemeral** compose cluster spun up on-demand; T167/T168 land the single-node-runnable campaigns on T151's
+on-demand/nightly cadence. The *standing* infrastructure to run them continuously — a dedicated, always-on 3-node
+quorum cluster plus a load-generator fleet able to sustain peak-multiple traffic for ≥24h soaks and release-gating
+runs — is deliberately deferred (owner decision D5).
+
+**Impact:** Medium (deferred by design). Without it the cluster/soak/peak campaigns run on-demand against ephemeral
+infrastructure and **cannot gate releases continuously**, so the §9 clustered criteria remain proven-on-request
+rather than proven-every-release; with it the billions/day-clustered bar becomes a continuously enforced gate. It
+is an ops/infra investment (cost, hosting, ops cadence), not a code or correctness gap — the harness contract and
+campaign specs (T166) already make the campaigns runnable.
+
+**Evidence:** Lens-13 load & reliability-testing spec validation, 2026-05-29 (brief
+`spec-validation/13-load-testing-plan.md` §13 findings table LT-01/02/12, §14 minimum-campaign-set item 5, §15 open
+question Q1, §10 owner decision D5, §16 out-of-scope). The lens lands the harness contract + campaign specs in T166
+and defers the standing environment here.
+
+**Suggested solution:** Stand up a dedicated multi-node load environment: an always-on (or scheduled-provision)
+3-node RabbitMQ quorum cluster with partition-injection tooling (`pause_minority`/`autoheal`) and a pinned
+mixed-version (3.13/4.x) capability, plus a load-generator fleet (separate hosts/runners, not co-located with the
+broker) able to sustain a stated peak multiple of the ~11.6k/s average for ≥24h soaks; wire it as a release-gating
+lane that blocks a `v0.x.0` cut on a green run (or runs advisory, per Q2). Reuse the T166 harness contract + the
+T169 realistic generators + the T45/TV-09 loss-counting method.
+
+**Prerequisites:** T166 (the multi-node cluster harness *contract* + cluster campaign *specs* land first as the
+on-demand mitigation), T167/T168 (the campaign definitions the standing environment runs), T169 (the realistic
+generators). Coordinates with T151 (the scheduled/nightly CI infrastructure this lane extends). The LATER-44 gap is
+unrelated (Phase-18's conditional codec-split reservation) and is left untouched.
+
+---
+
