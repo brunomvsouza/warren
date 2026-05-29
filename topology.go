@@ -31,8 +31,14 @@ type Exchange struct {
 	Durable    bool
 	AutoDelete bool
 	Internal   bool
-	NoWait     bool
-	Args       map[string]any
+	// NoWait sends the declare without waiting for the broker's reply. This
+	// downgrades mismatch detection to asynchronous: Declare returns nil even
+	// on a conflicting redeclare, and the broker reports the conflict (e.g.
+	// ErrPreconditionFailed) out-of-band on the channel rather than from
+	// Declare. Leave NoWait=false if you rely on Declare surfacing
+	// ErrTopologyMismatch.
+	NoWait bool
+	Args   map[string]any
 }
 
 // Queue declares an AMQP queue.
@@ -41,7 +47,13 @@ type Queue struct {
 	Durable    bool
 	Exclusive  bool
 	AutoDelete bool
-	NoWait     bool
+	// NoWait sends the declare without waiting for the broker's reply. This
+	// downgrades mismatch detection to asynchronous: Declare returns nil even
+	// on a conflicting redeclare, and the broker reports the conflict (e.g.
+	// ErrPreconditionFailed) out-of-band on the channel rather than from
+	// Declare. Leave NoWait=false if you rely on Declare surfacing
+	// ErrTopologyMismatch.
+	NoWait bool
 	// Type selects the queue implementation (classic, quorum, stream).
 	// An empty value means the broker default (classic).
 	Type QueueType
@@ -62,8 +74,14 @@ type Binding struct {
 	Exchange   string
 	Queue      string
 	RoutingKey string
-	NoWait     bool
-	Args       map[string]any
+	// NoWait sends the bind without waiting for the broker's reply. This
+	// downgrades mismatch detection to asynchronous: Declare returns nil even
+	// on a conflicting bind, and the broker reports the conflict (e.g.
+	// ErrPreconditionFailed) out-of-band on the channel rather than from
+	// Declare. Leave NoWait=false if you rely on Declare surfacing
+	// ErrTopologyMismatch.
+	NoWait bool
+	Args   map[string]any
 }
 
 // DeadLetter describes a dead-letter topology entry. Topology.Declare expands
@@ -181,7 +199,12 @@ type topologyChannel interface {
 // Declare validates the topology, expands DLX entries in-memory (Step 1),
 // then opens a temporary channel and emits exchange → queue → binding
 // declares in that order (Step 2). It is idempotent: re-declaring the same
-// shape returns nil.
+// shape returns nil. A conflicting redeclare returns ErrTopologyMismatch
+// (which also satisfies errors.Is(err, ErrPreconditionFailed)).
+//
+// When any entry sets NoWait=true, Declare cannot detect a conflict on that
+// entry synchronously and returns nil even on a mismatch; see the NoWait field
+// docs.
 //
 // Topology.Declare is NOT concurrency-safe with itself or with AttachTo.
 // Recommended pattern: call Declare exactly once at application startup
