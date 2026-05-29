@@ -34,9 +34,9 @@ type Exchange struct {
 	// NoWait sends the declare without waiting for the broker's reply. This
 	// downgrades mismatch detection to asynchronous: Declare returns nil even
 	// on a conflicting redeclare, and the broker reports the conflict (e.g.
-	// ErrPreconditionFailed) out-of-band on the channel rather than from
-	// Declare. Leave NoWait=false if you rely on Declare surfacing
-	// ErrTopologyMismatch.
+	// ErrPreconditionFailed) out-of-band on a channel Declare has already
+	// closed, so it is generally not observable by the caller. Leave
+	// NoWait=false if you rely on Declare surfacing ErrTopologyMismatch.
 	NoWait bool
 	Args   map[string]any
 }
@@ -50,9 +50,9 @@ type Queue struct {
 	// NoWait sends the declare without waiting for the broker's reply. This
 	// downgrades mismatch detection to asynchronous: Declare returns nil even
 	// on a conflicting redeclare, and the broker reports the conflict (e.g.
-	// ErrPreconditionFailed) out-of-band on the channel rather than from
-	// Declare. Leave NoWait=false if you rely on Declare surfacing
-	// ErrTopologyMismatch.
+	// ErrPreconditionFailed) out-of-band on a channel Declare has already
+	// closed, so it is generally not observable by the caller. Leave
+	// NoWait=false if you rely on Declare surfacing ErrTopologyMismatch.
 	NoWait bool
 	// Type selects the queue implementation (classic, quorum, stream).
 	// An empty value means the broker default (classic).
@@ -77,9 +77,9 @@ type Binding struct {
 	// NoWait sends the bind without waiting for the broker's reply. This
 	// downgrades mismatch detection to asynchronous: Declare returns nil even
 	// on a conflicting bind, and the broker reports the conflict (e.g.
-	// ErrPreconditionFailed) out-of-band on the channel rather than from
-	// Declare. Leave NoWait=false if you rely on Declare surfacing
-	// ErrTopologyMismatch.
+	// ErrPreconditionFailed) out-of-band on a channel Declare has already
+	// closed, so it is generally not observable by the caller. Leave
+	// NoWait=false if you rely on Declare surfacing ErrTopologyMismatch.
 	NoWait bool
 	Args   map[string]any
 }

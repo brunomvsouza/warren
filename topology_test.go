@@ -130,6 +130,20 @@ func TestTopology_validate_delayedExchangeWithXDelayedTypeAllowed(t *testing.T) 
 	require.NoError(t, topo.validate())
 }
 
+// Every routing kind is a valid x-delayed-type (not just "direct").
+func TestTopology_validate_delayedExchangeAcceptsAllRoutingKinds(t *testing.T) {
+	for _, kind := range []ExchangeKind{ExchangeDirect, ExchangeFanout, ExchangeTopic, ExchangeHeaders} {
+		topo := &Topology{
+			Exchanges: []Exchange{{
+				Name: "delay",
+				Kind: ExchangeDelayed,
+				Args: map[string]any{"x-delayed-type": string(kind)},
+			}},
+		}
+		assert.NoError(t, topo.validate(), "x-delayed-type=%q must be accepted", kind)
+	}
+}
+
 func TestTopology_validate_delayedExchangeWithInvalidXDelayedType(t *testing.T) {
 	topo := &Topology{
 		Exchanges: []Exchange{{
