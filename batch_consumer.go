@@ -477,7 +477,15 @@ func (c *BatchConsumer[M]) startBatchSpan(ctx context.Context, deliveries []*Del
 	}
 	links := make([]otel.Link, 0, len(deliveries))
 	for _, d := range deliveries {
-		links = append(links, otel.Link{Context: c.propagator.Extract(d.raw.Headers)})
+		// A delivery with no producer traceparent extracts to context.Background()
+		// (an invalid span context). Skip it so the LinkingTracer adapter only ever
+		// receives Links with a valid producer context, honouring the otel.Link
+		// contract ("A Context with no valid span context contributes no Link").
+		linkCtx := c.propagator.Extract(d.raw.Headers)
+		if !c.propagator.ActiveContext(linkCtx) {
+			continue
+		}
+		links = append(links, otel.Link{Context: linkCtx})
 	}
 	return lt.StartWithLinks(ctx, name, links, attrs...)
 }
