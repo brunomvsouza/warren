@@ -1958,7 +1958,7 @@ func (c *captureMaxRedeliveriesMetrics) RecordMaxRedeliveries(queue, cause strin
 	c.mu.Unlock()
 }
 
-func (c *captureMaxRedeliveriesMetrics) RecordHandler(queue, outcome string, _ time.Duration) {
+func (c *captureMaxRedeliveriesMetrics) RecordHandler(_, _, _ string, _ time.Duration) {
 	// no-op; satisfy metrics.ConsumerMetrics if needed
 }
 
@@ -1974,7 +1974,7 @@ type captureConsumerMetrics struct {
 	}
 }
 
-func (c *captureConsumerMetrics) RecordHandler(queue, outcome string, elapsed time.Duration) {
+func (c *captureConsumerMetrics) RecordHandler(queue, _, outcome string, elapsed time.Duration) {
 	c.mu.Lock()
 	c.records = append(c.records, struct {
 		queue   string

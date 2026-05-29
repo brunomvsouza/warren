@@ -195,6 +195,7 @@ func (b *PublisherBuilder[M]) Build() (*Publisher[M], error) {
 		conn:                b.conn,
 		exchange:            b.exchange,
 		routingKey:          b.routingKey,
+		msgType:             metricsTypeName[M](),
 		codec:               b.c,
 		pm:                  b.pm,
 		tracer:              b.tracer,

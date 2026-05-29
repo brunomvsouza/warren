@@ -84,34 +84,54 @@ func (m *PrometheusClientMetrics) RecordDegraded(role, reason string) {
 //   - publisher_publish_seconds{exchange,outcome}
 //   - publisher_retry_total{exchange,reason}
 type PrometheusPublisherMetrics struct {
-	inFlight       *prometheus.GaugeVec
-	publishSeconds *prometheus.HistogramVec
-	retryTotal     *prometheus.CounterVec
+	inFlight         *prometheus.GaugeVec
+	publishSeconds   *prometheus.HistogramVec
+	retryTotal       *prometheus.CounterVec
+	labelRoutingKey  bool
+	labelMessageType bool
 }
 
 // NewPrometheusPublisherMetrics creates a PrometheusPublisherMetrics and registers all
 // mandatory collectors into reg. If buckets is nil, DefaultHistogramBuckets() is used
 // (a fresh slice per call so callers cannot corrupt shared state).
 // Returns an error if any collector is already registered.
-func NewPrometheusPublisherMetrics(reg prometheus.Registerer, buckets []float64) (*PrometheusPublisherMetrics, error) {
+//
+// enabled opts in to high-cardinality labels on the publisher_publish_seconds
+// histogram: MetricsLabelRoutingKey adds routing_key, MetricsLabelMessageType
+// adds message_type. They are off by default (see MetricsLabel).
+func NewPrometheusPublisherMetrics(reg prometheus.Registerer, buckets []float64, enabled ...MetricsLabel) (*PrometheusPublisherMetrics, error) {
 	if buckets == nil {
 		buckets = DefaultHistogramBuckets()
 	}
-	m := &PrometheusPublisherMetrics{
-		inFlight: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "publisher_in_flight",
-			Help: "Current number of AMQP publishes in flight.",
-		}, []string{"exchange"}),
-		publishSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "publisher_publish_seconds",
-			Help:    "Duration in seconds of AMQP publish operations.",
-			Buckets: buckets,
-		}, []string{"exchange", "outcome"}),
-		retryTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "publisher_retry_total",
-			Help: "Total number of AMQP publish retries.",
-		}, []string{"exchange", "reason"}),
+	m := &PrometheusPublisherMetrics{}
+	for _, l := range enabled {
+		switch l {
+		case MetricsLabelRoutingKey:
+			m.labelRoutingKey = true
+		case MetricsLabelMessageType:
+			m.labelMessageType = true
+		}
 	}
+	publishLabels := []string{"exchange", "outcome"}
+	if m.labelRoutingKey {
+		publishLabels = append(publishLabels, "routing_key")
+	}
+	if m.labelMessageType {
+		publishLabels = append(publishLabels, "message_type")
+	}
+	m.inFlight = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "publisher_in_flight",
+		Help: "Current number of AMQP publishes in flight.",
+	}, []string{"exchange"})
+	m.publishSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "publisher_publish_seconds",
+		Help:    "Duration in seconds of AMQP publish operations.",
+		Buckets: buckets,
+	}, publishLabels)
+	m.retryTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "publisher_retry_total",
+		Help: "Total number of AMQP publish retries.",
+	}, []string{"exchange", "reason"})
 	for _, c := range []prometheus.Collector{m.inFlight, m.publishSeconds, m.retryTotal} {
 		if err := reg.Register(c); err != nil {
 			return nil, err
@@ -125,9 +145,22 @@ func (m *PrometheusPublisherMetrics) InFlightAdd(exchange string, delta int64) {
 	m.inFlight.WithLabelValues(exchange).Add(float64(delta))
 }
 
-// RecordPublish records d into the publisher_publish_seconds histogram.
-func (m *PrometheusPublisherMetrics) RecordPublish(exchange, outcome string, d time.Duration) {
-	m.publishSeconds.WithLabelValues(exchange, outcome).Observe(d.Seconds())
+// RecordPublish records d into the publisher_publish_seconds histogram. routingKey
+// and messageType are appended as label values only for the labels enabled at
+// construction; the order matches the registered label set (exchange, outcome,
+// [routing_key], [message_type]).
+func (m *PrometheusPublisherMetrics) RecordPublish(exchange, routingKey, messageType, outcome string, d time.Duration) {
+	secs := d.Seconds()
+	switch {
+	case m.labelRoutingKey && m.labelMessageType:
+		m.publishSeconds.WithLabelValues(exchange, outcome, routingKey, messageType).Observe(secs)
+	case m.labelRoutingKey:
+		m.publishSeconds.WithLabelValues(exchange, outcome, routingKey).Observe(secs)
+	case m.labelMessageType:
+		m.publishSeconds.WithLabelValues(exchange, outcome, messageType).Observe(secs)
+	default:
+		m.publishSeconds.WithLabelValues(exchange, outcome).Observe(secs)
+	}
 }
 
 // RecordRetry increments publisher_retry_total for the given exchange and reason.
@@ -154,6 +187,7 @@ type PrometheusConsumerMetrics struct {
 	cancelledTotal       *prometheus.CounterVec
 	maxRedeliveriesTotal *prometheus.CounterVec
 	replierDropNoDLX     *prometheus.CounterVec
+	labelMessageType     bool
 }
 
 // NewPrometheusConsumerMetrics creates a PrometheusConsumerMetrics and registers all
@@ -165,11 +199,27 @@ type PrometheusConsumerMetrics struct {
 // label. Auto-generated tags (ctag-<uuidv7>) create one new time series per
 // cancellation event; in high-churn environments this can cause unbounded Prometheus
 // cardinality. See LATER-22 for the planned remediation in T36.
-func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64) (*PrometheusConsumerMetrics, error) {
+//
+// enabled opts in to high-cardinality labels on the consumer_handler_seconds
+// histogram: MetricsLabelMessageType adds message_type. MetricsLabelRoutingKey
+// is accepted but ignored for consumers (a per-delivery routing key is not a
+// stable consumer dimension).
+func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64, enabled ...MetricsLabel) (*PrometheusConsumerMetrics, error) {
 	if buckets == nil {
 		buckets = DefaultHistogramBuckets()
 	}
+	var labelMessageType bool
+	for _, l := range enabled {
+		if l == MetricsLabelMessageType {
+			labelMessageType = true
+		}
+	}
+	handlerLabels := []string{"queue", "outcome"}
+	if labelMessageType {
+		handlerLabels = append(handlerLabels, "message_type")
+	}
 	m := &PrometheusConsumerMetrics{
+		labelMessageType: labelMessageType,
 		resubscribedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "consumer_resubscribed_total",
 			Help: "Total number of AMQP consumer resubscriptions after reconnect.",
@@ -186,7 +236,7 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64) 
 			Name:    "consumer_handler_seconds",
 			Help:    "Duration in seconds of AMQP consumer handler executions.",
 			Buckets: buckets,
-		}, []string{"queue", "outcome"}),
+		}, handlerLabels),
 		cancelledTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "consumer_cancelled_total",
 			Help: "Total number of broker-initiated consumer cancellations (basic.cancel).",
@@ -231,8 +281,15 @@ func (m *PrometheusConsumerMetrics) RecordHandlerTimeout(queue string) {
 	m.handlerTimeoutTotal.WithLabelValues(queue).Inc()
 }
 
-// RecordHandler records d into the consumer_handler_seconds histogram.
-func (m *PrometheusConsumerMetrics) RecordHandler(queue, outcome string, d time.Duration) {
+// RecordHandler records d into the consumer_handler_seconds histogram. messageType
+// is appended as a label value only when MetricsLabelMessageType was enabled at
+// construction; the order matches the registered label set (queue, outcome,
+// [message_type]).
+func (m *PrometheusConsumerMetrics) RecordHandler(queue, messageType, outcome string, d time.Duration) {
+	if m.labelMessageType {
+		m.handlerSeconds.WithLabelValues(queue, outcome, messageType).Observe(d.Seconds())
+		return
+	}
 	m.handlerSeconds.WithLabelValues(queue, outcome).Observe(d.Seconds())
 }
 

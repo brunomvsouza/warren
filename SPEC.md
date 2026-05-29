@@ -2067,8 +2067,31 @@ value.
   **High-cardinality labels (opt-in).**
   `routing_key` and `message_type` are not labelled by default
   because they explode cardinality on workloads with many routing
-  patterns. Enable via `WithMetricsLabels(MetricsLabelRoutingKey,
-  MetricsLabelMessageType)` on the connection or per-builder.
+  patterns or message types. They are opted in **at metrics
+  construction** — Prometheus fixes a vector's label set when the
+  vector is created, so the choice cannot be a later builder option:
+
+  ```go
+  pm, _ := metrics.NewPrometheusPublisherMetrics(reg, nil,
+      metrics.MetricsLabelRoutingKey, metrics.MetricsLabelMessageType)
+  cm, _ := metrics.NewPrometheusConsumerMetrics(reg, nil,
+      metrics.MetricsLabelMessageType)
+  ```
+
+  Scope of each label:
+  - `MetricsLabelRoutingKey` adds `routing_key` to
+    `publisher_publish_seconds`, carrying the publisher's configured
+    routing key. It is accepted but **ignored** for consumer metrics:
+    a consumer's per-delivery routing key is not a stable dimension
+    and would explode cardinality.
+  - `MetricsLabelMessageType` adds `message_type` to
+    `publisher_publish_seconds` and `consumer_handler_seconds`,
+    carrying the Go type name of the message type `M`.
+
+  The library always threads these values to `RecordPublish` /
+  `RecordHandler`; an implementation emits a label only when it was
+  enabled at construction. `NoOp` and custom implementations that do
+  not register the labels simply ignore the values.
 
   **Histogram buckets.** Publish/handle latency histograms default
   to `[0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 5000]` ms,

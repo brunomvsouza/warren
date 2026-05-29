@@ -189,7 +189,7 @@ type capturePublisherMetrics struct {
 		exchange string
 		delta    int64
 	}
-	records []struct{ exchange, outcome string }
+	records []struct{ exchange, routingKey, messageType, outcome string }
 	retries []struct{ exchange, reason string }
 }
 
@@ -202,9 +202,9 @@ func (m *capturePublisherMetrics) InFlightAdd(exchange string, delta int64) {
 	m.mu.Unlock()
 }
 
-func (m *capturePublisherMetrics) RecordPublish(exchange, outcome string, _ time.Duration) {
+func (m *capturePublisherMetrics) RecordPublish(exchange, routingKey, messageType, outcome string, _ time.Duration) {
 	m.mu.Lock()
-	m.records = append(m.records, struct{ exchange, outcome string }{exchange, outcome})
+	m.records = append(m.records, struct{ exchange, routingKey, messageType, outcome string }{exchange, routingKey, messageType, outcome})
 	m.mu.Unlock()
 }
 
@@ -305,7 +305,8 @@ func newTestPub[M any](fake *fakePubChannel, pm metrics.PublisherMetrics) (*Publ
 	pub := &Publisher[M]{
 		pools: []*publisherConnPool{pool}, mcs: []*managedConn{mc},
 		codec: codec.NewJSON(), pm: pm, exchange: "x",
-		tracer: otel.NoOpTracer{},
+		msgType: metricsTypeName[M](),
+		tracer:  otel.NoOpTracer{},
 	}
 	return pub, pool, stopPool
 }
@@ -499,6 +500,7 @@ func TestPublisher_Publish_metricsRecordPublish(t *testing.T) {
 	defer func() { _ = pub.Close(context.Background()) }()
 
 	pub.exchange = "ex"
+	pub.routingKey = "rk"
 	require.NoError(t, pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}}))
 
 	pm.mu.Lock()
@@ -506,6 +508,10 @@ func TestPublisher_Publish_metricsRecordPublish(t *testing.T) {
 	require.Len(t, pm.records, 1)
 	assert.Equal(t, "ex", pm.records[0].exchange)
 	assert.Equal(t, "success", pm.records[0].outcome)
+	// The publisher threads its routing key and the message type name through to
+	// RecordPublish so the opt-in high-cardinality labels carry real values.
+	assert.Equal(t, "rk", pm.records[0].routingKey)
+	assert.Equal(t, "testPayload", pm.records[0].messageType)
 }
 
 func TestPublisher_Close_drainsInFlight(t *testing.T) {

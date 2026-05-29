@@ -201,6 +201,7 @@ func (b *BatchConsumerBuilder[M]) Build() (*BatchConsumer[M], error) {
 		cm:               cfg.cm,
 		tracer:           cfg.tracer,
 		propagator:       otel.NewPropagator(),
+		msgType:          metricsTypeName[M](),
 		mc:               mc,
 		closedCh:         make(chan struct{}),
 	}
