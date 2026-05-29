@@ -495,7 +495,7 @@ workloads.
   - [x] `DeathCountByReason(reason string) int` and `DeathReasons() []string` (unique reasons in declaration order) expose the full parsed shape for custom policies (e.g. users who DO want to count `expired` for their workload).
   - [x] `AckIf(err error) error` implements the error-mapping semantics (nil → Ack; `errors.Is(err, ErrRequeue)` → `Nack(true)`; any other err → `Nack(false)`).
   - [x] `Ack` / `Nack` / `AckIf` return `ErrChannelClosed` when the underlying channel is closed and `ErrAlreadyClosed` when the consumer was closed; otherwise `nil` on success — documented behaviour.
-  - [ ] **Lens-09 (PC-08):** allocate the x-death `byReason` map lazily — `make(map[string]int)` runs before the `tbl==nil` / x-death-absent / `![]any` early returns today (`xdeath.go:32`), so a map is allocated on 100 % of deliveries including the common no-DLX path; move the alloc after the early returns → zero map alloc on the no-DLX delivery; `AllocsPerRun` guard. dep PG-2.
+  - [x] **Lens-09 (PC-08):** allocate the x-death `byReason` map lazily — `make(map[string]int)` ran before the `tbl==nil` / x-death-absent / `![]any` early returns (`xdeath.go:32`), allocating a map on 100 % of deliveries including the common no-DLX path. Fixed: the alloc now happens lazily on the first x-death entry matching the delivery's queue, after every early return → zero map alloc on the no-DLX delivery. Guarded by `TestParseXDeath_NoAllocOnNoDLXPath` (`AllocsPerRun == 0` across nil-table / x-death-absent / wrong-shape) + `TestParseXDeath_CountByReason_NilMapSafe` (nil-map read is safe). dep PG-2.
 - **Verify:** Unit tests with hand-built `amqp091.Delivery` values + table-driven AckIf cases + closed-channel error path test + `x-death` parser test fixtures (absent, empty, single entry, multiple entries, mixed reasons `rejected`+`expired`+`delivery-limit`, wrong shape) + a `FuzzXDeathParser` fuzz target (per `plan.md` §"Fuzz targets"). Reason-discrimination test: a delivery with `x-death=[{reason: expired, count: 100}, {reason: rejected, count: 2}]` reports `DeathCount() == 2` (not 102).
 - **Files:** `delivery.go`, `internal/headers/xdeath.go`, `delivery_test.go`, `internal/headers/xdeath_test.go`, `internal/headers/xdeath_fuzz_test.go`.
 - **Deps:** T02, T09.
@@ -583,7 +583,7 @@ the consumer-side counter B is auto-disabled.
   - [ ] **Quorum carve-out.** When the source queue at `Build()`-time has `Queue.Type == QueueTypeQuorum && Queue.DeliveryLimit > 0` (introspected via the topology hint or the queue's args), counter B is **auto-disabled** (broker is authoritative). Counter A still runs as a safety net. Godoc and a debug log line document the disable.
   - [ ] Metric/log field `cause` distinguishes the three paths: `cause=delivery-limit` (broker, quorum), `cause=x-death` (counter A), `cause=in-process` (counter B).
   - [ ] Consumer godoc documents that counter B is **process-local**: a restart resets it. Users wanting cross-process bounding must use a quorum queue with `DeliveryLimit > 0` (preferred) or configure a DLX-back-to-source binding (counter A then takes over via `x-death`).
-  - [ ] **Lens-08 (CR-02, Blocker):** counter B's `load`→`Store` (`consumer.go:767→782`) is a **non-atomic read-modify-write** with no lock between — under `Concurrency(n>1)` two handler goroutines processing redeliveries of the same key both read then both write, losing an increment, so `MaxRedeliveries` undercounts and a poison message loops past its limit. Because `sync.Map` is memory-safe, `go test -race` **cannot** catch this logical lost-update, so the "must be race-free; verified with `go test -race`" acceptance above is a **false guarantee**. Make the RMW atomic (per-channel mutex held across load-increment-store, or a lock-striped map keyed by `counterBKey`); amend §6.3/decision 12 to "**atomic** read-modify-write" and note `-race` proves memory-safety, not lost-update freedom; **replace** the `-race`-only check with a **behavioural** N-goroutine-same-key test asserting the final count == N and `MaxRedeliveries` enforced exactly. *dep T143 (CG-1).*
+  - [x] **Lens-08 (CR-02, Blocker):** counter B's `load`→`Store` in `applyCounterB` was a **non-atomic read-modify-write** with no lock between — under `Concurrency(n>1)` two handler goroutines processing redeliveries of the same key (at-least-once duplicates sharing a `MessageId`) both read then both write, losing an increment, so `MaxRedeliveries` undercounted and a poison message could loop past its limit. Because `sync.Map` is memory-safe, `go test -race` **cannot** catch this logical lost-update, so the "verified with `go test -race`" acceptance was a **false guarantee**. Fixed: `redeliveryCounter` now carries a `sync.Mutex` held across the whole load→check→store/delete in `applyCounterB` (the delete-on-Ack/Nack(false) path takes it too), making the RMW atomic; metric/log side effects are emitted after releasing the lock. Verified by a **behavioural** N-goroutine-same-key test (`TestConsumer_MaxRedeliveries_CounterB_AtomicUnderConcurrency`, 500 goroutines): asserts final count == N — which FAILED on the old code (~50/500 survived) and passes now under `-race -count=20`. *dep T143 (CG-1).*
 - **Verify:**
   - Poison-loop integration test (in-process counter B, classic queue): handler always returns wrapped `ErrRequeue`; assert at most `n+1` deliveries within a single consumer run, and that the `(n+1)`-th nack is `requeue=false`. Asserts `cause=in-process` in the metric label.
   - **Quorum-queue test (broker-enforced):** declare a quorum queue with `DeliveryLimit=5`, set `MaxRedeliveries(10)`; handler always returns wrapped `ErrRequeue`; assert exactly 6 deliveries before the broker dead-letters; metric label is `cause=delivery-limit`; counter B map size is 0 throughout (auto-disabled).
@@ -598,7 +598,7 @@ the consumer-side counter B is auto-disabled.
 - **Acceptance:**
   - [x] `Consumer.ConsumeRaw(ctx, RawHandler[M])` available; handler receives `*Delivery[M]`.
   - [x] Raw handler is responsible for Ack/Nack — consumer does not auto-ack.
-  - [ ] Integration test exercises `Redelivered()`, `Headers()`, `DeathCount()`.
+  - [x] Integration test exercises `Redelivered()`, `Headers()`, `DeathCount()`.
 - **Verify:** Integration test.
 - **Files:** edits to `consumer.go`, `consumer_raw_integration_test.go`.
 - **Deps:** T18.
@@ -618,10 +618,10 @@ acceptance to close the checkpoint.
 - **Deps:** T18, T20, T21. (Strong pairing — T21b cannot close until T18/T20/T21 land.)
 
 ### Checkpoint — Phase 4 done
-- [ ] Error-driven semantics validated for all three classes.
-- [ ] Poison-loop bounded.
-- [ ] Escape hatch usable for raw envelope inspection.
-- [ ] **`examples/consume/main.go` builds (unit lane) and smoke-runs end-to-end (integration lane)** per T21b — SPEC §7 + Rev decision 49.
+- [x] Error-driven semantics validated for all three classes.
+- [x] Poison-loop bounded.
+- [x] Escape hatch usable for raw envelope inspection.
+- [x] **`examples/consume/main.go` builds (unit lane) and smoke-runs end-to-end (integration lane)** per T21b — SPEC §7 + Rev decision 49.
 - [ ] **Review with human before Phase 5.**
 
 ---
