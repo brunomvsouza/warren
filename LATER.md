@@ -362,6 +362,14 @@ this entry is closed.
 
 ### LATER-35 — No consumer-side message-size guard (inbound deserialization backpressure)
 
+> **Promoted to T131 (Phase 18, Lens-07 ST-06), 2026-05-29 — re-classified LOW → Blocker.** The
+> security & threat-modeling lens re-scored this fail-open inbound DoS as a must-fix Blocker (a single
+> hostile or buggy producer ships a ~512 MiB body that `amqp091` reassembles in memory before the codec
+> runs → consumer OOM, with no consume-side cap). T131 implements the consume-side
+> `MaxInboundMessageSizeBytes` guard (default 16 MiB, fail-closed). **Remove this entry when T131
+> lands** (per CLAUDE.md, cite T131 in the commit message). Kept here until then so the finding is not
+> re-filed.
+
 **Context:** `publisher.go` enforces `maxMessageSizeBytes` before sending, but the consume path
 (`consumer.go:dispatch` → `safeDecodeConsumer`, and the equivalent in `batch_consumer.go`) has no
 symmetric cap. For the structured CloudEvents codec (and any future body-parsing codec), the full
@@ -574,6 +582,39 @@ both `errors.Is`/`As`-friendly and `errorlint`-clean; document in §6.8. Purely 
 
 **Prerequisites:** T126 (ships the §6.8 `AMQPCode` frame-class caveat this builds on); the
 error taxonomy in `errors.go` + `internal/amqperror`.
+
+---
+
+### LATER-42 — Configurable SASL EXTERNAL principal extraction (SAN / DN beyond CN)
+
+**Context:** `connection.go:122` (`computeAuthUser`) derives the SASL EXTERNAL principal from the
+**CN** of the first client certificate only. RabbitMQ's `rabbitmq_auth_mechanism_ssl` plugin exposes
+`ssl_cert_login_from`, configurable to `common_name` (default), `distinguished_name`, or
+`subject_alternative_name` (with a SAN type/index). When the broker is configured for DN or SAN,
+warren's client-side `UserID` check (decision 39) compares against the CN it extracted, which diverges
+from the principal the broker actually authenticates — a false `ErrInvalidMessage` reject, or a
+`UserID` value the broker then 406s. T136 (Phase 18, Lens-07 ST-04) ships the **doc-only** mitigation
+(document the CN assumption + the divergence; recommend leaving `UserID` empty under non-CN broker
+mappings) but does not add configurable extraction.
+
+**Impact:** EXTERNAL deployments whose broker maps the principal from DN or SAN cannot use warren's
+client-side `UserID` stamping/validation without leaving `UserID` empty (losing the client-side
+guard). Low severity: a documented workaround exists (empty `UserID`), EXTERNAL itself still
+authenticates correctly (the broker decides), and CN is the RabbitMQ default. The gap is ergonomic,
+not a correctness/security hole once documented.
+
+**Evidence:** Lens-07 security & threat-modeling spec validation, 2026-05-29 (finding ST-04;
+`spec-validation/07-security-threat-modeling-plan.md`). Owner decision D4: doc-only for v0.1;
+configurable extraction deferred.
+
+**Suggested solution:** Add a `WithExternalPrincipalFrom(...)` connection option (or a small
+`ExternalPrincipalSource` enum: `CN` / `DN` / `SAN`) that selects how `computeAuthUser` extracts the
+principal from the client cert, matching the broker's `ssl_cert_login_from`. For SAN, accept the SAN
+type (DNS / email / URI) to read. Keep CN the default (no behaviour change). Add a round-trip
+integration test against a broker configured for each `ssl_cert_login_from` value.
+
+**Prerequisites:** T136 (ships the §6.5/decision-35 CN-extraction documentation this builds on); the
+EXTERNAL auth path in `connection.go` (`computeAuthUser`).
 
 ---
 
