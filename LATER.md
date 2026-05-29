@@ -1017,41 +1017,16 @@ phase is tackled first.
 
 ---
 
-### LATER-60 — CloudEvents binary decode has no upper bound on extension count / name length
+<!-- LATER-60 resolved (Phase 6 validation): ceBinaryCodec.DecodeWithHeaders now caps the number of
+     cloudEvents:-prefixed extensions it reconstructs at maxCEBinaryExtensions (128) and rejects the
+     delivery with ErrInvalidMessage past the cap, mirroring maxHeaderDepth. Pinned by
+     TestCloudEventsBinary_DecodeWithHeaders_RejectsTooManyExtensions / _AcceptsExtensionsAtCap. -->
 
-**Context:** `ceBinaryCodec.DecodeWithHeaders` (`codec/cloudevents.go:228-241`) turns every `cloudEvents:`-prefixed header
-into an extension via `ev.SetExtension(name, s)`. The official SDK's `validateExtensionName` enforces ASCII-alphanumeric
-but leaves length unbounded (`MaxExtensionNameLength = 0`), and the codec imposes no cap on the *number* of extensions.
-
-**Impact:** defense-in-depth only. In practice the input is bounded upstream — AMQP 0-9-1 header keys are shortstr
-(≤255 bytes) and the broker caps total frame/header size — so there is no realistic OOM/CPU path through a conforming
-RabbitMQ broker. Worth closing as hardening, not as a live vulnerability.
-
-**Evidence:** Phase 6 `/ship` security audit, 2026-05-29 (security-auditor finding LOW-2).
-
-**Suggested solution:** cap the number of `cloudEvents:` extensions processed per delivery, mirroring the
-`maxHeaderDepth`/`maxMsgIDKeyLen` bounding philosophy already used in `message.go`/`consumer.go`. Optionally bound the
-extension-name length explicitly rather than relying on the broker's shortstr limit.
-
-**Prerequisites:** none.
-
----
-
-### LATER-61 — `ceStructuredCodec.Encode` `json.Marshal`-error branch is unreachable and untested
-
-**Context:** `ceStructuredCodec.Encode` (`codec/cloudevents.go:79-92`) validates the event with `ev.Validate()` before
-`json.Marshal(ev)`. Because a validated `cloudevents.Event` always marshals, the `json.Marshal` failure branch
-(lines 88-90) is unreachable in practice, leaving `cloudevents.go:79` at ~88.9% statement coverage.
-
-**Impact:** a defensive branch with no test and no behavioral risk; purely a coverage-completeness item. Mirrors the
-documented "defensive only" note already carried on `EncodeWithHeaders`' extension-format guard.
-
-**Evidence:** Phase 6 `/ship` test-coverage analysis, 2026-05-29 (test-engineer Gap-3).
-
-**Suggested solution:** either accept as documented defensive-only, or — if/when the per-package coverage floor (T41)
-must be hit exactly — inject a synthetic marshal failure through a seam. Low value; likely won't-fix.
-
-**Prerequisites:** T41 (coverage gate) — only relevant if the floor is enforced and this branch blocks it.
+<!-- LATER-61 resolved (Phase 6 validation): the json.Marshal call in ceStructuredCodec.Encode now
+     routes through a package-var seam (marshalEvent) so a test can inject a synthetic failure and
+     cover the otherwise-unreachable ErrInvalidMessage wrap. cloudevents.go Encode is now at 100%
+     statement coverage. Pinned by
+     TestCloudEventsStructured_Encode_MarshalFailureWrapsErrInvalidMessage. -->
 
 ---
 
