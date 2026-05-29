@@ -219,6 +219,27 @@ func TestParseXDeath_AllEntriesNonMatchingQueue_NoAlloc(t *testing.T) {
 	assert.Equal(t, 0, result.CountByReason("rejected"))
 }
 
+func TestParseXDeath_MatchingEntryAllocatesAndCounts(t *testing.T) {
+	// Counterpart to the no-alloc guards: a matching entry MUST allocate byReason
+	// (and grow Reasons), so the lazy-alloc optimization cannot silently drop
+	// counts on the DLX path. Locks the contract from the allocating side.
+	tbl := amqp091.Table{
+		"x-death": []any{
+			makeEntry("myqueue", "rejected", 3),
+		},
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = headers.ParseXDeath(tbl, "myqueue")
+	})
+	assert.GreaterOrEqual(t, allocs, float64(1), "a matching entry must allocate the byReason map")
+
+	// Correctness is preserved alongside the allocation.
+	result := headers.ParseXDeath(tbl, "myqueue")
+	assert.Equal(t, 3, result.Count)
+	assert.Equal(t, 3, result.CountByReason("rejected"))
+	assert.Equal(t, []string{"rejected"}, result.Reasons)
+}
+
 func TestParseXDeath_CountByReason_NilMapSafe(t *testing.T) {
 	// After the lazy-allocation change, the no-DLX path leaves byReason nil.
 	// CountByReason must still return 0 (reading a nil map is safe in Go).
