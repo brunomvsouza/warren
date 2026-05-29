@@ -926,6 +926,7 @@ subpackage so downstream applications can reuse the fixture.
   - [ ] `go generate ./...` produces gomock mocks for `codec.Codec`, `log.Logger`, all three metrics interfaces, `otel.Tracer`.
   - [ ] Hand-written `amqpmock.NewDelivery[M](Fixture)` and `amqpmock.NewBatch[M](Fixture)` constructors that produce usable `*Delivery[M]` / `*Batch[M]` values for tests.
   - [ ] Root package has zero gomock imports at runtime (only in `amqpmock/` and `*_test.go`).
+  - [ ] **Lens-06 (GA-09):** a **lightweight `Delivery[M]`/`Batch[M]` fixture path with no `go.uber.org/mock` dependency** (e.g. `DeliveryFixture`/`BatchFixture` constructors, guarded against unkeyed struct literals) lets consumer/raw/batch unit tests fabricate deliveries without importing the gomock-heavy mock subpackage.
   - [ ] **`amqptest/` public package**: `amqptest.NewRabbitMQ(t *testing.T, opts ...Option) *RabbitMQ` spins up a `rabbitmq:3.13.x-management` or `rabbitmq:4.0.x-management` testcontainer with:
     - `rabbitmq_delayed_message_exchange` plugin (for T31).
     - `rabbitmq_auth_mechanism_ssl` plugin + `external_auth` user (for T34b).
@@ -1270,6 +1271,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Acceptance:**
   - [ ] `x-alternate-exchange` declarable on an `Exchange` (server-side catch-all for unroutable messages), complementing `Mandatory()`+`OnReturn`.
   - [ ] **Lens-04 (EDA-01):** the platform-level unroutable safety net — a mis-routed publish *without* `Mandatory()` vanishes silently (EG-1); the AE catches it server-side regardless of per-publish discipline. Complements T103's client-side exchange-name validation.
+  - [ ] **Lens-06 (GA-05):** the alternate exchange is exposed **additively** — via the existing `Exchange.Args` or a new optional field whose zero value = today's behaviour; **no exported `Exchange` field is renamed or removed** (T124 pins the topology roadmap additive).
 - **Verify:** Integration: publish (non-mandatory) to no matching binding with an AE configured → message arrives on the AE-bound queue.
 - **Files:** `topology.go`, `topology_test.go`, `topology_integration_test.go`.
 - **Deps:** T14, T15. **(R10-13, P2.4)** — *pulled into Phase 15 (v0.1).*
@@ -1278,6 +1280,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Acceptance:**
   - [ ] `Binding` (or a typed variant) supports an exchange destination (`exchange.bind`) for layered fan-out.
   - [ ] **Lens-04 (EDA-03):** ingest→per-domain layered fan-out is declarable without flattening the topology; the declare-once/deep-snapshot semantics stay intact.
+  - [ ] **Lens-06 (GA-05):** the destination-exchange shape is **pinned by T124** to a **separate `Topology.ExchangeBindings []ExchangeBinding{Source, Destination, RoutingKey, NoWait, Args}`** — `Binding` is **not** reshaped (no `Source`/`Destination` rename, no exported `Binding` field renamed or removed); the declare-once/deep-snapshot semantics extend to `ExchangeBindings`.
 - **Verify:** Integration: bind exchange→exchange, publish to source, assert delivery via the destination exchange's bound queue (`rabbitmqctl list_bindings`).
 - **Files:** `topology.go`, `topology_test.go`, `topology_integration_test.go`.
 - **Deps:** T14, T15. **(R10-14, P2.3)** — *pulled into Phase 15 (v0.1).*
@@ -1288,6 +1291,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
   - [ ] `BatchConsumer` flushes its pending partial batch on `Close`/final `FlushAfter`.
   - [ ] **Lens-02 (DS-03):** the choice is resolved to **nack-requeue (`requeue=true`)** the undispatched buffer before channel close (never drop → no silent loss); `consumer_shutdown_requeued_total` increments; the forced-close (ctx-deadline) abandoned-in-flight duplicate window is named in SPEC (see DS-16/T85).
   - [ ] **Lens-05 (SRE-07):** every rolling deploy is a low-grade incident — the deploy-time duplicate rate must be **boundable and observable** via `consumer_shutdown_requeued_total`.
+  - [ ] **Lens-06 (GA-06):** the new `consumer_shutdown_requeued_total` metric adds a method to the user-implementable `metrics.*` interfaces — it lands behind the embeddable `metrics.NoOp` base (T125) so external implementers don't break-compile, before rc1.
 - **Verify:** Integration: prefetch N, dispatch < N, `Close`; assert undispatched are nack-requeued (redelivered), not silently dropped. Batch partial flush asserted with `goleak` clean. Gated by G2 (capture the current v0.1 behaviour first).
 - **Files:** `connection.go`, `consumer.go`, `batch_consumer.go`, `metrics/`, SPEC §6.1/§6.4.
 - **Deps:** T18, T22, T84 (G2). **(R10-15, P2.5)** — *pulled into Phase 13 (v0.1).*
@@ -1299,6 +1303,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
   - [ ] `consumer_redelivered_total{queue}` counter increments on `Redelivered()==true` deliveries.
   - [ ] **Lens-02 (DS-14):** `consumer_redelivered_total` is the redelivery-class duplicate-budget signal `publisher_retry_total` does not cover — required for the §1 "duplicate budget never invisible" claim to hold for the dominant duplicate source.
   - [ ] **Lens-05 (SRE-05):** this is the single most important on-call *leading* indicator — without it a brewing poison storm / pool saturation is invisible until it is an outage; assert the redelivery ratio / pool-acquire-wait p99 are alertable.
+  - [ ] **Lens-06 (GA-06):** these new gauges/counters add methods to the user-implementable `metrics.*` interfaces — they land behind the embeddable `metrics.NoOp` base (T125) so adding interface methods stays forward-compatible for external adapters, before rc1.
 - **Verify:** Unit/integration assert each metric moves under the relevant condition (pool saturation, busy handlers, a forced redelivery).
 - **Files:** `metrics/`, `channelpool.go`, `consumer.go`.
 - **Deps:** T04, T08, T18. **(R10-16, P2.6)** — coordinates with T50/T52/T53; *pulled into Phase 13 (v0.1).*
@@ -1787,6 +1792,7 @@ to NO-GO.
 - **Acceptance:**
   - [ ] `WithMetricsRegisterer(prometheus.Registerer)` is added; the connection-level default is a **private per-`Connection` registry**, never `prometheus.DefaultRegisterer` (a hidden global §8 forbids), wired into the existing `NewPrometheus*` constructors (which already accept an injected registerer but have no caller today).
   - [ ] SPEC §6.9/§6.1/§8 document the injection and the private-registry default.
+  - [ ] **Lens-06 (GA-03):** this opt-in Prometheus *registry-injection* composes with T122's correction that the **default** metrics recorder is `NoOpClientMetrics` (not Prometheus); T122 corrects the §6.1 L511 SPEC table, the injection is wired here.
 - **Verify:** SG-1 unit test: two `Dial`s in one process with default metrics do **not** panic; an injected-registerer test asserts metrics register into the provided registry.
 - **Files:** `options_connection.go`, `connection.go`, `metrics/`, SPEC §6.9/§6.1/§8, `connection_test.go`, `README.md`.
 - **Deps:** T111 (SG-1), T04, T07. **(SRE-10, P0)**
@@ -1854,6 +1860,139 @@ to NO-GO.
 - [ ] README observability/reliability copy synced (`WithMetricsRegisterer`, default-bucket change, `connection_degraded` gauge, `Health` consumer-liveness, cardinality opt-out, honest §9 ceiling).
 - [ ] SPEC §10 "Rev 15" note records the Lens-05 pass; no finding re-filed that a prior lens owns; **no** new `LATER.md` entry.
 
+## Phase 17 — Go API & Library-Design Re-review (Lens 06: discoverability, hard-to-misuse, forever-stable surface, safe zero values)
+
+Closes the Lens-06 adversarial spec validation
+(`spec-validation/06-go-api-library-design.md`, findings `GA-01..GA-16`; brief
+`spec-validation/06-go-api-library-design-plan.md`). Lens verdict:
+**GO-WITH-CHANGES** — the public surface is fundamentally sound (the
+`PublisherFor[M]`/`ConsumerFor[M]` generics split, mostly safe zero-value defaults,
+concrete-struct decision 9, a navigable error taxonomy), but the review found **one
+Blocker that is a silent durability loss, not an API-shape flaw**: a zero-valued
+`Message[M]{}` ships **non-persistent** on the wire because `buildPublishing`
+(`publisher.go:946`) casts the `DeliveryMode` enum raw instead of translating `0→2`,
+violating the §6.5 durable-by-default headline + the §1 no-silent-loss bar, and is
+unverified by any wire-level test (GA-01/T120). Owner decisions (2026-05-28): GA-02
+observability inheritance = **reword independent** (no inheritance; doc-only); GA-03
+metrics default = **NoOp (correct the SPEC)**; GA-04 `PrefetchBytes` = **cut**; GA-05
+exchange→exchange binding shape = **separate `Topology.ExchangeBindings`** (`Binding`
+not reshaped). **No new build-tag lane** — gates GG-1..GG-4 are unit/mock-channel
+characterizations on the existing unit lane; only GA-01's persistence assertion rides
+the existing integration lane (3.13 + 4.x). Five findings are already owned by
+prior-lens / Phase-11 tasks and are **not** re-filed (GA-03→T112, GA-05→T68/T69,
+GA-06→T70/T71, GA-09→T37). Exactly **one** new `LATER.md` entry (LATER-41, a
+dedicated `ReturnCode` accessor). **Gate task T119 runs first**; no SPEC edit to an
+affected section, and no fix, lands before its gate returns. Per-task SPEC amendment
+lands in the same PR; a SPEC §10 "Rev 16" note records the pass.
+
+### [ ] T119 — Verification gates GG-1–GG-4 (unit + existing integration lane, 3.13 + 4.x) [P0] · S
+- **Acceptance:**
+  - [ ] Ground truth captured (unit + the **existing** integration lane for the persistence check — **no new build-tag lane**) for: **GG-1** that a zero-valued `Message[M]{Body:&x}` currently produces `amqp091.Publishing.DeliveryMode == 0` (transient) — the §6.5 `0→2` mapping is **absent** in `buildPublishing` — and that such a message does **not** survive a broker restart; **GG-2** that with `Dial(WithTracer(realTracer))` and a builder that never calls `.Tracer(...)`, the publish path emits **NoOp spans** (no builder reads `conn.opts.tracer`/`metrics`); **GG-3** that with no `WithMetrics(...)` the default `Connection` metrics recorder is **`NoOpClientMetrics`** (not Prometheus) and there is **no** caller of `NewPrometheus*` in non-test code; **GG-4** that `PublisherFor[Order](conn).Codec(codec.NewProtobuf())` **compiles** and fails only at the first `Publish` with `ErrInvalidMessage`.
+  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 16**.
+- **Verify:** Unit + integration lane (3.13 + 4.x where broker-bound) green with the GG assertions; the gate table is reviewable.
+- **Files:** `publisher_internal_test.go`, `connection_internal_test.go`, `*_integration_test.go`, `spec-validation/` (results table).
+- **Deps:** T07, T07d, T13, T18, T04. **(GA gates, P0)**
+
+### [ ] T120 — Fix the DeliveryMode silent non-persistence (GA-01, Blocker) [P0] · S
+- **Acceptance:**
+  - [ ] `buildPublishing` translates enum→wire at the choke point: `DeliveryModePersistent(0)→2`, `DeliveryModeTransient(1)→1`; the `basic.return` rehydration path (`publisher.go:310`) is fixed the same way.
+  - [ ] The §6.5 durable-by-default contract is kept **authoritative** (not weakened); the explicit wire-value table is present in §6.5.
+- **Verify:** GG-1 unit test asserts `buildPublishing(Message[M]{Body:&x}).DeliveryMode == 2` and the transient case `== 1`; an integration test (3.13 **and** 4.x) publishes a zero-valued message, restarts the broker, and asserts it survives; `goleak` clean.
+- **Files:** `publisher.go`, SPEC §6.5, `publisher_internal_test.go`, `*_integration_test.go`, `README.md`.
+- **Deps:** T119 (GG-1), T11, T13. **(GA-01, P0)** — the lone Blocker; land first.
+
+### [ ] T121 — Reword observability to independence (GA-02, High; owner decision) [P1] · XS
+- **Acceptance:**
+  - [ ] The "builder-overrides-connection" clause is struck from decision 44 and §6.1; the SPEC states tracer *and* metrics are configured **independently** at the connection and builder levels (each defaults to NoOp; connection-level observability covers lifecycle/pool events only).
+  - [ ] §6.1 documents that to instrument a publisher/consumer the caller must set `.Tracer(...)`/`.Metrics(...)` on the builder.
+- **Verify:** GG-2 unit test asserts a builder that never set `.Tracer(...)` emits NoOp spans even under a real connection tracer; the §6.1/decision-44 prose no longer promises inheritance.
+- **Files:** SPEC §6.1/§10 dec.44, `publisher_internal_test.go`, `README.md`.
+- **Deps:** T119 (GG-2). **(GA-02, P1)** — doc-only (matches the code).
+
+### [ ] T122 — Make the metrics default honest: NoOp, not Prometheus (GA-03, Med; owner decision) [P1] · XS
+- **Acceptance:**
+  - [ ] §6.1 L511 + §3 L117 are corrected to "NoOp (opt-in Prometheus via `metrics.NewPrometheus*`)"; §9/§6.9 carry a one-sentence NoOp-default rationale (globals-free; inject your own registerer).
+  - [ ] The registry-injection mechanics stay owned by **T112** (which carries the `Lens-06 (GA-03)` bullet); the two compose.
+- **Verify:** GG-3 unit test asserts the default `Connection` metrics is `NoOpClientMetrics`; the SPEC table reads NoOp.
+- **Files:** SPEC §6.1/§3/§9/§6.9, `connection_internal_test.go`, `README.md`.
+- **Deps:** T119 (GG-3), T112. **(GA-03, P1)**
+
+### [ ] T123 — Cut the `PrefetchBytes` no-op footgun (GA-04, Med; owner decision cut) [P2] · XS
+- **Acceptance:**
+  - [ ] `PrefetchBytes` is removed from `ConsumerBuilder` and `BatchConsumerBuilder`; it is listed in the §6 "intentionally not exposed" set alongside `Immediate()`/`NoLocal()`.
+  - [ ] Decision 10 records the removal (was "kept with no-op note").
+- **Verify:** The method no longer exists on either builder; a doc/grep test asserts no `PrefetchBytes` in the public surface; `go build ./...` + `make lint` clean.
+- **Files:** `consumer_builder.go`, `batch_consumer_builder.go`, SPEC §6.3/§10 dec.10, `*_test.go`, `README.md`.
+- **Deps:** T18, T22. **(GA-04, P2)** — pre-tag-safe removal (it never had an effect); must land before the first tag.
+
+### [ ] T124 — Pin the topology roadmap additive: `ExchangeBindings` pre-spec + §9 gate (GA-05/GA-16; owner decision) [P1] · S
+- **Acceptance:**
+  - [ ] §6.6 specs a **separate `Topology.ExchangeBindings []ExchangeBinding`** with `ExchangeBinding{Source string, Destination string, RoutingKey string, NoWait bool, Args Headers}`; `Binding` is **not** reshaped (T69 implements against this shape; no `Source`/`Destination` rename); R10-13/T68 alternate-exchange stays additive via `Exchange.Args` / an optional field.
+  - [ ] §9 carries an additive-only-after-first-tag gate ("no exported §6 type changes field names or removes fields after `v0.1.0`; topology extensions T68/T69/T102 and stream-consume v0.2 are additive-only") + a one-line `rc1`-is-pre-`v0.1.0` clarification.
+  - [ ] Decision 24 commits the v0.2 stream-consume API to **purely additive** (`StreamOffset`/`StreamConsumerFor[M]` + additive `Delivery[M]` methods; `x-stream-offset` via `Args` in v0.1).
+- **Verify:** §6.6 specs `ExchangeBinding`; the deep-snapshot/declare-once semantics extend to `ExchangeBindings`; T68/T69 carry the `Lens-06 (GA-05)` no-field-rename bullet.
+- **Files:** SPEC §6.6/§9/§10 dec.24, `README.md`.
+- **Deps:** T14, T15. **(GA-05/GA-16, P1)** — must complete before T46 cuts `v0.1.0`.
+
+### [ ] T125 — Extension-tolerant observability interfaces: embeddable `metrics.NoOp` base (GA-06) [P1] · S
+- **Acceptance:**
+  - [ ] A SPEC policy (§6.9 note + a §10 decision): the `metrics`/`log`/`otel` user-implementable interfaces ship with an **embeddable NoOp base struct** (e.g. `metrics.NoOp`) users embed, so adding interface methods is forward-compatible (the embed satisfies new methods as no-ops).
+  - [ ] The SPEC documents that all v0.1 metric additions (R10-15/T70, R10-16/T71) land **before the first tag** (§9 `// Deprecated`-free rc1→v1.0).
+- **Verify:** An example shows a custom metrics adapter embedding the NoOp base surviving a method addition (compiles after a new method is added to the interface); T70/T71 carry the `Lens-06 (GA-06)` bullet.
+- **Files:** `metrics/`, `log/`, `otel/`, SPEC §6.9/§10, `metrics/*_test.go`, an `examples/` snippet, `README.md`.
+- **Deps:** T04, T05, T70, T71. **(GA-06, P1)** — must complete before T46 cuts `v0.1.0`.
+
+### [ ] T126 — Error-model correctness: 311 classification, precedence, `AMQPCode` caveat (GA-07/GA-08/GA-15) [P2] · M
+- **Acceptance:**
+  - [ ] (GA-07) 311 is removed from the §6.8 transient list (code authoritative — 311 is permanent-only); the SPEC states the transient/permanent partition is **partial** and `ErrUnroutable` (312/313) is deliberately in **neither** set; precedence is defined — **`ErrTransient` in the chain wins** for re-classification (or `IsPermanent` returns false when `ErrTransient` is also present).
+  - [ ] (GA-08) §6.8 warns `AMQPCode` MAY return a `basic.return` code (312/313) and callers needing to distinguish must combine with `errors.Is(err, ErrUnroutable)`; **LATER-41** files the dedicated `ReturnCode(err) (uint16, bool)` accessor.
+  - [ ] (GA-15) §6.8 notes `ErrTopologyMismatch` is a named alias over `ErrPreconditionFailed`; §6.3 notes `ErrPoison` and a bare handler error are behaviourally identical (intent-only); any "~30 sentinels" figure is corrected to 40.
+- **Verify:** A test asserts a 506-wrapped-with-`ErrTransient` classifies transient (the §6.8 L1957 re-classify path no longer drops); `errorlint` clean (`errors.Is`/`As` only).
+- **Files:** `errors.go`, SPEC §6.8/§6.3, `LATER.md`, `errors_test.go`, `README.md`.
+- **Deps:** T06. **(GA-07/GA-08/GA-15, P2)** — files LATER-41.
+
+### [ ] T127 — Reconcile §6.1/§6.2 surface signature drift (GA-12) [P2] · S
+- **Acceptance:**
+  - [ ] Each drift is reconciled: `WithOnResubscribe` (phantom in the §6.1 table vs prose at L629 — resolved to table or prose, not both); `WithDialer` (documented `net.Dialer` vs the dial-func at `options_connection.go:176`); `WithFrameMax` `uint32` (not `int`); `WithChannelMax` `uint16` (untyped in table); `PublishResult{Index int; Err error}` vs `{Err error}` in code; §6.2 `Return.Body []byte` and `ReturnedProperties.Expiration` (`time.Duration`, not `string`).
+  - [ ] For each, the SPEC matches the implementation (or the documented option is implemented where it is the intended contract).
+- **Verify:** Every §6.1/§6.2 signature maps to a code `file:line`; the phantom option is resolved; `go build ./...` clean.
+- **Files:** SPEC §6.1/§6.2, possibly `options_connection.go`/`publisher.go` where SPEC is the intended contract, `README.md`.
+- **Deps:** T07, T13. **(GA-12, P2)**
+
+### [ ] T128 — Document the deliberate `any`/generics/struct choices (GA-10/GA-11/GA-14) [P2] · S
+- **Acceptance:**
+  - [ ] A §10 decision: `codec.Codec` is intentionally **non-generic** (a payload↔codec mismatch is a runtime `ErrInvalidMessage`, not a compile error; each non-JSON codec documents its required `M` and fails fast), cross-referenced from §5/§8.
+  - [ ] §6.5 explains `Message[M].Body *M` (publish/consume symmetry; loud nil-`Body` `ErrInvalidMessage`, never a silent drop); §6.9 has a `HeaderCodec` author caveat (full method set; recommend `var _ codec.HeaderCodec = (*MyCodec)(nil)`); §8 lists the closed set of sanctioned `any` (Headers / `*.Args` / `WithClientProperties` / OTel carriers; `log` printf variadics; the codec `v any`).
+  - [ ] The GA-09 fixture unkeyed-literal guard note is recorded (coordinated with the T37 lightweight-fixture bullet).
+- **Verify:** GG-4 doc example shows the runtime-mismatch contract; the §8 sanctioned-`any` list is auditable.
+- **Files:** SPEC §10/§5/§6.5/§6.9/§8, a doc example, `README.md`.
+- **Deps:** T119 (GG-4), T09, T24, T26, T37. **(GA-10/GA-11/GA-14, P2)**
+
+### [ ] T129 — Naming-grammar carve-outs + last-wins scoping + `ChannelQoS` doc fix (GA-13) [P3] · XS
+- **Acceptance:**
+  - [ ] §5 carve-outs for: the lone `WithoutMetrics()` builder method (sanctioned metrics-disable exception); the `Use*`/`Allow*` verb-prefix builder methods; the noun-phrase setters (`MaxMessageSizeBytes`/`PublishBatchMaxSize`).
+  - [ ] Decision 44's "last-wins" is scoped to **value-carrying** options; boolean flag-setters (`Mandatory`/`StampUserID`/`ChannelQoS`/`Exclusive`/`AutoAck`/`WithoutMetrics`) are documented as monotonic-set (no inverse).
+  - [ ] The `consumer_builder.go:72` `ChannelQoS` godoc bug is fixed (says `global=false`; code sets `global=true`, `consumer.go:460`); the `basic.qos global=true` mapping is added to the §6.3 doc.
+- **Verify:** §5 sanctions the four patterns; decision 44 scopes last-wins; the `ChannelQoS` godoc matches the code; `make lint` clean.
+- **Files:** SPEC §5/§10 dec.44/§6.3, `consumer_builder.go` (godoc fix), `README.md`.
+- **Deps:** T18, T19. **(GA-13, P3)** — land last so the docs reference the corrected surface.
+
+### Checkpoint — Phase 17 (Lens 06) closed
+- [ ] T119 gate results (GG-1..GG-4) captured on unit + the **existing** integration lane (3.13 **and** 4.x for the persistence check); results table committed; downstream tasks cite their gate; **no new build-tag lane** introduced; first task records §10 **Rev 16**.
+- [ ] Silent durability loss fixed (GA-01/T120): `buildPublishing` translates `DeliveryModePersistent(0)→wire 2`, `DeliveryModeTransient(1)→wire 1` (and the `basic.return` path); a unit test asserts the wire value, an integration test (3.13 **and** 4.x) proves a zero-valued message survives a broker restart; §6.5 contract unchanged.
+- [ ] Silent observability loss documented (GA-02/T121): §6.1 + decision 44 state tracer and metrics are configured **independently** (no inheritance); a builder without `.Tracer(...)` emits NoOp spans even under a real connection tracer.
+- [ ] Defaults honest (GA-03/T122): §6.1 L511 + §3 read "NoOp (opt-in Prometheus)"; the default `Connection` metrics is `NoOpClientMetrics`; T112 owns the registry-injection opt-in.
+- [ ] Footgun removed (GA-04/T123): `PrefetchBytes` is gone from both builders, listed in §6 "intentionally not exposed"; decision 10 records the removal.
+- [ ] Roadmap pinned additive (GA-05/GA-16/T124): §6.6 specs `Topology.ExchangeBindings []ExchangeBinding` (`Binding` untouched); §9 carries the additive-only gate + rc1 clarification; decision 24 commits the v0.2 stream API additive; T68/T69 carry the no-field-rename acceptance.
+- [ ] Interfaces extension-tolerant (GA-06/T125): the `metrics`/`log`/`otel` interfaces ship an embeddable NoOp base; an example survives a method addition; T70/T71 land before the first tag.
+- [ ] Error model sound (GA-07/GA-08/GA-15/T126): §6.8 lists 311 permanent-only; the precedence rule is specified + tested; the partial partition + `ErrUnroutable`-in-neither documented; the `AMQPCode` frame-class caveat exists; LATER-41 filed.
+- [ ] Surface matches code (GA-12/T127): every §6.1/§6.2 signature maps to a code `file:line`; the `WithOnResubscribe` phantom is resolved.
+- [ ] Deliberate choices documented (GA-09/GA-10/GA-11/GA-14/T128): §10 records the non-generic-codec decision; §6.5 explains `Body *M`; §6.9 has the `HeaderCodec` caveat; §8 lists the sanctioned `any`; the fixture guard is noted.
+- [ ] Naming + last-wins honest (GA-13/T129): §5 carve-outs exist; decision 44 scoped to value-setters; the `ChannelQoS` godoc matches the code.
+- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 **and** 4.x) green; `goleak.VerifyNone` clean.
+- [ ] README synced (metrics-default correction, `PrefetchBytes` removal, `ExchangeBindings`, independent-observability semantics).
+- [ ] SPEC §10 "Rev 16" note records the Lens-06 pass; no finding re-filed that a prior task owns (GA-03→T112, GA-05→T68/T69, GA-06→T70/T71, GA-09→T37); exactly **one** new `LATER.md` entry (LATER-41); T119–T129 contiguous, no duplicate IDs.
+
 ### Checkpoint — v0.1.0 shipped
 - [ ] Every SPEC §9 success criterion ticked.
 - [ ] `v0.1.0` tag on `main`.
@@ -1863,8 +2002,8 @@ to NO-GO.
 ---
 
 ## Quick stats
-- Total tasks: **127** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane); Phase 16 (2026-05-28): +T111-T118 Lens-05 SRE/production-operability re-review, pulls T67/T72 forward, extends T61/T62/T63/T65/T66/T70/T71 (cross-lens), no new build-tag lane, no new LATER).
-- Phases: **16**.
+- Total tasks: **134** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane); Phase 16 (2026-05-28): +T111-T118 Lens-05 SRE/production-operability re-review, pulls T67/T72 forward, extends T61/T62/T63/T65/T66/T70/T71 (cross-lens), no new build-tag lane, no new LATER; Phase 17 (2026-05-28): +T119-T129 Lens-06 Go-API/library-design re-review, fixes the GA-01 DeliveryMode silent-non-persistence Blocker, extends T37/T68/T69/T70/T71/T112 (cross-lens), adds LATER-41, no new build-tag lane).
+- Phases: **17**.
 - Estimated sizing: 8× XS · 40× S · 23× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.
