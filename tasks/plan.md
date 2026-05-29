@@ -1106,6 +1106,61 @@ its gate returns**.
 - [ ] README "Available now / On the roadmap" + reliability copy synced (partition carve-out, SAC caveat, `consumer_redelivered_total`, structured-error RPC mode).
 - [ ] SPEC §10 "Rev 12" note records the Lens-02 pass; no duplicate tasks created (T60/T62/T63/T66/T70/T71/T82 amended in place); no new `LATER.md` entries.
 
+### Phase 14 — Interoperability & Wire-Format Re-review (Lens 03: polyglot clients, CloudEvents/Proto/JSON, field-tables)
+
+Goal: bring `SPEC.md` into honest alignment with the project's own
+`feedback_codec_interop` rule — codec and wire-format decisions must be grounded
+in **non-Go-client interop**, never warren↔warren convenience — at the §1
+"billions/day" bar, which for a polyglot estate means *cross-language* wire
+fidelity, not just Go round-trips. Closes the Lens-03 adversarial spec validation
+(`spec-validation/03-interoperability-wire-format.md`; this pass *conducted* the
+review and produced findings `IW-01..IW-13`; planning brief
+`spec-validation/03-interoperability-wire-format-plan.md`). The lens verdict was
+**GO-WITH-CHANGES** — no active §1 message-loss bug, but several interop overclaims
+(IW-01 CloudEvents 1.0 bridge, IW-08 field-table "matched 1:1"), two silent-lossy
+mappings (IW-07 `time.Time`→`T` truncation, IW-04 JSON `int64` precision), and the
+absence of any non-Go interop test (IW-13).
+
+Owner decisions (2026-05-28): (1) stand up the **FULL** polyglot interop lane — a
+new **`interop` build tag** with Python `pika` + a Java client + an AMQP-1.0
+CloudEvents SDK in containers — because the Go-only `testcontainers` lane cannot
+falsify the cross-language claims; gate it on the same 3.13-vs-4.x matrix and
+extend **T37** (`amqptest`), do not duplicate; (2) **remove** the CloudEvents
+binary-mode 0-9-1→AMQP-1.0 interop guarantee (IW-01) — document binary mode for
+**0-9-1 consumers only** and promote **structured mode**
+(`application/cloudevents+json`) as the official cross-ecosystem path; (3) **defer**
+the Protobuf multi-type discriminator (IW-05) to **LATER-39**, documenting only the
+single-type-per-`Consumer` constraint now; (4) for `time.Time` headers (IW-07),
+**document + recommend an RFC3339 string** (no API change). Phase 14 therefore adds
+exactly **one** `LATER.md` entry (LATER-39). Per-task SPEC amendments land in the
+same PR as the code (CLAUDE.md "amend SPEC first"); a SPEC §10 "Rev 13" note
+records the pass when the first task lands. **Cross-language claims are tested by a
+round-trip through a non-Go client, not a Go↔Go mock.** Gate task T94 runs first
+and **no SPEC interop-claim edit to an affected section lands before its gate
+returns**.
+
+- **T94** interop lane + verification gates (real broker, **3.13 and 4.x**): introduce an `interop` build tag + a `make test-interop` target that stands up Python `pika` + a Java client + an AMQP-1.0 CloudEvents SDK in containers (extending `amqptest`/T37). Capture ground truth for **IG-1** `time.Time`→`T` second-resolution read, **IG-2** unsigned `B/u/i/L` + `Decimal` `D` + `[]byte` `x` cross-client decode, **IG-3** what an AMQP-1.0 CloudEvents SDK sees for a binary-mode publish (prefix, section, colon key), **IG-4** structured-mode reconstruction from `application/cloudevents+json`, **IG-5** JSON `int64 > 2^53` into a Go `int64` field vs `any`, **IG-6** ContentType/ContentEncoding not swapped via a non-Go consumer. Results table (under `spec-validation/`) gates T95/T96/T97/T98/T100. **(IW-13 + gates, P0)** — *coordinate with T37 (amqptest): extend, do not duplicate.*
+- **T95** `SPEC.md §6.5` + decision 13: document the `time.Time`→AMQP `T` truncation (IW-07) — AMQP 0-9-1 `timestamp` is 64-bit POSIX **seconds**, so sub-second precision and timezone are silently lost; `Headers{"ts": time.Now()}` truncates on the wire and a Java reader sees a second-resolution `Date`. Recommend an RFC3339 **string** header when sub-second/TZ fidelity matters. Round-trip test asserts the Go-reader truncation; IG-1 asserts the `pika` second-resolution read. **(IW-07, P1; dep IG-1)**
+- **T96** `SPEC.md §6.5` + decision 13: scope the field-table cross-client guarantee (IW-08/IW-09/IW-10) against RabbitMQ's documented field-table type table — the unsigned types `uint8/16/32/64`→`B/u/i/L` and `Decimal{Scale,Value}`→`D` are Go/Java-leaning and may be unreadable/mis-decoded by some Python/.NET consumers; recommend signed `int64` (`l`) and string headers for maximum cross-language safety, and document `[]byte`(`x`) vs `string`(`S`). Cross-client decode test via the harness. **(IW-08/IW-09/IW-10, P1; dep IG-2)**
+- **T97** `SPEC.md §6.9` + decision 4 + `examples/cloudevents/`: **remove** the CloudEvents binary-mode "RabbitMQ bridges 0-9-1 headers ⇄ AMQP-1.0 application-properties, so a non-Go AMQP-1.0 CloudEvents client interoperates" guarantee (IW-01) — the CloudEvents AMQP binding is defined for **1.0**, not 0-9-1, and the bridge is version-dependent and untested. Document binary mode for **0-9-1 consumers only**; promote **structured mode** (`application/cloudevents+json` body) as the official cross-ecosystem path. Confirm the binary `time` attribute is emitted as an RFC3339 string `S` not `T` (IW-03) + colon-key (`cloudEvents:type`) survival through the 0-9-1→1.0 conversion (IW-02); move the `traceparent`/`tracestate` 1.0-bridge caveat here (IW-12). The harness AMQP-1.0 leg (IG-3) characterises actual binary behaviour and (IG-4) proves structured reconstruction. **(IW-01/IW-02/IW-03/IW-12, P1; dep IG-3, IG-4)**
+- **T98** `SPEC.md §6.9` + decision 23: document the JSON 64-bit-integer precision hazard (IW-04) — a Java/Python producer's `int64`/snowflake > 2^53 decodes losslessly only into a typed `int64` field; into `any`/`map[string]any`/`interface{}` it silently becomes `float64`. State the mitigation (type `M` fields as `int64`/`json.Number`; avoid `any` for large ints) and that the codec does **not** call `UseNumber()` by design. Extend `FuzzCodecJSON` + add a cross-language `int64 > 2^53` round-trip test. **(IW-04, P1; dep IG-5)**
+- **T99** `SPEC.md §6.9`: document the proto3 **single-type-per-`Consumer`** constraint (IW-05) — proto3 binary carries no type info, so a multi-type topic-exchange queue needs a caller-supplied discriminator (deferred to LATER-39); justify `application/x-protobuf` and **accept `application/protobuf` on decode** (Postel) (IW-06). File **LATER-39** for the Any/type-URL/registry discriminator. **(IW-05/IW-06, P2)**
+- **T100** `SPEC.md §9`: sharpen the ContentType/ContentEncoding swap test (IW-11) — it only catches a swap if it sets **both** fields to **distinct non-empty** values (`application/json` + `gzip`) and asserts each independently via `rabbitmqadmin get` / a non-Go consumer. **(IW-11, P3; dep IG-6)** — *may ride T94.*
+
+**Sequencing:** T94 first → gates IG-1→T95, IG-2→T96, IG-3+IG-4→T97, IG-5→T98, IG-6→T100. T99 is independent of the gates (doc + a content-type accept-test) and files LATER-39. T97 creates `examples/cloudevents/`. SPEC sub-phasing: (A) T94; (B) T95, T96, T97; (C) T98, T99; (D) T100. No tasks pulled forward (Lens 03 pulls nothing).
+
+**Checkpoint Phase 14:**
+- [ ] T94 interop lane (`make test-interop`: `pika` + Java + AMQP-1.0 clients) green on 3.13 **and** 4.x; IG-1..IG-6 results table committed; each downstream task cites its gate.
+- [ ] `time.Time`→`T` truncation documented (IW-07/T95): §6.5/decision 13 flag the second-precision/no-TZ loss and recommend an RFC3339 string header; a round-trip test asserts the truncation.
+- [ ] Field-table cross-client guarantee scoped (IW-08/IW-09/IW-10/T96): unsigned `B/u/i/L` + `Decimal` `D` flagged low-interop, `x` vs `S` documented, signed `int64`/string recommended; cross-client decode test green.
+- [ ] CloudEvents binary 0-9-1→1.0 guarantee **removed** (IW-01/T97): binary mode scoped to 0-9-1 consumers, structured mode promoted as the cross-ecosystem path (proven by IG-4), `time` confirmed RFC3339-string (IW-03), colon-key survival verified (IW-02), trace-context 1.0 caveat moved (IW-12); `examples/cloudevents/` ships.
+- [ ] JSON `int64` precision hazard documented (IW-04/T98): §6.9/decision 23 + `FuzzCodecJSON` extension + a cross-language `int64 > 2^53` test.
+- [ ] Protobuf single-type constraint documented + `application/protobuf` accepted on decode (IW-05/IW-06/T99); **LATER-39** files the discriminator.
+- [ ] ContentType/ContentEncoding swap test sharpened to distinct non-empty values (IW-11/T100).
+- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 **and** 4.x) **and** the new `interop` lane green; `goleak.VerifyNone` clean.
+- [ ] README interop contract synced (CloudEvents binary scoped to 0-9-1 / structured = cross-ecosystem, `time.Time` header caveat, JSON int64 caveat, low-interop field-table types).
+- [ ] SPEC §10 "Rev 13" note records the Lens-03 pass; no duplicate tasks created; exactly one new `LATER.md` entry (LATER-39).
+
 ## Out of scope (tracked for v0.2)
 
 - Native stream-protocol consume (`x-stream-offset`,
