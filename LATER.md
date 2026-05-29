@@ -724,3 +724,40 @@ extraction path in `internal/headers`.
 
 ---
 
+### LATER-47 — Message-level payload encryption / crypto-erasure (per-subject key → effective erasure without a delete primitive)
+
+**Context:** Lens-11 (data-protection compliance, GDPR & LGPD) found that personal data published as a message
+**body** to a durable queue is effectively **un-erasable** at the bus layer (DP-01) — AMQP 0-9-1 has no
+primitive to delete a single message, and with `DeliveryModePersistent` the zero-value default the body sits on
+broker disk, is replicated (quorum), and is copied to any DLQ on dead-letter. The same body is **plaintext at
+rest** (DP-07) — RabbitMQ does not encrypt bodies on disk or in backups. T154 (pointer-out) and T141 (the
+at-rest boundary note) address these at the *documentation + pattern* level; this entry tracks the
+*cryptographic* answer, deliberately deferred (owner decision D3).
+
+**Impact:** Low (deferred by design). The pointer-out pattern (T154) already gives controllers a documented,
+runnable way to make personal data erasable (keep PII in an erasable store of record; publish only an opaque
+reference). Crypto-erasure is the *in-band* alternative for teams that cannot externalise the payload, but it is
+a large, opinionated feature with key-management implications, and T141 already states message-level payload
+encryption is out of scope for v0.1.
+
+**Evidence:** Lens-11 data-protection compliance spec validation, 2026-05-29 (brief
+`spec-validation/11-compliance-gdpr-lgpd-plan.md` §13 findings table DP-01/DP-07, §10 owner decision D3, §14
+out-of-scope). The lens routes the documentation-level mitigations to T154/T141 and defers the cryptographic
+control here.
+
+**Suggested solution:** A `codec` wrapper (e.g. `codec.NewEncrypted(inner, keyProvider)`) that encrypts the
+body with a **per-data-subject key** before `Encode` and decrypts after `Decode`; deleting a subject's key on an
+erasure request renders the ciphertext on the bus / DLQ / disk / backups unrecoverable = **effective erasure**
+despite the absence of a single-message delete primitive (and effective at-rest protection for DP-07). Requires
+a pluggable key-management interface, an AEAD scheme (key id in a header, nonce per message), a documented
+key-rotation + key-destruction story, and interop guidance for non-Go consumers (the ciphertext envelope must
+be a documented, language-neutral format). Position it alongside pointer-out as the in-band alternative, not a
+default.
+
+**Prerequisites:** T154 (pointer-out + the un-erasable warning land first as the documentation-level
+mitigation, so this is an *additional* in-band control, not the only answer); coordinates with T141 (the at-rest
+boundary it cryptographically closes) and the `codec` package design (T135's build-tag treatment of heavy
+codecs is the precedent for keeping an optional codec out of the core dependency closure).
+
+---
+
