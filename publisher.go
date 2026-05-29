@@ -574,7 +574,7 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 	// Local payload guardrail: reject before opening a channel so the publisher
 	// never allocates broker-side frame buffers for a body it knows is too large.
 	if p.maxMessageSizeBytes > 0 && len(body) > p.maxMessageSizeBytes {
-		p.pm.RecordPublish(p.exchange, p.routingKey, p.msgType, "too_large", 0)
+		p.recordPublish(p.exchange, "too_large", 0)
 		return msg, nil, fmt.Errorf("%w: encoded body is %d bytes (cap %d)", ErrMessageTooLarge, len(body), p.maxMessageSizeBytes)
 	}
 
@@ -605,6 +605,13 @@ func encodeBody(c codec.Codec, body any) ([]byte, map[string]any, string, error)
 	}
 	b, err := c.Encode(body)
 	return b, nil, "", err
+}
+
+// recordPublish records a publish outcome, supplying the routing-key and
+// message-type metrics label values so an enabled publisher_publish_seconds
+// histogram carries them.
+func (p *Publisher[M]) recordPublish(exchange, outcome string, d time.Duration) {
+	p.pm.RecordPublish(exchange, p.routingKey, p.msgType, outcome, d)
 }
 
 // publishOnce performs a single publish attempt (no retry logic).
@@ -642,23 +649,23 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 	}
 
 	if err := entry.tracker.Register(deliveryTag); err != nil {
-		p.pm.RecordPublish(exchange, p.routingKey, p.msgType, "error", time.Since(start))
+		p.recordPublish(exchange, "error", time.Since(start))
 		return p.mapConfirmError(err)
 	}
 
 	if err := entry.ch.PublishWithContext(ctx, exchange, p.routingKey, p.mandatory, false, pub); err != nil {
 		entry.tracker.Cancel(deliveryTag)
-		p.pm.RecordPublish(exchange, p.routingKey, p.msgType, "error", time.Since(start))
+		p.recordPublish(exchange, "error", time.Since(start))
 		return wrapAMQPError(err)
 	}
 
 	waitErr := entry.tracker.Wait(ctx, deliveryTag, p.confirmTimeout)
 	if waitErr != nil {
-		p.pm.RecordPublish(exchange, p.routingKey, p.msgType, "error", time.Since(start))
+		p.recordPublish(exchange, "error", time.Since(start))
 		return p.mapConfirmError(waitErr)
 	}
 
-	p.pm.RecordPublish(exchange, p.routingKey, p.msgType, "success", time.Since(start))
+	p.recordPublish(exchange, "success", time.Since(start))
 	return nil
 }
 
@@ -853,9 +860,9 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 		msgStart := time.Now()
 		if waitErr := entry.tracker.Wait(ctx, ti.tag, p.confirmTimeout); waitErr != nil {
 			results[ti.idx].Err = p.mapConfirmError(waitErr)
-			p.pm.RecordPublish(p.exchange, p.routingKey, p.msgType, "error", time.Since(msgStart))
+			p.recordPublish(p.exchange, "error", time.Since(msgStart))
 		} else {
-			p.pm.RecordPublish(p.exchange, p.routingKey, p.msgType, "success", time.Since(msgStart))
+			p.recordPublish(p.exchange, "success", time.Since(msgStart))
 		}
 	}
 
