@@ -376,3 +376,56 @@ func TestTracker_Wait_ArmingTimer_DoesNotAllocate(t *testing.T) {
 	assert.Equal(t, noTimer, withTimer,
 		"arming the confirm-timeout timer must not allocate; pool/reset the timer (Lens-09 PC-06)")
 }
+
+// — Lens-09 (PC-11): resolveUpTo low-water-mark, no per-frame scan/alloc ——————
+
+// TestTracker_MultipleAck_DoesNotAllocatePerFrame is the PC-11 allocation guard.
+// Resolving a multiple=true frame must not scan the whole pending map and sort a
+// freshly allocated slice on every frame (the old O(outstanding)/frame design).
+// With a contiguous low-water-mark over an ascending index, advancing the
+// confirmed watermark allocates nothing per frame.
+func TestTracker_MultipleAck_DoesNotAllocatePerFrame(t *testing.T) {
+	tr := confirms.New()
+	const N = 4096
+	for i := uint64(1); i <= N; i++ {
+		require.NoError(t, tr.Register(i))
+	}
+
+	var tag uint64
+	allocs := testing.AllocsPerRun(2000, func() {
+		tag++
+		tr.Ack(tag, true) // advances the low-water-mark by exactly one tag
+	})
+
+	assert.Zero(t, allocs,
+		"resolving a multiple=true frame must not allocate per frame (Lens-09 PC-11)")
+}
+
+// TestTracker_MultipleAck_LowWaterMark_LargeOutstanding exercises the resolve
+// path with a deep outstanding window and an interleaving of single and multiple
+// acks, asserting every waiter resolves exactly once with the right verdict.
+// It is the behavioural companion to the PC-11 allocation guard.
+func TestTracker_MultipleAck_LowWaterMark_LargeOutstanding(t *testing.T) {
+	tr := confirms.New()
+	const N = 500
+	results := make([]<-chan error, N+1)
+	for i := uint64(1); i <= N; i++ {
+		require.NoError(t, tr.Register(i))
+		results[i] = asyncWait(t, tr, i)
+	}
+
+	// Single-ack a scattered subset first (creates ghosts above the watermark).
+	tr.Ack(250, false)
+	tr.Ack(100, false)
+	// Then a broad multiple=true ack sweeps everything up to 400.
+	tr.Ack(400, true)
+	// Finally a multiple=true nack covers the remainder.
+	tr.Nack(N, true)
+
+	for i := uint64(1); i <= 400; i++ {
+		assert.NoError(t, <-results[i], "tag %d should ack", i)
+	}
+	for i := uint64(401); i <= N; i++ {
+		assert.ErrorIs(t, <-results[i], confirms.ErrNacked, "tag %d should nack", i)
+	}
+}
