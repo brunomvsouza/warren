@@ -840,21 +840,49 @@ func TestCopyArgs_emptyMap(t *testing.T) {
 	assert.NotNil(t, dst)
 }
 
-// LATER-55: queue type must come from the Type field, not a raw Args entry, so
-// a single source of truth drives type-gated behavior (notably the
-// at-least-once injection, which keys on the Type field).
-func TestTopology_validate_rejectsRawQueueTypeArg(t *testing.T) {
+// LATER-55 + review: every queue setting the library manages from a dedicated
+// typed field must come from that field, not a raw Args entry, so a single
+// source of truth drives the type-gated expansion (notably the at-least-once
+// injection, which keys on the Type field).
+func TestTopology_validate_rejectsRawManagedQueueArgs(t *testing.T) {
+	for _, tc := range []struct {
+		key   string
+		field string
+	}{
+		{"x-queue-type", "Type"},
+		{"x-delivery-limit", "DeliveryLimit"},
+		{"x-single-active-consumer", "SingleActiveConsumer"},
+		{"x-max-priority", "MaxPriority"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			topo := &Topology{
+				Queues: []Queue{{
+					Name:    "orders",
+					Durable: true,
+					Args:    map[string]any{tc.key: "x"},
+				}},
+			}
+			err := topo.validate()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrInvalidOptions)
+			assert.Contains(t, err.Error(), tc.field+" field")
+		})
+	}
+}
+
+// The manual dead-letter path must stay valid: x-dead-letter-* keys (and a
+// strategy override) are legitimately caller-set and must not be rejected.
+func TestTopology_validate_allowsManualDeadLetterArgs(t *testing.T) {
 	topo := &Topology{
 		Queues: []Queue{{
-			Name:    "orders",
-			Durable: true,
-			Args:    map[string]any{"x-queue-type": "quorum"},
+			Name: "orders", Durable: true, Type: QueueTypeQuorum,
+			Args: map[string]any{
+				"x-dead-letter-exchange": "my.dlx",
+				"x-dead-letter-strategy": "at-most-once",
+			},
 		}},
 	}
-	err := topo.validate()
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrInvalidOptions)
-	assert.Contains(t, err.Error(), "Type field")
+	require.NoError(t, topo.validate())
 }
 
 // FuzzTopologyExpand locks the no-panic guarantee of validate()+expand() against
