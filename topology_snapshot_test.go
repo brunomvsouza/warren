@@ -97,6 +97,28 @@ func TestTopology_AttachTo_snapshotIsIndependentOfCallerAfterAttach(t *testing.T
 	assert.Len(t, snap.Queues, 1, "post-AttachTo mutations must not affect the stored snapshot")
 }
 
+// The AttachTo snapshot is expanded at attach time, so the reconnect redeclare
+// reissues the same x-dead-letter-strategy=at-least-once that Declare wrote on
+// the first declare. If the snapshot omitted it, the broker would 406 on the
+// redeclare of an already-strategy-bearing quorum queue.
+func TestTopology_AttachTo_snapshotCarriesAtLeastOnceStrategy(t *testing.T) {
+	conn := newBareConnection(t)
+	topo := &Topology{
+		Queues:      []Queue{{Name: "events", Durable: true, Type: QueueTypeQuorum}},
+		DeadLetters: []DeadLetter{{Source: "events"}},
+	}
+	require.NoError(t, topo.AttachTo(conn))
+
+	conn.topoMu.RLock()
+	snap := conn.topoSnaps[topo]
+	conn.topoMu.RUnlock()
+	require.NotNil(t, snap)
+
+	src := findQueue(snap, "events")
+	require.NotNil(t, src)
+	assert.Equal(t, "at-least-once", src.Args["x-dead-letter-strategy"])
+}
+
 func TestTopology_AttachTo_registersHookOnce(t *testing.T) {
 	conn := newBareConnection(t)
 	topo := &Topology{Queues: []Queue{{Name: "q1"}}}
