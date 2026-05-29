@@ -761,3 +761,34 @@ codecs is the precedent for keeping an optional codec out of the core dependency
 
 ---
 
+### LATER-48 — Full observability & alerting cookbook example (Prometheus + Grafana dashboards + alert-rule library)
+
+**Context:** Lens-12 (developer-experience & documentation) found that the operational hard cases have no
+runnable references (DX-10). T163 (Phase 23) lands the P1 examples (`durable_retry`, `graceful_shutdown`) and
+a minimal `observability` example (metrics wiring + the mandatory-metric alert rules — `publisher_retry_total`,
+`consumer_handler_aborted_…`, `topology_redeclare_seconds`). The *full* cookbook — a ready-to-import Grafana
+dashboard JSON, a complete Prometheus alert-rule file covering every mandatory metric, and a narrated runbook
+mapping each alert to its remedy/knob — is deliberately deferred (owner decision D5).
+
+**Impact:** Low (deferred by design). The minimal `observability` example (T163) and the SRE-lens metrics/alert
+documentation already give operators the wiring and the alert thresholds; the cookbook is a polish/onboarding
+accelerator, not a correctness gap. Without it, operators must assemble dashboards and the full alert set
+themselves from the metric reference.
+
+**Evidence:** Lens-12 DX & documentation spec validation, 2026-05-29 (brief
+`spec-validation/12-dx-documentation-plan.md` §13 findings table DX-10, §14 examples-gap list item 6, §10 owner
+decision D5, §16 out-of-scope). The lens routes the minimal example to T163 and defers the full cookbook here.
+
+**Suggested solution:** Ship a `examples/observability/` (or a `docs/observability/` companion) containing: a
+versioned Grafana dashboard JSON (publish/consume rates, confirm latency, reconnect/degraded-state gauges,
+handler-abort + retry counters), a complete `prometheus/alerts.yml` covering every mandatory metric with
+documented thresholds and `for:` windows, and a runbook table mapping each alert → likely cause → remedy/knob
+(reusing the DX-08 error-remedy policy). Keep it outside the unit/`examples-smoke` lanes if the dashboard JSON
+cannot be meaningfully smoke-tested; at minimum lint the alert-rule file (`promtool check rules`).
+
+**Prerequisites:** T163 (the minimal `observability` example + the mandatory-metric alert rules land first as the
+runnable baseline); coordinates with the SRE-lens metrics catalogue (the metric names + the alert thresholds it
+documents) and T162 (the error-remedy/knob policy the runbook reuses).
+
+---
+
