@@ -808,6 +808,13 @@ func (c *Consumer[M]) applyCounterB(cs *redeliveryCounter, counterBKey string, h
 	// "Once incrementing it would exceed n" = current + 1 > n = current >= n.
 	exceeded := currentCount+1 > int64(c.maxRedeliveries)
 	if exceeded {
+		// Delete on exceed so the entry does not leak. This deliberately resets
+		// the slot to 0: under concurrent duplicates of the same MessageId, a
+		// sibling delivery may then be re-allowed once rather than rewritten to
+		// Nack(false), so the per-process bound is soft (the loop is still
+		// bounded — each exceeding delivery is Nacked-without-requeue and drains).
+		// Counter B is a process-local heuristic; hard bounding comes from the
+		// quorum DeliveryLimit or counter A (x-death). See SPEC §6.3.
 		cs.m.Delete(counterBKey)
 	} else {
 		cs.m.Store(counterBKey, currentCount+1)
