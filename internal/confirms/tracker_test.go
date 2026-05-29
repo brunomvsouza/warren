@@ -2,6 +2,8 @@ package confirms_test
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -218,6 +220,35 @@ func TestTracker_OutOfOrderRegister_MultipleAckResolvesCorrectly(t *testing.T) {
 	}
 }
 
+// TestTracker_OutOfOrderRegisterBelowWatermark_MultipleAckResolves is the
+// deterministic regression for the orphan bug: a tag registered out of order so
+// it sorts *below* an already-advanced low-water-mark must still be resolvable by
+// a multiple=true frame. Without head being pulled back to the inserted tag, the
+// frame walks only from head, skips the orphaned tag, and its Wait times out.
+func TestTracker_OutOfOrderRegisterBelowWatermark_MultipleAckResolves(t *testing.T) {
+	tr := confirms.New()
+	require.NoError(t, tr.Register(10))
+	require.NoError(t, tr.Register(20))
+	require.NoError(t, tr.Register(30))
+	ch30 := asyncWait(t, tr, 30)
+
+	// Advance the watermark past 10 and 20; 30 stays pending so the index is not
+	// reset to empty.
+	tr.Ack(20, true)
+
+	// A late, lower tag arrives out of order — it sorts below the watermark.
+	require.NoError(t, tr.Register(15))
+	ch15 := asyncWait(t, tr, 15)
+
+	// A multiple=true ack covering 15 must resolve it despite the advanced
+	// watermark (would time out without the head pull-back fix).
+	tr.Ack(15, true)
+	assert.NoError(t, <-ch15, "out-of-order tag below the watermark must resolve")
+
+	tr.Ack(30, false)
+	assert.NoError(t, <-ch30)
+}
+
 // — Channel close —————————————————————————————————————————————————————————
 
 func TestTracker_CloseAll_ResolvesAllPendingWithErrClosed(t *testing.T) {
@@ -427,6 +458,68 @@ func TestTracker_MultipleAck_DoesNotAllocatePerFrame(t *testing.T) {
 
 	assert.Zero(t, allocs,
 		"resolving a multiple=true frame must not allocate per frame (Lens-09 PC-11)")
+}
+
+// — Concurrency (the production shape: many publishers + one confirm demux) ——
+
+// TestTracker_ConcurrentRegisterAckWait_RaceClean drives the Tracker the way the
+// publisher does in production: N goroutines each Register→Wait while a single
+// "broker" goroutine resolves every delivered tag, mixing single and
+// multiple=true frames. The low-water-mark state (order/head) is shared mutable
+// state newly added by PC-11; the existing suite only ever touched the Tracker
+// single-threaded, so -race could not prove the lock scope. This test makes the
+// concurrent Register (orderInsert/advanceLowWater) and resolve paths run under
+// -race, and asserts every registered tag resolves exactly once with no leak.
+func TestTracker_ConcurrentRegisterAckWait_RaceClean(t *testing.T) {
+	const publishers = 8
+	const perPublisher = 60
+	const total = publishers * perPublisher
+
+	tr := confirms.New()
+	ctx := context.Background()
+
+	acks := make(chan uint64, total) // buffered so publisher sends never block
+	errs := make(chan error, total)
+	var nextTag uint64
+	var wg sync.WaitGroup
+
+	// Publishers: allocate a tag, register it, hand it to the broker, then block
+	// on its own confirm. Concurrent allocation means tags reach Register out of
+	// order across goroutines, exercising orderInsert's binary-insert path too.
+	for p := 0; p < publishers; p++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perPublisher; i++ {
+				tag := atomic.AddUint64(&nextTag, 1)
+				require.NoError(t, tr.Register(tag))
+				acks <- tag
+				errs <- tr.Wait(ctx, tag, 10*time.Second)
+			}
+		}()
+	}
+
+	// Broker: resolve every delivered tag. Every k%5 frame is multiple=true so
+	// resolveUpTo runs concurrently with Register; the rest are single acks.
+	brokerDone := make(chan struct{})
+	go func() {
+		defer close(brokerDone)
+		for k := 0; k < total; k++ {
+			tag := <-acks
+			tr.Ack(tag, k%5 == 0)
+		}
+	}()
+
+	wg.Wait()
+	<-brokerDone
+	close(errs)
+
+	resolved := 0
+	for err := range errs {
+		require.NoError(t, err, "every concurrently-waited publish must ack cleanly")
+		resolved++
+	}
+	assert.Equal(t, total, resolved, "every registered tag must resolve exactly once")
 }
 
 // TestTracker_MultipleAck_LowWaterMark_LargeOutstanding exercises the resolve

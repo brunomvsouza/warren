@@ -646,6 +646,7 @@ func TestDeliveryMode_wireRoundTrip(t *testing.T) {
 	assert.Equal(t, DeliveryModePersistent, deliveryModeFromWire(2))
 	assert.Equal(t, DeliveryModeTransient, deliveryModeFromWire(1))
 	assert.Equal(t, DeliveryModeTransient, deliveryModeFromWire(0), "unset wire value is non-persistent")
+	assert.Equal(t, DeliveryModeTransient, deliveryModeFromWire(3), "out-of-range wire value is non-persistent")
 }
 
 // — retryReason label coverage —————————————————————————————————————————————

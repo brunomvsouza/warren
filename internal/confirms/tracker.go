@@ -278,6 +278,12 @@ func (t *Tracker) resolveUpTo(deliveryTag uint64, baseErr error) {
 // channel are strictly increasing, so this is an O(1) append in the common case;
 // a binary-search insert keeps the index sorted if tags ever arrive out of order.
 // Must be called with t.mu held.
+//
+// If an out-of-order tag lands below the confirmed low-water-mark (idx < head),
+// head is pulled back to it so the still-unresolved tag stays inside the live
+// window order[head:]; otherwise it would be orphaned in the dead prefix and a
+// later multiple=true frame — which only walks from head — could never resolve
+// it. The resolved ghosts re-admitted to the window are re-walked as no-ops.
 func (t *Tracker) orderInsert(tag uint64) {
 	n := len(t.order)
 	if n == 0 || tag > t.order[n-1] {
@@ -286,6 +292,9 @@ func (t *Tracker) orderInsert(tag uint64) {
 	}
 	idx, _ := slices.BinarySearch(t.order, tag)
 	t.order = slices.Insert(t.order, idx, tag)
+	if idx < t.head {
+		t.head = idx
+	}
 }
 
 // advanceLowWater drops leading entries from the order index that are no longer
