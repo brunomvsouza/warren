@@ -92,6 +92,15 @@ func (b *PublisherBuilder[M]) Mandatory() *PublisherBuilder[M] {
 // unblocks when a mandatory publish is returned by the broker (basic.return).
 // The callback receives the full Return including properties and reply code.
 // Last-wins: calling OnReturn twice keeps only the second callback.
+//
+// Goroutine and blocking contract: the callback runs inline on the publisher
+// channel's return-demux goroutine, which is driven by the AMQP connection's
+// single reader goroutine (the basic.return frame is delivered over an
+// unbuffered channel, so the reader stalls until the callback returns). A slow
+// or blocking callback therefore stalls confirm and return processing for every
+// publisher sharing that connection — keep it fast and non-blocking, and hand
+// heavy work off to your own goroutine. (The cross-cutting callback-invocation
+// goroutine contract is tracked by T144.)
 func (b *PublisherBuilder[M]) OnReturn(cb func(Return)) *PublisherBuilder[M] {
 	b.onReturn = cb
 	return b
