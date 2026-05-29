@@ -852,3 +852,76 @@ headroom (e.g. validate `poolSize <= channelMax - reserved`, reserved ≥ 1) —
 **Prerequisites:** none (self-contained doc or validation tweak); coordinates with T34 (`WithFrameMax`/sizing
 godoc sweep) if the doc route is chosen.
 
+---
+
+### LATER-51 — `uuid.EnableRandPool()` mutates a google/uuid process-global on behalf of the whole process
+
+**Context:** `message.go` — the package `init()` calls `uuid.EnableRandPool()` (Lens-09 PC-09) to batch the
+per-publish `crypto/rand` read and drop one allocation per `MessageID`. That flips a process-global flag inside
+`github.com/google/uuid`, so any application that imports `warren` — even transitively, even if it never publishes —
+inherits the changed entropy-batching behaviour for its own `uuid.NewV7`/`NewRandom` calls. `EnableRandPool`/
+`DisableRandPool` are documented by google/uuid as **not thread-safe**.
+
+**Impact:** Low and not exploitable as written: the only call site is `init()` (single-threaded, before any
+goroutine), nothing in the tree calls `DisableRandPool`/`SetRand` to race it, and the security audit confirmed the
+pool draws from `crypto/rand` so UUIDv7 entropy/uniqueness is unchanged (the at-least-once dedupe contract is
+intact). The residual concern is etiquette: a library silently mutating a shared third-party global can surprise a
+downstream app with its own uuid tuning, and would become a real data race if any future code path toggled the pool
+at runtime.
+
+**Evidence:** `/agent-skills:ship` parallel review of branch `worktree-phase-2-validation`, 2026-05-29
+(security-auditor LOW finding).
+
+**Suggested solution:** Replace the global toggle with a package-scoped pooled generator: keep a `sync.Pool`/buffered
+crypto reader inside `warren` and call `uuid.NewV7FromReader(r)` (exported by google/uuid v1.6.0) in `applyDefaults`,
+so the allocation win is kept without mutating a shared global. Adjust the PC-09 `AllocsPerRun` guard to target the
+package-local path instead of `uuid.NewV7()`.
+
+**Prerequisites:** none (self-contained; touches `message.go` + its alloc guard). Coordinates with T148 (the combined
+hot-path `AllocsPerRun` guard) so both guards target the same generation path.
+
+---
+
+### LATER-52 — No end-to-end broker round-trip for explicit `DeliveryModeTransient` (wire 1)
+
+**Context:** `publisher_batch_integration_test.go` now asserts that a zero-value (persistent-default) message arrives
+with wire delivery-mode 2 against a real broker — the durable-by-default regression guard for the §6.5 mapping fix.
+The symmetric case, an explicit `DeliveryModeTransient` publish arriving with wire delivery-mode 1, is proven only at
+the `buildPublishing` unit level, never end-to-end.
+
+**Impact:** Minor/Important-for-completeness. The transient→1 branch is fully unit-tested both directions
+(`DeliveryMode.wire()`/`deliveryModeFromWire`), so the risk is low; the gap is asymmetric evidence — the less-common
+branch has no broker-confirmed proof, and only the integration (Docker) lane can supply it.
+
+**Evidence:** `/agent-skills:ship` parallel review of branch `worktree-phase-2-validation`, 2026-05-29
+(test-engineer coverage gap #2, integration-lane).
+
+**Suggested solution:** Add a small integration-tagged test (same file/helpers) that publishes one message with
+`DeliveryMode: DeliveryModeTransient`, reads it back via `basic.get`, and asserts `d.DeliveryMode == 1`. Verifiable
+only on the integration lane.
+
+**Prerequisites:** none (self-contained integration test reusing the existing batch-integration harness).
+
+---
+
+### LATER-53 — Confirm-tracker memory bound and compaction threshold lack direct documentation/tests
+
+**Context:** `internal/confirms/tracker.go` — the low-water-mark index (`order`/`head`, PC-11) is bounded by the
+outstanding-publish window, but the reasoning is load-bearing and implicit: the bound holds because `head` is gated
+by the lowest still-pending tag, which is itself bounded by in-flight publishes. Separately, `compactOrder`'s
+"leave-alone" boundary (`head <= orderCompactMinPrefix`, `head*2 < len`) is exercised only incidentally by
+`TestTracker_LongLived_OrderStaysBounded`, not pinned by a targeted boundary test.
+
+**Impact:** Minor (hardening). The behaviour is correct and covered at 100% line coverage; the gaps are (a) a
+one-sentence rationale on the `order` field comment explaining why the bound holds, and (b) a boundary test locking
+`orderCompactMinPrefix` against accidental change. Without them a future refactor could silently weaken the bound.
+
+**Evidence:** `/agent-skills:ship` parallel review of branch `worktree-phase-2-validation`, 2026-05-29
+(code-reviewer suggestion #1 + test-engineer gap #3).
+
+**Suggested solution:** Add one sentence to the `order` field godoc noting the head-gated bound, and a white-box
+test asserting that at `head == orderCompactMinPrefix` the slice is not compacted while at `head ==
+orderCompactMinPrefix + 1` with `head*2 >= len` it is.
+
+**Prerequisites:** none (self-contained doc + test in `internal/confirms`).
+
