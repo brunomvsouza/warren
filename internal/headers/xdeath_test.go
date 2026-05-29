@@ -196,6 +196,29 @@ func TestParseXDeath_NoAllocOnNoDLXPath(t *testing.T) {
 	})
 }
 
+func TestParseXDeath_AllEntriesNonMatchingQueue_NoAlloc(t *testing.T) {
+	// Lens-09 (PC-08) edge: x-death is present and well-shaped, but NO entry
+	// matches the delivery's queue. The loop runs fully yet every entry hits the
+	// `q != queue` continue before the lazy alloc, so byReason must stay nil —
+	// zero allocations and a zero result. This is the path the lazy-alloc change
+	// newly made allocation-free (a matching entry would allocate).
+	tbl := amqp091.Table{
+		"x-death": []any{
+			makeEntry("otherqueue", "rejected", 10),
+			makeEntry("anotherqueue", "delivery-limit", 5),
+		},
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = headers.ParseXDeath(tbl, "myqueue")
+	})
+	assert.Zero(t, allocs, "all-non-matching-queue path must not allocate the byReason map")
+
+	result := headers.ParseXDeath(tbl, "myqueue")
+	assert.Equal(t, 0, result.Count)
+	assert.Empty(t, result.Reasons)
+	assert.Equal(t, 0, result.CountByReason("rejected"))
+}
+
 func TestParseXDeath_CountByReason_NilMapSafe(t *testing.T) {
 	// After the lazy-allocation change, the no-DLX path leaves byReason nil.
 	// CountByReason must still return 0 (reading a nil map is safe in Go).
