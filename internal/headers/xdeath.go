@@ -29,7 +29,10 @@ func (r *XDeathResult) CountByReason(reason string) int {
 // zero result rather than an error — the header is broker-written and may be
 // absent on first delivery.
 func ParseXDeath(tbl amqp091.Table, queue string) XDeathResult {
-	result := XDeathResult{byReason: make(map[string]int)}
+	// byReason is allocated lazily on the first matching entry (see below).
+	// Lens-09 (PC-08): the common no-DLX delivery hits one of the early returns
+	// below, where a map allocation would be pure waste on 100% of deliveries.
+	var result XDeathResult
 	if tbl == nil {
 		return result
 	}
@@ -63,6 +66,12 @@ func ParseXDeath(tbl amqp091.Table, queue string) XDeathResult {
 		// 32-bit builds without penalising 64-bit runtime performance.
 		if count > math.MaxInt { //nolint:staticcheck // intentional 32-bit guard; dead on 64-bit
 			count = math.MaxInt
+		}
+
+		// Lazily allocate byReason on the first entry matching this queue, so a
+		// delivery with no matching x-death entry never allocates the map.
+		if result.byReason == nil {
+			result.byReason = make(map[string]int)
 		}
 
 		if _, seen := result.byReason[reason]; !seen {
