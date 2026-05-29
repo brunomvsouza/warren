@@ -257,6 +257,14 @@ type Consumer[M any] struct {
 	// returns it directly, including the done channel for channel-close detection tests.
 	deliverySubOverride *deliverySub
 
+	// testHookBeforeTimeoutDrain, when non-nil, is invoked inside dispatch's hCtx.Done()
+	// branch immediately before draining handlerDone. It is a test-only synchronization
+	// seam (nil in production, a no-op) that lets a test confirm dispatch has committed to
+	// the ctx-done branch before unblocking the handler goroutine — making the "no
+	// ack/nack on outer-ctx cancel" assertion deterministic under -race instead of racing
+	// handlerDone vs hCtx.Done().
+	testHookBeforeTimeoutDrain func()
+
 	// closedCh is closed when Close is called; signals Delivery.Ack/Nack to refuse.
 	closedCh  chan struct{}
 	closeOnce sync.Once
@@ -706,6 +714,9 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 			// outcome. The deferred span.End() still closes the span.
 		}
 		cancelCause(nil) // signal handler goroutine before draining
+		if c.testHookBeforeTimeoutDrain != nil {
+			c.testHookBeforeTimeoutDrain()
+		}
 		<-handlerDone
 	}
 }

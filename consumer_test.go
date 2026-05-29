@@ -658,19 +658,28 @@ func TestConsumer_Consume_TimeoutPath_OuterCtxCancelled_NoAckNoMetric(t *testing
 	deliveryCh := make(chan amqp091.Delivery, 1)
 	consumer.deliveryCh = deliveryCh
 
+	// committed fires once dispatch has committed to the hCtx.Done() (outer-cancel)
+	// branch. The handler blocks on a dedicated gate (not hCtx.Done()) so handlerDone
+	// stays empty until we release it — making dispatch's select deterministic instead
+	// of racing the handler's return (→ AckIf nacks on the ctx error) against hCtx.Done()
+	// (→ no frame).
+	committed := make(chan struct{})
+	consumer.testHookBeforeTimeoutDrain = func() { close(committed) }
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	ackOrNack := make(chan string, 1)
 	handlerStarted := make(chan struct{})
+	handlerCanReturn := make(chan struct{})
 
 	consumeDone := make(chan struct{})
 	go func() {
 		defer close(consumeDone)
-		_ = consumer.Consume(ctx, func(hCtx context.Context, _ string) error {
+		_ = consumer.Consume(ctx, func(_ context.Context, _ string) error {
 			close(handlerStarted)
-			<-hCtx.Done() // block until outer ctx is cancelled
-			return hCtx.Err()
+			<-handlerCanReturn // released only after dispatch committed to the cancel branch
+			return nil
 		})
 	}()
 
@@ -685,6 +694,12 @@ func TestConsumer_Consume_TimeoutPath_OuterCtxCancelled_NoAckNoMetric(t *testing
 
 	<-handlerStarted
 	cancel() // cancel outer ctx before HandlerTimeout fires
+	select {
+	case <-committed:
+	case <-time.After(time.Second):
+		t.Fatal("dispatch did not commit to the ctx-done branch in time")
+	}
+	close(handlerCanReturn) // unblock the handler so <-handlerDone drains
 	<-consumeDone
 
 	// No ack or nack must have been emitted — broker will redeliver.

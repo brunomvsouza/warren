@@ -353,9 +353,12 @@ func batchDelivery(tag uint64, body string, ackr amqp091.Acknowledger) amqp091.D
 // it is not a message outcome. This pins that documented contract; the previous
 // commit added the branch but no traced test asserted it.
 //
-// Determinism: the handler blocks on hctx.Done(), so cancelling the outer ctx
-// closes hCtx.Done() and atomically claims the flush select for that case before
-// handlerDone can become ready — the timeout select never races the handler return.
+// Determinism: the handler blocks on a dedicated gate (not hctx.Done()), so handlerDone
+// stays empty after the outer ctx is cancelled — the flush select can only pick
+// hCtx.Done(). The test waits on the testHookBeforeTimeoutDrain seam to confirm the
+// select committed to that branch, then releases the gate so the drain completes. This
+// removes the prior handlerDone-vs-hCtx.Done() race (Go selects at random when both are
+// ready), which flaked when the handler's nil return won and stamped a success outcome.
 func TestBatchConsumer_processBatchSpan_outerCtxCancel_noOutcome(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -376,12 +379,20 @@ func TestBatchConsumer_processBatchSpan_outerCtxCancel_noOutcome(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// committed fires once the handler-timeout select has committed to the outer-ctx-cancel
+	// branch. The handler blocks on a dedicated gate (not hctx.Done()) so handlerDone stays
+	// empty until we release it — this makes the select's choice deterministic instead of
+	// racing the handler's nil return (→ success outcome) against hCtx.Done() (→ no outcome).
+	committed := make(chan struct{})
+	bc.testHookBeforeTimeoutDrain = func() { close(committed) }
+
 	entered := make(chan struct{})
+	canReturn := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- bc.Consume(ctx, func(hctx context.Context, _ *Batch[string]) error {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
 			close(entered)
-			<-hctx.Done() // unblocks when the outer-ctx cancellation propagates
+			<-canReturn // released only after the select committed to the cancel branch
 			return nil
 		})
 	}()
@@ -391,6 +402,12 @@ func TestBatchConsumer_processBatchSpan_outerCtxCancel_noOutcome(t *testing.T) {
 
 	<-entered // span is open and the handler goroutine is running
 	cancel()  // cancel the OUTER ctx — lifecycle end, not a timeout
+	select {
+	case <-committed:
+	case <-time.After(time.Second):
+		t.Fatal("select did not commit to the ctx-done branch in time")
+	}
+	close(canReturn) // unblock the handler so <-handlerDone drains and Consume returns
 	require.NoError(t, <-done)
 
 	span := tr.only()
