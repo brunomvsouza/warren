@@ -257,6 +257,30 @@ func TestWaitBarrier_cancelledCtx_whileBlocked_returnsErrConnectionBlocked(t *te
 	assert.ErrorIs(t, err, ErrConnectionBlocked)
 }
 
+// — health: SPEC §6.1 degraded-state + ctx awareness ——————————————————————
+
+func TestHealth_degraded_returnsTopologyRedeclareFailed(t *testing.T) {
+	// SPEC §6.1: Health verifies the connection is "not in a degraded topology
+	// state". A degraded conn must surface ErrTopologyRedeclareFailed, not open
+	// a channel.
+	mc := newBareManaged(t)
+	mc.mu.Lock()
+	mc.degraded = true
+	mc.degradedErr = ErrTopologyRedeclareFailed
+	mc.mu.Unlock()
+	err := mc.health(context.Background())
+	assert.ErrorIs(t, err, ErrTopologyRedeclareFailed)
+}
+
+func TestHealth_cancelledCtx_returnsCtxErr(t *testing.T) {
+	// Health must honor a cancelled context instead of ignoring it.
+	mc := newBareManaged(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := mc.health(ctx)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
 // — runBarrier: hook paths ————————————————————————————————————————————————
 
 func TestRunBarrier_noHooks_clearsDegradedAndBroadcasts(t *testing.T) {
