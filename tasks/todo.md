@@ -1206,6 +1206,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Acceptance:**
   - [ ] A consumer whose channel closes while the TCP connection stays up (404/406/ack-error) reopens its channel and re-`basic.qos` + re-`basic.consume` without waiting for a TCP reconnect.
   - [ ] `consumer_resubscribed_total{queue}` increments; consumer does not return silently.
+  - [ ] **Lens-05 (SRE-01):** silent channel death is the highest-severity *invisible* failure — `consumer_resubscribed_total` must increment on a channel-only death (a `rate()==0` while traffic is expected is the alert), and its absence drives the `Connection.Health` readiness false-green (SRE-13/T115).
 - **Verify:** Integration test forces a channel-only exception (e.g. passive-declare a missing queue on the consumer channel) and asserts the consumer recovers and keeps consuming.
 - **Files:** `connection.go`, `consumer.go`, `consumer_integration_test.go`.
 - **Deps:** T07, T07d, T18. **(R10-6, P1.4)** — sequence with T62/T63.
@@ -1215,6 +1216,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
   - [ ] Broker-global topology is redeclared **once per recovery event** at the `*Connection` level, not once per pooled `managedConn`.
   - [ ] `basic.consume`/`basic.qos` reissue stays per consumer connection.
   - [ ] **Lens-02 (DS-09):** SPEC §6.1 notes this compounds with DS-10 (T66) into a recovery storm; the chaos lane exercises a full-cluster restart against a just-recovered (possibly Khepri-quorum-forming) broker and asserts declares stay == topology size.
+  - [ ] **Lens-05 (SRE-06):** the recovery action must not hammer the just-recovered (fragile) broker with N×pool×fleet `queue.declare`s; couple the chaos exercise with the SRE-04/T66 full-cluster restart.
 - **Verify:** Integration/chaos test with `WithPublisherConnections(4)+WithConsumerConnections(4)` and an instrumented declare counter (or broker-side `queue.declare` count) asserts declares == topology size, not 8×.
 - **Files:** `connection.go`, `topology.go`, `connection_internal_test.go`.
 - **Deps:** T07, T16, T84 (chaos lane). **(R10-7, P1.2)** — sequence with T61/T63; *pulled into Phase 13 (v0.1).*
@@ -1224,6 +1226,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
   - [ ] The synchronous redeclare barrier is bounded by a configurable max duration; on cap, blocked `Publish` calls return `ErrReconnecting` rather than stalling indefinitely.
   - [ ] **Lens-01 (RMQ-17):** the cap covers **Khepri (4.1 default)**, where `queue.declare` is a Raft-quorum op that can block during partition recovery.
   - [ ] **Lens-02 (DS-02):** SPEC names the cap option, its default, and the post-cap connection state (force-reconnect vs degraded), and states explicitly that `ConfirmTimeout` does **not** cover the barrier (the frame is still unwritten) — the cap is a distinct mechanism.
+  - [ ] **Lens-05 (SRE-02):** the barrier-cap default must be **≤ the new default histogram top bucket** (SRE-11/T113) so a capped stall is *visible* in `publisher_publish_seconds`, not collapsed into `+Inf`.
 - **Verify:** Unit test with a mock channel whose redeclare blocks longer than the cap asserts `Publish` returns `ErrReconnecting` at the cap (with `PublishTimeout=0` + `context.Background()`). Chaos: a half-alive-broker proxy (accepts the socket, stalls `queue.declare`) asserts the same on a real broker; `goleak` clean.
 - **Files:** `connection.go`, `options_connection.go`, `connection_internal_test.go`, SPEC §6.1/§6.2.
 - **Deps:** T07, T62, T84 (half-alive proxy). **(R10-8, P1.6)** — sequence with T61/T62; *pulled into Phase 13 (v0.1).*
@@ -1241,6 +1244,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Acceptance:**
   - [ ] Auto-declared `<source>.dlq` is `Durable` (quorum-capable) with configurable bounds (`x-max-length`/`x-max-length-bytes`).
   - [ ] A `Consumer` with `MaxRedeliveries>0` and a wired `Topology` lacking a DLX for the source queue warns at `Build` and increments a drop metric (parity with `Replier`'s `replier_drop_no_dlx_total`).
+  - [ ] **Lens-05 (SRE-03):** highest blast radius in the spec — an unbounded DLQ fills disk → broker-wide `connection.blocked` (one service's poison storm → cluster-wide publish outage); bound the DLQ *by default* (overflow `drop-head`/`reject` is a deliberate bound, not unbounded) and emit a DLQ-depth signal so the storm is visible *before* the broker alarm.
 - **Verify:** Integration: nacked-poison lands in a durable bounded DLQ. Unit: consumer `Build` warns + metric increments when no DLX.
 - **Files:** `topology.go`, `consumer.go`, `consumer_builder.go`, `metrics/`.
 - **Deps:** T15, T47, T18, T30. **(R10-10, P1.3)**
@@ -1249,6 +1253,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Acceptance:**
   - [ ] The address list is shuffled per connection at `Dial`; reconnect rotates to the next address rather than always retrying index 0.
   - [ ] **Lens-02 (DS-10):** SPEC §6.1 notes this compounds with DS-09 (T62) into a recovery storm; the chaos lane asserts no `addr[0]` stampede on a full-cluster restart.
+  - [ ] **Lens-05 (SRE-04):** the chaos lane asserts no `addr[0]` stampede on a full-cluster restart (compounds with SRE-06/T62 into a recovery storm).
 - **Verify:** Unit test asserts N connections start from a distribution of addresses; reconnect picks a different address. Chaos: a full-cluster restart shows reconnections spread across addresses.
 - **Files:** `connection.go`, `options_connection.go`, `connection_internal_test.go`.
 - **Deps:** T07, T07d. **(R10-11, P2.1)** — *already pulled into Phase 12.*
@@ -1256,9 +1261,10 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 ### [ ] T67 — `Dial` partial-pool-connect policy [P2] · S
 - **Acceptance:**
   - [ ] Policy recorded in SPEC §6.1 and implemented: `Dial` succeeds if ≥1 connection per role connects (supervisor reconnects the rest) — or fail-fast, per the decision.
-- **Verify:** Integration test where a subset of pooled connections cannot connect asserts the chosen behaviour deterministically.
-- **Files:** `connection.go`, SPEC §6.1, `connection_integration_test.go`.
-- **Deps:** T07, T07d. **(R10-12, P2.2)**
+  - [ ] **Lens-05 (SRE-08):** resolve to **succeed-if-≥1-per-role** with supervised reconnect of the rest **and** a metric/log for booting at reduced capacity — an undefined policy means fail-fast blocks *every* deploy on one flaky node, or succeed-degraded is *silent* capacity loss; an integration test boots a 2+2 pool with one consumer connection unreachable, asserts `Dial` succeeds, the missing socket reconnects under supervision, and the degraded-capacity signal fired.
+- **Verify:** Integration test where a subset of pooled connections cannot connect asserts the chosen behaviour deterministically + the degraded-capacity signal.
+- **Files:** `connection.go`, SPEC §6.1, `metrics/`, `connection_integration_test.go`.
+- **Deps:** T07, T07d. **(R10-12, P2.2)** — *pulled into Phase 16 (v0.1).*
 
 ### [ ] T68 — Alternate-exchange support [P2] · S
 - **Acceptance:**
@@ -1281,6 +1287,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
   - [ ] `Close` handles prefetched-but-undispatched deliveries deterministically (drain or nack-requeue), documented in SPEC §6.1.
   - [ ] `BatchConsumer` flushes its pending partial batch on `Close`/final `FlushAfter`.
   - [ ] **Lens-02 (DS-03):** the choice is resolved to **nack-requeue (`requeue=true`)** the undispatched buffer before channel close (never drop → no silent loss); `consumer_shutdown_requeued_total` increments; the forced-close (ctx-deadline) abandoned-in-flight duplicate window is named in SPEC (see DS-16/T85).
+  - [ ] **Lens-05 (SRE-07):** every rolling deploy is a low-grade incident — the deploy-time duplicate rate must be **boundable and observable** via `consumer_shutdown_requeued_total`.
 - **Verify:** Integration: prefetch N, dispatch < N, `Close`; assert undispatched are nack-requeued (redelivered), not silently dropped. Batch partial flush asserted with `goleak` clean. Gated by G2 (capture the current v0.1 behaviour first).
 - **Files:** `connection.go`, `consumer.go`, `batch_consumer.go`, `metrics/`, SPEC §6.1/§6.4.
 - **Deps:** T18, T22, T84 (G2). **(R10-15, P2.5)** — *pulled into Phase 13 (v0.1).*
@@ -1291,6 +1298,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
   - [ ] `consumer_in_flight{queue}` gauge (active handlers) exposed.
   - [ ] `consumer_redelivered_total{queue}` counter increments on `Redelivered()==true` deliveries.
   - [ ] **Lens-02 (DS-14):** `consumer_redelivered_total` is the redelivery-class duplicate-budget signal `publisher_retry_total` does not cover — required for the §1 "duplicate budget never invisible" claim to hold for the dominant duplicate source.
+  - [ ] **Lens-05 (SRE-05):** this is the single most important on-call *leading* indicator — without it a brewing poison storm / pool saturation is invisible until it is an outage; assert the redelivery ratio / pool-acquire-wait p99 are alertable.
 - **Verify:** Unit/integration assert each metric moves under the relevant condition (pool saturation, busy handlers, a forced redelivery).
 - **Files:** `metrics/`, `channelpool.go`, `consumer.go`.
 - **Deps:** T04, T08, T18. **(R10-16, P2.6)** — coordinates with T50/T52/T53; *pulled into Phase 13 (v0.1).*
@@ -1298,9 +1306,10 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 ### [ ] T72 — TCP keepalive / dialer hardening [P2] · XS
 - **Acceptance:**
   - [ ] Default `net.Dialer` sets a keepalive; `TCP_USER_TIMEOUT` documented where available, so a write to a half-open socket fails promptly.
-- **Verify:** Unit test asserts the default dialer carries keepalive; documented in SPEC §6.1 heartbeat/partition section.
+  - [ ] **Lens-05 (SRE-09):** AMQP heartbeats cover only *read-side* partition detection (~20s); a *write* to a half-open socket can block far longer with `ConfirmTimeout=30s` the only backstop — the dialer keepalive must make a publish on a dead socket error promptly (well under 30s); a half-open-socket integration/`chaos` test asserts it.
+- **Verify:** Unit test asserts the default dialer carries keepalive; documented in SPEC §6.1 heartbeat/partition section; a half-open-socket test asserts a publish errors well under 30s.
 - **Files:** `options_connection.go`, `connection.go`, SPEC §6.1.
-- **Deps:** T07. **(R10-17, P2.7)**
+- **Deps:** T07. **(R10-17, P2.7)** — *pulled into Phase 16 (v0.1).*
 
 ### [ ] T73 — Codec-call panic safety: `defer recover` → `ErrInvalidMessage` · S
 Formalises the T09 panic-safety contract (todo.md T09 / SPEC §6 "Panic
@@ -1737,6 +1746,114 @@ records the pass.
 - [ ] README "Available now / On the roadmap" synced (consistent-hash + alternate + e2e-binding topology, redrive helper, retry-ladder + schema-evolution guidance).
 - [ ] SPEC §10 "Rev 14" note records the Lens-04 pass; no finding re-filed that a prior lens owns; exactly one new `LATER.md` entry (LATER-40).
 
+## Phase 16 — SRE & Production-Operability Re-review (Lens 05: detect/respond/verify, recovery-amplification, capacity honesty)
+
+Closes the Lens-05 adversarial spec validation
+(`spec-validation/05-sre-operability.md`, findings `SRE-01..SRE-16`; brief
+`spec-validation/05-sre-operability-plan.md`). Lens verdict: **GO-WITH-CHANGES** —
+no *new* §1 silent-message-loss path (the registry footgun is a *loud* crash), and
+the five highest operability blockers (R10-6/8/10/11/16 = T61/T63/T65/T66/T71) are
+**already pulled into v0.1** by Lenses 01/02; this lens hardens their
+detect/respond/verify acceptance rather than re-filing. What it *adds* is an
+observability-correctness set: a metrics-registration footgun that crashes the
+process on a double-`Dial` (SRE-10), a histogram blind above 5s (SRE-11), no
+current-state degraded gauge (SRE-12), a readiness probe false-green over a dead
+consumer (SRE-13), throughput numbers unreachable on any remote broker (SRE-14),
+unbounded label cardinality (SRE-15), no operator runbook (SRE-16) — plus two
+pull-forwards (T67 partial-pool boot, T72 half-open write). Owner decisions
+(2026-05-28): **pull both** T67 + T72 forward; **extend** the default histogram
+buckets (add 10s/30s/60s); **aggregate** consumer liveness into `Connection.Health`;
+the throughput ceiling is a **doc-only** honesty fix (async-API stays LATER-34); and
+the §8 "no globals" rule forces a **private per-`Connection` registry** default for
+SRE-10. **No new build-tag lane** — gates ride the existing integration (3.13 + 4.x)
++ `chaos` lanes. Seven findings are already owned by prior-lens tasks and are
+**not** re-filed (SRE-01→T61, 02→T63, 03→T65, 04→T66, 05→T71, 06→T62, 07→T70).
+**No** new `LATER.md` entry. Operability claims are tested by exercising the signal
+and the recovery on a live broker / `chaos` lane, not the code path in isolation.
+**Gate task T111 runs first**; no SPEC edit to an affected section lands before its
+gate returns. Per-task SPEC amendment lands in the same PR; a SPEC §10 "Rev 15"
+note records the pass. Reverting any of the seven prior-lens pulls flips this lens
+to NO-GO.
+
+### [ ] T111 — Verification gates SG-1–SG-4 (unit + existing integration/`chaos` lanes, 3.13 + 4.x) [P0] · S
+- **Acceptance:**
+  - [ ] Ground truth captured (unit + the **existing** integration/`chaos` lanes — **no new build-tag lane**) for: **SG-1** whether a second `Dial` in one process panics on duplicate Prometheus registration today (confirm the registerer is currently unspecified; a private-registry default removes the panic); **SG-2** whether a publish that stalls for the full 30s `ConfirmTimeout` lands in the `+Inf` bucket of `publisher_publish_seconds` under the default `[0.5…5000]`ms buckets; **SG-3** whether a channel-only consumer death (404/`basic.cancel`/ack-error, TCP up) leaves `Connection.Health(ctx)` returning OK while the consumer is unsubscribed; **SG-4** whether per-`Publish` throughput tracks `≈ pool/RTT` under injected confirm-RTT and a confirm spike drives `ErrChannelPoolExhausted`.
+  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate.
+- **Verify:** Unit + integration/`chaos` lanes (3.13 + 4.x where broker-bound) green with the SG assertions; the gate table is reviewable.
+- **Files:** `metrics/*_test.go`, `connection_internal_test.go`, `*_integration_test.go`, `*_chaos_test.go`, `spec-validation/` (results table).
+- **Deps:** T04, T07, T07d, T18, T84 (chaos lane). **(SRE gates, P0)**
+
+### [ ] T112 — Prometheus registry injection: `WithMetricsRegisterer` + private-registry default (SRE-10) [P0] · S
+- **Acceptance:**
+  - [ ] `WithMetricsRegisterer(prometheus.Registerer)` is added; the connection-level default is a **private per-`Connection` registry**, never `prometheus.DefaultRegisterer` (a hidden global §8 forbids), wired into the existing `NewPrometheus*` constructors (which already accept an injected registerer but have no caller today).
+  - [ ] SPEC §6.9/§6.1/§8 document the injection and the private-registry default.
+- **Verify:** SG-1 unit test: two `Dial`s in one process with default metrics do **not** panic; an injected-registerer test asserts metrics register into the provided registry.
+- **Files:** `options_connection.go`, `connection.go`, `metrics/`, SPEC §6.9/§6.1/§8, `connection_test.go`, `README.md`.
+- **Deps:** T111 (SG-1), T04, T07. **(SRE-10, P0)**
+
+### [ ] T113 — Extend default latency histogram buckets (SRE-11) [P1] · S
+- **Acceptance:**
+  - [ ] The default `publisher_publish_seconds` / consumer latency buckets are extended past the current `[0.5…5000]`ms top (add `10s, 30s, 60s`) so the 30s `ConfirmTimeout` + ~20s reconnect-barrier envelope + cross-region RTT are visible, not collapsed into `+Inf`.
+  - [ ] `WithLatencyBuckets` remains the override; SPEC §6.9 explains the envelope rationale (and that the barrier-cap SRE-02/T63 default should sit ≤ the new top bucket).
+- **Verify:** SG-2 mock-channel unit test withholds the ack for 30s and asserts the observation lands in a **finite** bucket, not `+Inf`.
+- **Files:** `metrics/`, SPEC §6.9, `metrics/*_test.go`, `README.md`.
+- **Deps:** T111 (SG-2), T04. **(SRE-11, P1)**
+
+### [ ] T114 — Current-state `connection_degraded{role}` gauge (SRE-12) [P2] · S
+- **Acceptance:**
+  - [ ] A `connection_degraded{role}` **gauge** (0/1) is set to 1 on entering degraded state and 0 on the first successful redeclare — the current-state signal the transition counter `connection_degraded_total` does not provide.
+  - [ ] Listed in SPEC §6.9 mandatory metrics.
+- **Verify:** Unit/`chaos` test drives a connection into degraded state, asserts the gauge reads 1, then 0 after recovery; `goleak` clean.
+- **Files:** `connection.go`, `metrics/`, SPEC §6.1/§6.9, `connection_internal_test.go`, `README.md`.
+- **Deps:** T04, T07, T16. **(SRE-12, P2)** — coordinate with T71's gauges (distinct metric, shared registration path).
+
+### [ ] T115 — `Connection.Health` consumer-liveness aggregation (SRE-13) [P1] · M
+- **Acceptance:**
+  - [ ] `Connection.Health` aggregates consumer-subscription liveness: it returns non-nil while any registered consumer is not currently subscribed (closing the readiness/liveness probe false-green over a silently-dead consumer), in addition to the existing socket + topology-degraded checks.
+  - [ ] SPEC §6.1 documents the semantics and that T61's channel-level self-heal returns `Health` to green once the consumer resubscribes.
+- **Verify:** SG-3 `chaos` test forces a channel-only consumer death and asserts `Connection.Health` returns non-nil while unsubscribed, then nil after T61 reopens + resubscribes; `goleak` clean.
+- **Files:** `connection.go`, `consumer.go`, `batch_consumer.go`, SPEC §6.1, `connection_internal_test.go`, a `chaos` test, `README.md`.
+- **Deps:** T111 (SG-3), T07, T18, T61, T84 (chaos lane). **(SRE-13, P1)** — interacts with T61 (channel-level recovery).
+
+### [ ] T116 — Honest throughput ceiling: §9/§6.2 RTT caveat + `pool/RTT` (SRE-14) [P1] · S
+- **Acceptance:**
+  - [ ] SPEC §9/§6.2 state prominently that the 30k/100k targets are **local-broker (sub-ms RTT)**, that the per-`Publish` ceiling is `pool/RTT` (a pooled channel is held for a full confirm RTT, R10-18/LATER-34), that a remote broker collapses the rate 1–2 orders of magnitude, and that a confirm-latency spike cascades into `ErrChannelPoolExhausted`.
+  - [ ] Every throughput number carries its RTT + hardware + broker config; the async/streaming publish-API decision **remains LATER-34** (not pulled).
+- **Verify:** SG-4 injected-RTT test demonstrates the `pool/RTT` relationship and the `ErrChannelPoolExhausted` onset; the §9 benchmark prose states RTT/hardware/broker.
+- **Files:** SPEC §9/§6.2, the benchmark suite (T44b), `README.md`.
+- **Deps:** T111 (SG-4). **(SRE-14, P1)** — doc + benchmark caveat; coordinate with LATER-34.
+
+### [ ] T117 — Metric label cardinality budget + `queue`/`exchange` opt-out (SRE-15) [P2] · S
+- **Acceptance:**
+  - [ ] SPEC §6.9 documents the cardinality budget (rough series-count math per `queue`/`exchange`) for billions/day across thousands of queues/exchanges.
+  - [ ] An opt-out omits/aggregates the always-on `queue`/`exchange` labels for very-high-fan-out deployments (so they cannot OOM Prometheus during an incident).
+- **Verify:** Unit test asserts the opt-out drops the `queue`/`exchange` label; doc review of the budget.
+- **Files:** `metrics/`, `options_connection.go` (or the metrics-labels option), SPEC §6.9, `metrics/*_test.go`, `README.md`.
+- **Deps:** T04, T19. **(SRE-15, P2)**
+
+### [ ] T118 — Operator runbook (metric→action) + §1-bar→metric audit (SRE-16) [P2] · S
+- **Acceptance:**
+  - [ ] A runbook table (§9 or §6.9) maps each mandatory metric → detect signal → operator action → recovery-verify signal.
+  - [ ] An explicit **§1 "no silent X" bar → metric + example alert query** audit shows every §1 bar has a corresponding always-on metric (surfacing the redelivery leading indicator SRE-05/T71 and the current-degraded signal SRE-12/T114); any bar without one is flagged.
+- **Verify:** A doc test / review checklist asserts every §1 bar and every mandatory metric appears in the table with an alert query.
+- **Files:** SPEC §9/§6.9/§1, `README.md`.
+- **Deps:** T71, T114. **(SRE-16, P2)** — land last so the runbook references every metric the prior tasks added.
+
+### Checkpoint — Phase 16 (Lens 05) closed
+- [ ] T111 gate results (SG-1..SG-4) captured on unit + the **existing** integration/`chaos` lanes (3.13 **and** 4.x where broker-bound); results table committed; downstream tasks cite their gate; **no new build-tag lane** introduced.
+- [ ] Registry footgun closed (SRE-10/T112): `WithMetricsRegisterer` exists; the default is a private per-`Connection` registry (never `DefaultRegisterer`); a double-`Dial` does **not** panic (SG-1).
+- [ ] Incident latency visible (SRE-11/T113): default buckets cover the 30s `ConfirmTimeout` + reconnect-barrier envelope; a 30s stall lands in a finite bucket, not `+Inf` (SG-2).
+- [ ] Current-state degraded signal (SRE-12/T114): `connection_degraded{role}` gauge reads 1 while degraded, 0 after recovery; listed in §6.9.
+- [ ] Readiness false-green killed (SRE-13/T115): `Connection.Health` returns non-nil while a registered consumer is unsubscribed, nil after resubscribe (SG-3); semantics documented.
+- [ ] Capacity honesty (SRE-14/T116): §9/§6.2 state the local-broker caveat + `pool/RTT` ceiling + remote collapse + `ErrChannelPoolExhausted` cascade; every number carries RTT/hardware/broker; async-API stays LATER-34.
+- [ ] Cardinality bounded (SRE-15/T117): §6.9 documents the budget + ships the `queue`/`exchange` opt-out.
+- [ ] Runbook shipped (SRE-16/T118): metric→detect→respond→verify table + every §1 bar mapped to a metric + alert query.
+- [ ] Pull-forwards landed: T67 (succeed-if-≥1-per-role + degraded-capacity boot signal, SRE-08); T72 (dialer keepalive + half-open-write test errors promptly, not at 30s, SRE-09).
+- [ ] Cut-line endorsed: T61/T62/T63/T65/T66/T70/T71 each carry a `Lens-05 (SRE-xx)` detect/respond/verify acceptance bullet; none re-filed, none re-pulled.
+- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 **and** 4.x) **and** the `chaos` lane green; `goleak.VerifyNone` clean.
+- [ ] README observability/reliability copy synced (`WithMetricsRegisterer`, default-bucket change, `connection_degraded` gauge, `Health` consumer-liveness, cardinality opt-out, honest §9 ceiling).
+- [ ] SPEC §10 "Rev 15" note records the Lens-05 pass; no finding re-filed that a prior lens owns; **no** new `LATER.md` entry.
+
 ### Checkpoint — v0.1.0 shipped
 - [ ] Every SPEC §9 success criterion ticked.
 - [ ] `v0.1.0` tag on `main`.
@@ -1746,8 +1863,8 @@ records the pass.
 ---
 
 ## Quick stats
-- Total tasks: **119** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane)).
-- Phases: **15**.
+- Total tasks: **127** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane); Phase 16 (2026-05-28): +T111-T118 Lens-05 SRE/production-operability re-review, pulls T67/T72 forward, extends T61/T62/T63/T65/T66/T70/T71 (cross-lens), no new build-tag lane, no new LATER).
+- Phases: **16**.
 - Estimated sizing: 8× XS · 40× S · 23× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.
