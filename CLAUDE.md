@@ -16,7 +16,7 @@ When the user references "Txx", look it up in `tasks/plan.md` for scope and acce
 make build              # go build ./...
 make test               # go test -race -cover ./...
 make test-stress        # go test -race -tags=stress -count=N -run TestStress (determinism guard; STRESS_COUNT default 200)
-make test-integration   # build tag 'integration' (requires AMQP_TEST_URL set)
+make test-integration   # build tag 'integration' (requires AMQP_TEST_URL + AMQP_TEST_MANAGEMENT_URL; fails if unset)
 make test-conformance   # build tag 'conformance' (requires Docker)
 make test-all           # unit + integration + conformance
 make lint               # golangci-lint run ./...
@@ -31,24 +31,23 @@ Use `docker-compose.integration.yml` to bring up a RabbitMQ identical to CI:
 
 ```
 make integration-up                                           # start the broker (waits for healthy)
-AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ make test-integration
+AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ \
+AMQP_TEST_MANAGEMENT_URL=http://guest:guest@localhost:15672 make test-integration
 AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ make examples-smoke
 make integration-down                                         # stop and remove the broker
 ```
 
-`AMQP_TEST_URL` must be exported or prefixed on the command; without it the integration tests skip via `t.Skip`.
+`AMQP_TEST_URL` must be exported or prefixed on the command; without it the
+integration tests **fail** (`t.Fatal`) rather than skip — the `integration`
+build tag is the opt-in, so a missing broker URL is a misconfiguration, not a
+reason to silently pass.
 
 Tests that read broker-side queue arguments back via the RabbitMQ management
-HTTP API also require **`AMQP_MANAGEMENT_URL`** (e.g.
-`http://guest:guest@localhost:15672`, or `https://…:15671` for TLS). Unlike
-`AMQP_TEST_URL`, a missing `AMQP_MANAGEMENT_URL` **fails** the test rather than
-skipping it — broker-side assertions are configured explicitly, not silently
-dropped. Provide it whenever `AMQP_TEST_URL` is set:
-
-```
-AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ \
-AMQP_MANAGEMENT_URL=http://guest:guest@localhost:15672 make test-integration
-```
+HTTP API also require **`AMQP_TEST_MANAGEMENT_URL`** (e.g.
+`http://guest:guest@localhost:15672`, or `https://…:15671` for TLS) and likewise
+**fail** when it is unset — broker-side assertions are configured explicitly,
+not silently dropped. `make test-integration` runs those tests, so set both
+vars; `make examples-smoke` only needs `AMQP_TEST_URL`.
 
 `examples-build` and `examples-smoke` enforce SPEC §7 "Executable
 examples at checkpoints" + §10 Rev decision 49: every checkpoint

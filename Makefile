@@ -30,7 +30,7 @@ integration-up: ## Start RabbitMQ broker locally via Docker Compose (waits for h
 integration-down: ## Stop and remove the local RabbitMQ broker.
 	docker compose -f docker-compose.integration.yml down
 
-test-integration: ## Run integration tests (requires AMQP_TEST_URL or use 'make integration-up' first).
+test-integration: ## Run integration tests (requires AMQP_TEST_URL + AMQP_TEST_MANAGEMENT_URL; 'make integration-up' starts the broker).
 	$(GO) test -race -tags=integration $(PKG)
 
 test-conformance: ## Run AMQP 0-9-1 conformance tests (requires Docker).

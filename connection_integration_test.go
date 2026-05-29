@@ -17,14 +17,15 @@ import (
 )
 
 // amqpTestURL returns the broker URL for integration tests. The variable
-// AMQP_TEST_URL must be set; tests skip otherwise. This approach avoids
-// pulling testcontainers-go into the module before amqptest/ (T37) is
-// implemented.
+// AMQP_TEST_URL must be set; the test fails (does not skip) otherwise — the
+// integration build tag is the opt-in, so a missing broker URL is a
+// misconfiguration, not a reason to silently pass. This approach avoids pulling
+// testcontainers-go into the module before amqptest/ (T37) is implemented.
 func amqpTestURL(t *testing.T) string {
 	t.Helper()
 	u := os.Getenv("AMQP_TEST_URL")
 	if u == "" {
-		t.Skip("AMQP_TEST_URL not set — skipping integration test")
+		t.Fatal("AMQP_TEST_URL must be set to run integration tests")
 	}
 	return u
 }

@@ -20,7 +20,7 @@ func amqpTestURL(t *testing.T) string {
 	t.Helper()
 	u := os.Getenv("AMQP_TEST_URL")
 	if u == "" {
-		t.Skip("AMQP_TEST_URL not set — skipping integration test")
+		t.Fatal("AMQP_TEST_URL must be set to run integration tests")
 	}
 	return u
 }

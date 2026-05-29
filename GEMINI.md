@@ -35,7 +35,7 @@ This project, **Warren**, is a production-grade, generics-typed Go client for Ra
 ```bash
 make build              # Compile all packages (go build ./...)
 make test               # Run unit tests (with -race and -cover)
-make test-integration   # Run integration tests (requires AMQP_TEST_URL)
+make test-integration   # Run integration tests (requires AMQP_TEST_URL + AMQP_TEST_MANAGEMENT_URL; fails if unset)
 make test-conformance   # Run conformance tests (requires Docker)
 make test-all           # Run all tests (unit + integration + conformance)
 make lint               # Run golangci-lint
@@ -49,7 +49,8 @@ make examples-smoke     # Smoke-run examples end-to-end (requires Docker)
 Use `docker-compose.integration.yml` to spin up a RabbitMQ identical to CI:
 ```bash
 make integration-up
-AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ make test-integration
+AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ \
+AMQP_TEST_MANAGEMENT_URL=http://guest:guest@localhost:15672 make test-integration
 AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ make examples-smoke
 make integration-down
 ```

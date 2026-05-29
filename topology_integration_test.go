@@ -24,21 +24,21 @@ import (
 
 // queueArgsViaManagement reads a queue's declared arguments from the RabbitMQ
 // management HTTP API. The API base (scheme, host, port, credentials) must be
-// supplied explicitly via the AMQP_MANAGEMENT_URL env var, e.g.
+// supplied explicitly via the AMQP_TEST_MANAGEMENT_URL env var, e.g.
 // http://guest:guest@localhost:15672 (or https://…:15671). The test fails — it
 // does not skip — when the var is unset, so a misconfigured environment is loud
 // rather than silently un-asserted. The vhost is taken from amqpURL.
 func queueArgsViaManagement(t *testing.T, amqpURL, queue string) map[string]any {
 	t.Helper()
 
-	mgmt := os.Getenv("AMQP_MANAGEMENT_URL")
+	mgmt := os.Getenv("AMQP_TEST_MANAGEMENT_URL")
 	if mgmt == "" {
-		t.Fatal("AMQP_MANAGEMENT_URL must be set to read broker-side queue arguments " +
+		t.Fatal("AMQP_TEST_MANAGEMENT_URL must be set to read broker-side queue arguments " +
 			"(e.g. http://guest:guest@localhost:15672)")
 	}
 	base, err := url.Parse(mgmt)
-	require.NoError(t, err, "AMQP_MANAGEMENT_URL must be a valid URL")
-	require.NotEmpty(t, base.Host, "AMQP_MANAGEMENT_URL must include host:port (e.g. http://guest:guest@localhost:15672)")
+	require.NoError(t, err, "AMQP_TEST_MANAGEMENT_URL must be a valid URL")
+	require.NotEmpty(t, base.Host, "AMQP_TEST_MANAGEMENT_URL must include host:port (e.g. http://guest:guest@localhost:15672)")
 
 	// vhost comes from the AMQP connection URL; the default vhost is "/".
 	av, err := url.Parse(amqpURL)
