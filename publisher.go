@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -178,13 +179,11 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 	tracker := confirms.New()
 	closeCh := ch.NotifyClose(make(chan *amqp091.Error, 1))
 
-	buf := max(poolSize, 8)
-	// Cap at channelPoolSizeMax: validation already rejects poolSize above this
-	// value, but openPublisherEntry may be called with internal pool sizes before
-	// validation runs, so we enforce the ceiling here too to keep both in sync.
-	if buf > channelPoolSizeMax {
-		buf = channelPoolSizeMax
-	}
+	buf := min(
+		// Cap at channelPoolSizeMax: validation already rejects poolSize above this
+		// value, but openPublisherEntry may be called with internal pool sizes before
+		// validation runs, so we enforce the ceiling here too to keep both in sync.
+		max(poolSize, 8), channelPoolSizeMax)
 
 	entry := publisherEntry{
 		ch:           ch,
@@ -557,12 +556,8 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 			return msg, nil, err
 		}
 		merged := make(Headers, len(msg.Headers)+len(ceHeaders))
-		for k, v := range msg.Headers {
-			merged[k] = v
-		}
-		for k, v := range ceHeaders {
-			merged[k] = v
-		}
+		maps.Copy(merged, msg.Headers)
+		maps.Copy(merged, ceHeaders)
 		msg.Headers = merged
 	}
 	// The codec's content-type (e.g. CloudEvents datacontenttype) is authoritative

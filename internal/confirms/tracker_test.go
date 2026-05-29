@@ -486,11 +486,11 @@ func TestTracker_ConcurrentRegisterAckWait_RaceClean(t *testing.T) {
 	// Publishers: allocate a tag, register it, hand it to the broker, then block
 	// on its own confirm. Concurrent allocation means tags reach Register out of
 	// order across goroutines, exercising orderInsert's binary-insert path too.
-	for p := 0; p < publishers; p++ {
+	for range publishers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 0; i < perPublisher; i++ {
+			for range perPublisher {
 				tag := atomic.AddUint64(&nextTag, 1)
 				require.NoError(t, tr.Register(tag))
 				acks <- tag
@@ -504,7 +504,7 @@ func TestTracker_ConcurrentRegisterAckWait_RaceClean(t *testing.T) {
 	brokerDone := make(chan struct{})
 	go func() {
 		defer close(brokerDone)
-		for k := 0; k < total; k++ {
+		for k := range total {
 			tag := <-acks
 			tr.Ack(tag, k%5 == 0)
 		}

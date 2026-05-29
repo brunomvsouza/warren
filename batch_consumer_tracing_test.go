@@ -285,7 +285,7 @@ func TestBatchConsumer_processBatchSpan_nonLinkingTracerFallback(t *testing.T) {
 	tr := &nonLinkingTracer{}
 	// Guard: this tracer must NOT satisfy LinkingTracer, otherwise the fallback
 	// path under test would not actually be exercised.
-	_, isLinking := interface{}(tr).(warrenotel.LinkingTracer)
+	_, isLinking := any(tr).(warrenotel.LinkingTracer)
 	require.False(t, isLinking, "nonLinkingTracer must not implement LinkingTracer")
 
 	deliveryCh := make(chan amqp091.Delivery, 10)

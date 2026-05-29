@@ -188,7 +188,7 @@ func validateHeaderValue(key string, v any, depth int) error {
 // (e.g. "OrderPlaced") and falls back to the fully-qualified string for unnamed
 // types. Computed once per Publisher/Consumer at build time, never per message.
 func metricsTypeName[M any]() string {
-	t := reflect.TypeOf((*M)(nil)).Elem()
+	t := reflect.TypeFor[M]()
 	if name := t.Name(); name != "" {
 		return name
 	}

@@ -270,7 +270,6 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 		// Wire ackNotify so any per-delivery Ack/Nack sets batch.acked.
 		batch := &Batch[M]{deliveries: toFlush}
 		for _, d := range toFlush {
-			d := d // capture per-iteration
 			d.ackNotify = func() {
 				batch.mu.Lock()
 				batch.acked = true
