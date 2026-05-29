@@ -144,6 +144,16 @@ func Dial(ctx context.Context, options ...Option) (*Connection, error) {
 		return nil, err
 	}
 
+	// Validate the channel pool against the broker-negotiated channel-max.
+	// When WithChannelMax is left at 0 the server drives the ceiling (RabbitMQ
+	// defaults to 2047); a pool larger than that can never be fully populated,
+	// so fail-closed here rather than surfacing channel-open errors lazily.
+	if negMax := c.pubConns[0].negotiatedChannelMax(); negMax > 0 && opts.channelPoolSize > int(negMax) {
+		closeManagedConns(c.pubConns)
+		return nil, fmt.Errorf("%w: WithChannelPoolSize (%d) exceeds the broker-negotiated channel-max (%d)",
+			ErrInvalidOptions, opts.channelPoolSize, negMax)
+	}
+
 	// open consumer connections
 	c.conConns, err = openPool(ctx, "consumer", opts.conConns, &c.opts)
 	if err != nil {
@@ -354,6 +364,18 @@ func (c *Connection) openDeclareChannel(_ context.Context) (topologyChannel, err
 }
 
 // health opens a temporary AMQP channel and closes it to verify liveness.
+// negotiatedChannelMax returns the channel-max the broker negotiated during the
+// AMQP handshake (amqp091 resolves 0 to its 2047 default), or 0 if the socket is
+// not yet established.
+func (mc *managedConn) negotiatedChannelMax() uint16 {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	if mc.raw == nil {
+		return 0
+	}
+	return mc.raw.Config.ChannelMax
+}
+
 func (mc *managedConn) health(_ context.Context) error {
 	mc.barrierMu.Lock()
 	reconnecting := mc.reconnecting
@@ -696,6 +718,14 @@ func validateConnOptions(opts *connOptions) error {
 	if opts.channelPoolSize > channelPoolSizeMax {
 		return fmt.Errorf("%w: WithChannelPoolSize must be ≤ %d; got %d",
 			ErrInvalidOptions, channelPoolSizeMax, opts.channelPoolSize)
+	}
+	// A channel pool larger than the requested channel-max can never be
+	// satisfied. When WithChannelMax is explicitly set (>0) this is caught
+	// fail-fast here, before any socket is opened; when left at 0 the server
+	// negotiates the ceiling, validated post-handshake in Dial.
+	if opts.channelMax > 0 && opts.channelPoolSize > int(opts.channelMax) {
+		return fmt.Errorf("%w: WithChannelPoolSize (%d) exceeds WithChannelMax (%d)",
+			ErrInvalidOptions, opts.channelPoolSize, opts.channelMax)
 	}
 
 	// SASL EXTERNAL: fail-closed
