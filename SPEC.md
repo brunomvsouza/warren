@@ -1300,7 +1300,7 @@ on dead-letter events (TTL expiry, length limit,
    `DeathCountByReason(reason)` and `DeathReasons()` on the
    `Delivery[M]` directly.
 
-2. **Counter B — in-process, keyed by `MessageID`.** A race-free map
+2. **Counter B — in-process, keyed by `MessageID`.** A per-channel map
    keyed by `(channel-instance-id, MessageID)` — falling back to
    `(channel-instance-id, consumer-tag, delivery-tag)` when
    `MessageID` is empty. The channel-instance-id is a UUID generated
@@ -1310,7 +1310,16 @@ on dead-letter events (TTL expiry, length limit,
    `n`, the consumer rewrites the handler's verdict to
    `Nack(requeue=false)` and emits `ErrMaxRedeliveries` via metrics +
    log. The entry is deleted on `Ack` or `Nack(false)` so it does
-   not leak across long-lived consumers.
+   not leak across long-lived consumers. The increment is an **atomic
+   read-modify-write**: the load→check→store/delete runs under a
+   per-channel mutex so that, under `Concurrency(n>1)`, two handler
+   goroutines processing redeliveries of the same key (at-least-once
+   duplicates sharing a `MessageID`) cannot both read the old value
+   and lose an increment. `go test -race` proves only memory-safety
+   here, not lost-update freedom (a memory-safe `sync.Map` still loses
+   updates across a non-atomic RMW); the guarantee is enforced by a
+   behavioural N-goroutine-same-key test asserting the final count
+   equals the number of increments.
 
 Counter B is **process-local**: a consumer restart resets it. Users
 who need cross-process bounding must either (a) use a quorum queue

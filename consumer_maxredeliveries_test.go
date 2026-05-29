@@ -975,3 +975,64 @@ func TestRedeliveryCounter_load_nonInt64ValueReturnsSafeDefault(t *testing.T) {
 	result := cs.load("key")
 	assert.Equal(t, int64(0), result, "non-int64 stored value must return 0 as safe default")
 }
+
+// TestConsumer_MaxRedeliveries_CounterB_AtomicUnderConcurrency is the
+// behavioural guard for Lens-08 (CR-02, Blocker): counter B's load→store in
+// applyCounterB must be an *atomic* read-modify-write. Under Concurrency(n>1),
+// at-least-once duplicates carrying the same MessageId can land on two handler
+// goroutines at once; both call applyCounterB with the same key concurrently.
+//
+// With a non-atomic load→store, the two goroutines read the same value and both
+// write back the same increment, losing one — so MaxRedeliveries undercounts and
+// a poison message loops past its limit. `go test -race` cannot catch this:
+// sync.Map is memory-safe, so the lost update is a *logical* race, not a data
+// race. The only reliable detector is this behavioural assertion that the final
+// count equals the number of increments (N).
+//
+// The limit is set far above N so the exceed/delete branch never fires — this
+// isolates the load→store RMW from the delete-on-exceed reset, making the
+// assertion `count == N` a clean signal of lost-update freedom.
+func TestConsumer_MaxRedeliveries_CounterB_AtomicUnderConcurrency(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	const (
+		n     = 500
+		limit = n + 1000 // exceed path never triggers; isolates the RMW
+	)
+	conn := newFakeConsumerConn(t)
+	c, err := ConsumerFor[string](conn).
+		Queue("testq").
+		MaxRedeliveries(limit).
+		Build()
+	require.NoError(t, err)
+
+	cs := c.counterState.Load()
+	require.NotNil(t, cs)
+
+	const key = "mid:duplicate-message-id"
+
+	var (
+		allowed int64 // applyCounterB returned the original ErrRequeue (increment accepted)
+		start   = make(chan struct{})
+		wg      sync.WaitGroup
+	)
+	wg.Add(n)
+	for range n {
+		go func() {
+			defer wg.Done()
+			<-start // release all goroutines at once to maximise RMW contention
+			if errors.Is(c.applyCounterB(cs, key, ErrRequeue), ErrRequeue) {
+				atomic.AddInt64(&allowed, 1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// Every increment is below the limit, so all N must be allowed (none rewritten).
+	assert.Equal(t, int64(n), atomic.LoadInt64(&allowed),
+		"all %d ErrRequeue increments must be allowed (limit=%d)", n, limit)
+	// The decisive assertion: no increment may be lost.
+	assert.Equal(t, int64(n), cs.load(key),
+		"counter B must equal the number of increments; a lower value proves a lost-update race")
+}

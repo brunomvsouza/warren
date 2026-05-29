@@ -134,8 +134,16 @@ type deliverySub struct {
 //
 // No chanID prefix is needed: each redeliveryCounter instance owns its own sync.Map, so keys are
 // implicitly scoped to the channel that created this instance.
+//
+// mu serialises the load→check→store/delete sequence in applyCounterB so the
+// read-modify-write is *atomic* (Lens-08 / CR-02). sync.Map alone is only
+// memory-safe: two goroutines incrementing the same key could both read the old
+// value and both write the same increment, losing one — a logical lost update
+// that `go test -race` cannot detect. The mutex closes that window; the embedded
+// sync.Map is retained for its lock-free Range/Load fast paths used elsewhere.
 type redeliveryCounter struct {
-	m sync.Map // key: "mid:<MessageID>" or "dlv:<consumerTag>:<deliveryTag>", value: int64
+	mu sync.Mutex
+	m  sync.Map // key: "mid:<MessageID>" or "dlv:<consumerTag>:<deliveryTag>", value: int64
 }
 
 // maxMsgIDKeyLen is the maximum number of bytes of a MessageId that are used as
@@ -781,27 +789,42 @@ func (c *Consumer[M]) applyCounterB(cs *redeliveryCounter, counterBKey string, h
 
 	if !errors.Is(handlerErr, ErrRequeue) {
 		// Ack or Nack(false): clean up the counter B entry to avoid memory leaks.
+		// Take cs.mu so this delete cannot interleave with a concurrent increment
+		// for the same key (a duplicate-MessageId delivery on another slot).
+		cs.mu.Lock()
 		cs.m.Delete(counterBKey)
+		cs.mu.Unlock()
 		return handlerErr
 	}
 
-	// Handler returned ErrRequeue: check counter B before incrementing.
+	// Handler returned ErrRequeue: atomically read-modify-write counter B.
+	// The whole load→check→store/delete runs under cs.mu so concurrent
+	// redeliveries of the same key (at-least-once duplicates sharing a
+	// MessageId) cannot lose an increment (Lens-08 / CR-02). Metric and log
+	// side effects are emitted after releasing the lock to keep the critical
+	// section to the map mutation only.
+	cs.mu.Lock()
 	currentCount := cs.load(counterBKey)
-
 	// "Once incrementing it would exceed n" = current + 1 > n = current >= n.
-	if currentCount+1 > int64(c.maxRedeliveries) {
+	exceeded := currentCount+1 > int64(c.maxRedeliveries)
+	if exceeded {
+		cs.m.Delete(counterBKey)
+	} else {
+		cs.m.Store(counterBKey, currentCount+1)
+	}
+	cs.mu.Unlock()
+
+	if exceeded {
 		// Rewrite verdict: Nack(false) instead of Nack(requeue=true).
 		c.cm.RecordMaxRedeliveries(c.queue, "in-process")
 		c.mc.opts.logger.Warningf(
 			"warren: max redeliveries exceeded for queue %q (cause=in-process, count=%d, limit=%d)",
 			c.queue, currentCount+1, c.maxRedeliveries,
 		)
-		cs.m.Delete(counterBKey)
 		return fmt.Errorf("%w (in-process counter exceeded)", ErrMaxRedeliveries)
 	}
 
-	// Increment and allow Nack(requeue=true) to proceed.
-	cs.m.Store(counterBKey, currentCount+1)
+	// Increment accepted; allow Nack(requeue=true) to proceed.
 	return handlerErr
 }
 
