@@ -545,3 +545,35 @@ interface in `codec/`.
 
 ---
 
+### LATER-41 — Dedicated `ReturnCode(err) (uint16, bool)` accessor to separate `basic.return` codes from channel-close codes
+
+**Context:** `AMQPCode(err) (uint16, bool)` (`errors.go:171–195`, decision 38) returns
+both a `basic.return` reply-code (312 `NO_ROUTE` / 313 `NO_CONSUMERS`, from a `*codeError`
+raised on an unroutable mandatory publish) **and** channel/connection-close reply-codes
+(311/320/402–406/…) through one `(uint16, bool)` with no provenance signal. A caller that
+`switch`-es on the returned code cannot tell which AMQP frame class produced it — a 312
+from a returned message looks identical to a close-code path. Lens-06 (GA-08) ships the
+doc caveat in T126 (combine `AMQPCode` with `errors.Is(err, ErrUnroutable)` to
+disambiguate) but does **not** add a typed accessor.
+
+**Impact:** Callers building routing/alerting logic on the numeric code must remember to
+cross-check `ErrUnroutable` by hand; a naive `switch AMQPCode(err)` mishandles the
+`basic.return` 312/313 space, conflating an unroutable-publish signal with a
+channel-close failure. The two frame classes deserve distinct, self-describing accessors.
+
+**Evidence:** Lens-06 Go-API/library-design spec validation, 2026-05-28 (finding GA-08;
+`spec-validation/06-go-api-library-design-plan.md`). Owner-deferred: T126 ships the §6.8
+caveat now; the typed accessor is non-blocking.
+
+**Suggested solution:** Add a dedicated `ReturnCode(err) (uint16, bool)` that returns a
+code **only** when the error chain carries `ErrUnroutable` (the `basic.return` space),
+leaving `AMQPCode` for channel/connection-close codes; or introduce a small code-class
+enum (`CodeClassReturn` / `CodeClassClose`) so a single accessor reports provenance. Keep
+both `errors.Is`/`As`-friendly and `errorlint`-clean; document in §6.8. Purely additive
+(a new function; no signature change to `AMQPCode`).
+
+**Prerequisites:** T126 (ships the §6.8 `AMQPCode` frame-class caveat this builds on); the
+error taxonomy in `errors.go` + `internal/amqperror`.
+
+---
+
