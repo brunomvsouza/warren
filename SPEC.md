@@ -859,8 +859,13 @@ Semantics:
   `ErrPublishNacked` so the application can re-publish or back off.
 - **`multiple=true` resolution.** The confirm tracker handles `basic.ack`
   and `basic.nack` frames with `multiple=true` efficiently, resolving all
-  outstanding `delivery-tags` up to and including the given tag in a single
-  pass. This is critical for high-throughput batching against RabbitMQ 4.x.
+  outstanding `delivery-tags` up to and including the given tag by advancing a
+  contiguous confirmed low-water-mark over an ascending index of registered
+  tags. Each frame costs **O(resolved)** amortised — the count actually
+  confirmed by the frame, not O(outstanding) — with no per-frame allocation,
+  because the watermark only moves forward and each tag is visited at most once
+  over the channel's lifetime. This is critical for high-throughput batching
+  against RabbitMQ 4.x.
 - **`basic.return` / `basic.ack` correlation for mandatory publishes.**
   For an unroutable mandatory publish, RabbitMQ sends `basic.return`
   *first*, then `basic.ack` (the broker acks because *it* handled the

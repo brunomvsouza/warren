@@ -56,7 +56,14 @@ type waiter struct {
 type Tracker struct {
 	mu      sync.Mutex
 	pending map[uint64]*waiter
-	closed  bool // set by CloseAll; prevents Register on a dead channel
+	// order is an ascending index of registered delivery tags, and head is the
+	// contiguous confirmed low-water-mark into it (Lens-09 PC-11). order[head:]
+	// holds the still-tracked tags plus already-resolved "ghosts" not yet swept.
+	// A multiple=true frame resolves by walking forward from head instead of
+	// scanning and sorting the whole pending map on every frame.
+	order  []uint64
+	head   int
+	closed bool // set by CloseAll; prevents Register on a dead channel
 }
 
 // New creates a ready-to-use Tracker.
@@ -89,6 +96,8 @@ func (t *Tracker) Register(deliveryTag uint64) error {
 		return ErrClosed
 	}
 	t.pending[deliveryTag] = &waiter{done: make(chan error, 1)}
+	t.orderInsert(deliveryTag)
+	t.advanceLowWater()
 	return nil
 }
 
@@ -243,15 +252,63 @@ func (t *Tracker) resolveOne(deliveryTag uint64, baseErr error) {
 
 // resolveUpTo resolves all pending tags ≤ deliveryTag in ascending order.
 // Must be called with t.mu held.
+//
+// It walks the ascending order index forward from the confirmed low-water-mark
+// (head) instead of scanning and sorting the whole pending map. Because head
+// only advances and the index is kept sorted, each tag is visited at most once
+// over the channel's lifetime, so a multiple=true frame costs O(resolved) amortised
+// with no per-frame allocation (Lens-09 PC-11) — not the O(outstanding) scan +
+// O(outstanding·log) sort of the previous design.
 func (t *Tracker) resolveUpTo(deliveryTag uint64, baseErr error) {
-	tags := make([]uint64, 0, len(t.pending))
-	for tag := range t.pending {
-		if tag <= deliveryTag {
-			tags = append(tags, tag)
-		}
+	i := t.head
+	for i < len(t.order) && t.order[i] <= deliveryTag {
+		t.resolveOne(t.order[i], baseErr)
+		i++
 	}
-	slices.Sort(tags)
-	for _, tag := range tags {
-		t.resolveOne(tag, baseErr)
+	t.head = i
+	t.advanceLowWater()
+}
+
+// orderInsert records tag in the ascending order index. Delivery tags on a
+// channel are strictly increasing, so this is an O(1) append in the common case;
+// a binary-search insert keeps the index sorted if tags ever arrive out of order.
+// Must be called with t.mu held.
+func (t *Tracker) orderInsert(tag uint64) {
+	n := len(t.order)
+	if n == 0 || tag > t.order[n-1] {
+		t.order = append(t.order, tag)
+		return
+	}
+	idx, _ := slices.BinarySearch(t.order, tag)
+	t.order = slices.Insert(t.order, idx, tag)
+}
+
+// advanceLowWater drops leading entries from the order index that are no longer
+// pending (resolved-and-deleted ghosts), advancing head to the lowest tag still
+// tracked. Amortised O(1) per tag since head only moves forward. Must be called
+// with t.mu held.
+func (t *Tracker) advanceLowWater() {
+	for t.head < len(t.order) {
+		if _, ok := t.pending[t.order[t.head]]; ok {
+			break
+		}
+		t.head++
+	}
+	t.compactOrder()
+}
+
+// compactOrder reclaims the dead prefix of the order index so it stays bounded by
+// the outstanding window on a long-lived channel. Must be called with t.mu held.
+func (t *Tracker) compactOrder() {
+	switch {
+	case t.head == 0:
+		return
+	case t.head >= len(t.order):
+		t.order = t.order[:0]
+		t.head = 0
+	case t.head > 64 && t.head*2 >= len(t.order):
+		n := copy(t.order, t.order[t.head:])
+		t.order = t.order[:n]
+		t.head = 0
 	}
 }
