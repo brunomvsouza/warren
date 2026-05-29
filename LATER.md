@@ -931,3 +931,35 @@ orderCompactMinPrefix + 1` with `head*2 >= len` it is.
 <!-- LATER-55 resolved (same branch): validate() rejects a raw x-queue-type arg, directing callers to the Type field. -->
 <!-- LATER-56 resolved (same branch): FuzzTopologyExpand locks the validate()+expand() no-panic guarantee. -->
 
+---
+
+### LATER-57 — Adding `x-dead-letter-strategy=at-least-once` 406s on a pre-existing quorum+DLX queue (upgrade hazard)
+
+**Context:** `topology.go` `expand()` now injects `x-dead-letter-strategy=at-least-once` on any quorum queue that has
+a dead-letter exchange (SPEC §10 decision 52, added this session). RabbitMQ includes `x-dead-letter-strategy` in the
+quorum-queue declaration-equivalence check. So a quorum+DLX queue that was first declared by a build *without* the
+injection (the arg absent, broker default `at-most-once`) will be rejected when a build *with* the injection
+re-declares it: `Declare` returns `ErrTopologyMismatch` and a reconnect redeclare drives the connection into the
+degraded state (`ErrTopologyRedeclareFailed`).
+
+**Impact:** None for a fresh deployment (the queue is created with the strategy from the first declare). For an
+*upgrade* across the injection boundary against an already-declared quorum+DLX queue, the operator must delete and
+recreate the queue (quorum-queue args are immutable) or set `x-dead-letter-strategy` via a policy before upgrading.
+warren is pre-v0.1 (no released version), so there are no real upgrades yet — this is a forward-looking
+changelog/migration note for the v0.1 release and for current dev users running against queues declared by an
+earlier checkout.
+
+**Evidence:** `/agent-skills:ship` review of branch `worktree-phase-3-validation`, 2026-05-29. Confirmed empirically
+with a raw `amqp091` probe: redeclaring an existing quorum+DLX queue with the added strategy returned
+`Exception (406) PRECONDITION_FAILED - inequivalent arg 'x-dead-letter-strategy' ... received the value
+'at-least-once' ... but current is none`.
+
+**Suggested solution:** Record the breaking-on-upgrade behaviour in `CHANGELOG.md` (the file is mandated by SPEC
+§4/§8 for pkg.go.dev but does not exist yet — bind this note to that file's creation) and add a short migration
+paragraph: upgrading requires recreating pre-existing quorum+DLX queues (or applying the strategy via policy first).
+Optionally, consider detecting this specific 406 and wrapping it with a more actionable error that names the
+queue-recreation requirement.
+
+**Prerequisites:** the `CHANGELOG.md` creation task (SPEC §4 L179 / §8 L2343 — currently missing) is the natural home
+for the migration note; the optional error-wrapping enhancement is self-contained in `topology.go`/`internal/amqperror`.
+
