@@ -163,6 +163,46 @@ func TestParseXDeath_NegativeCountClamped(t *testing.T) {
 	assert.Equal(t, 0, result.CountByReason("rejected"))
 }
 
+func TestParseXDeath_NoAllocOnNoDLXPath(t *testing.T) {
+	// Lens-09 (PC-08): the byReason map must be allocated lazily, *after* the
+	// early returns. Every delivery without a DLX hop (the common case) hits one
+	// of these no-x-death paths, so allocating a map there would put a heap
+	// allocation on the hot path of 100% of deliveries. Guard it with
+	// AllocsPerRun == 0. Tables are built outside the measured closure so only
+	// ParseXDeath's own allocations are counted.
+	const queue = "myqueue"
+
+	t.Run("nil table", func(t *testing.T) {
+		allocs := testing.AllocsPerRun(100, func() {
+			_ = headers.ParseXDeath(nil, queue)
+		})
+		assert.Zero(t, allocs, "nil-table path must not allocate the byReason map")
+	})
+
+	t.Run("table without x-death key", func(t *testing.T) {
+		tbl := amqp091.Table{"content-type": "application/json"}
+		allocs := testing.AllocsPerRun(100, func() {
+			_ = headers.ParseXDeath(tbl, queue)
+		})
+		assert.Zero(t, allocs, "x-death-absent path must not allocate the byReason map")
+	})
+
+	t.Run("x-death wrong shape", func(t *testing.T) {
+		tbl := amqp091.Table{"x-death": "not a slice"}
+		allocs := testing.AllocsPerRun(100, func() {
+			_ = headers.ParseXDeath(tbl, queue)
+		})
+		assert.Zero(t, allocs, "x-death-wrong-shape path must not allocate the byReason map")
+	})
+}
+
+func TestParseXDeath_CountByReason_NilMapSafe(t *testing.T) {
+	// After the lazy-allocation change, the no-DLX path leaves byReason nil.
+	// CountByReason must still return 0 (reading a nil map is safe in Go).
+	result := headers.ParseXDeath(nil, "myqueue")
+	assert.Equal(t, 0, result.CountByReason("rejected"))
+}
+
 func TestParseXDeath_DuplicateReasonAccumulates(t *testing.T) {
 	// Multiple entries with the same (queue, reason) pair accumulate their counts.
 	// The broker appends a new entry on each DLX hop rather than updating existing ones.
