@@ -1036,3 +1036,66 @@ func TestConsumer_MaxRedeliveries_CounterB_AtomicUnderConcurrency(t *testing.T) 
 	assert.Equal(t, int64(n), cs.load(key),
 		"counter B must equal the number of increments; a lower value proves a lost-update race")
 }
+
+// TestConsumer_MaxRedeliveries_CounterB_ConcurrentRequeueAndDelete_SameKey
+// exercises the OTHER side of the Lens-08 fix: the non-ErrRequeue delete path
+// also takes cs.mu, so a concurrent Ack/Nack(false) (delete) cannot interleave
+// inside an ErrRequeue increment's load→store and resurrect a just-deleted entry.
+//
+// Unlike the pure-increment guard above, the final count here is NON-deterministic
+// by design — a delete may land before or after any given increment, and counter B
+// is a documented soft, process-local heuristic. So this test asserts only what is
+// contractual: the mixed workload runs race-free (under -race), deadlock-free
+// (it completes), leak-free, with no panic, and the final count stays within the
+// valid bound [0, #increments]. Its job is to guard the delete-side locking
+// against a regression that deadlocks or double-locks, not to pin an exact value.
+func TestConsumer_MaxRedeliveries_CounterB_ConcurrentRequeueAndDelete_SameKey(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	const (
+		pairs = 250            // pairs of (one incrementer + one deleter)
+		limit = 2*pairs + 1000 // exceed path never fires
+	)
+	conn := newFakeConsumerConn(t)
+	c, err := ConsumerFor[string](conn).Queue("testq").MaxRedeliveries(limit).Build()
+	require.NoError(t, err)
+
+	cs := c.counterState.Load()
+	require.NotNil(t, cs)
+
+	const key = "mid:duplicate-message-id"
+	plainErr := errors.New("handler failed") // not ErrRequeue → delete path
+
+	var (
+		start = make(chan struct{})
+		wg    sync.WaitGroup
+	)
+	wg.Add(2 * pairs)
+	for range pairs {
+		go func() { // incrementer (ErrRequeue → load→check→store under cs.mu)
+			defer wg.Done()
+			<-start
+			_ = c.applyCounterB(cs, key, ErrRequeue)
+		}()
+		go func() { // deleter (plain error → Delete under cs.mu)
+			defer wg.Done()
+			<-start
+			_ = c.applyCounterB(cs, key, plainErr)
+		}()
+	}
+	close(start)
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("mixed increment/delete workload did not complete — possible deadlock in counter B locking")
+	}
+
+	// Soft bound: the count can be anywhere in [0, #increments] depending on
+	// interleaving, but it must never be negative nor exceed the increments.
+	final := cs.load(key)
+	assert.GreaterOrEqual(t, final, int64(0), "counter B must never be negative")
+	assert.LessOrEqual(t, final, int64(pairs), "counter B must not exceed the number of increments")
+}
