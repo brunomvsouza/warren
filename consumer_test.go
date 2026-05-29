@@ -382,6 +382,9 @@ func TestConsumer_Consume_DecodeFailure_NackNoRequeue(t *testing.T) {
 	}
 	<-done
 	assert.Equal(t, 1, cm.decodeErrors)
+	// The consumer threads its message type (M = string) into RecordHandler so
+	// an enabled message_type label carries a real value (not "").
+	assert.Equal(t, "string", cm.lastMessageType)
 }
 
 func TestConsumer_Consume_CodecPanic_NackNoRequeue(t *testing.T) {
@@ -1028,6 +1031,7 @@ func (f *fakeAcknowledger) Reject(_ uint64, _ bool) error { return nil }
 type countingConsumerMetrics struct {
 	metrics.NoOpConsumerMetrics
 	decodeErrors    int
+	lastMessageType string
 	handlerTimeouts int
 	channelAborts   int
 	cancelled       int
@@ -1037,7 +1041,8 @@ type countingConsumerMetrics struct {
 	cancelledNotify chan struct{} // closed on first RecordCancelled call; may be nil
 }
 
-func (c *countingConsumerMetrics) RecordHandler(_, _, outcome string, _ time.Duration) {
+func (c *countingConsumerMetrics) RecordHandler(_, messageType, outcome string, _ time.Duration) {
+	c.lastMessageType = messageType
 	if outcome == "decode_error" {
 		c.decodeErrors++
 	}

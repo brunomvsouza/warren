@@ -235,6 +235,21 @@ func TestPrometheusPublisherMetrics_routingKeyOnly(t *testing.T) {
 	assert.NotContains(t, labels, "message_type")
 }
 
+func TestPrometheusPublisherMetrics_messageTypeOnly(t *testing.T) {
+	// Exercises the message-type-only RecordPublish branch: the histogram is
+	// registered as {exchange, outcome, message_type}, so a label-order bug here
+	// would panic with a Prometheus cardinality mismatch.
+	reg := prometheus.NewRegistry()
+	m, err := metrics.NewPrometheusPublisherMetrics(reg, nil, metrics.MetricsLabelMessageType)
+	require.NoError(t, err)
+
+	m.RecordPublish("events", "orders.created", "OrderCreated", "ack", time.Millisecond)
+
+	labels := labelsForMetric(t, reg, "publisher_publish_seconds")
+	assert.Equal(t, "OrderCreated", labels["message_type"])
+	assert.NotContains(t, labels, "routing_key")
+}
+
 func TestPrometheusConsumerMetrics_messageTypeLabelWhenEnabled(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m, err := metrics.NewPrometheusConsumerMetrics(reg, nil, metrics.MetricsLabelMessageType)
