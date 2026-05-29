@@ -477,11 +477,20 @@ func (t *Topology) validate() error {
 		}
 		queueNames[q.Name] = struct{}{}
 
-		// x-queue-type is set by the library from the Type field. Accepting it
-		// raw in Args would create a second source of truth that bypasses the
-		// type-gated expansion (e.g. the at-least-once DLX strategy keys on Type).
-		if _, raw := q.Args["x-queue-type"]; raw {
-			return fmt.Errorf("%w: Queue %q: set the Type field instead of Args[\"x-queue-type\"]", ErrInvalidOptions, q.Name)
+		// These args are set by the library from dedicated typed fields.
+		// Accepting them raw in Args would create a second source of truth that
+		// bypasses the type-gated expansion (e.g. the at-least-once DLX strategy
+		// keys on Type). x-dead-letter-* keys are intentionally absent here —
+		// the manual dead-letter path sets them directly.
+		for _, managed := range [...]struct{ key, field string }{
+			{"x-queue-type", "Type"},
+			{"x-delivery-limit", "DeliveryLimit"},
+			{"x-single-active-consumer", "SingleActiveConsumer"},
+			{"x-max-priority", "MaxPriority"},
+		} {
+			if _, raw := q.Args[managed.key]; raw {
+				return fmt.Errorf("%w: Queue %q: set the %s field instead of Args[%q]", ErrInvalidOptions, q.Name, managed.field, managed.key)
+			}
 		}
 
 		if _, ok := validQueueTypes[q.Type]; !ok {
