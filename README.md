@@ -255,7 +255,8 @@ make test-stress        # hammer scheduling-sensitive tests (-race, stress tag)
 make lint               # golangci-lint
 
 make integration-up     # RabbitMQ via Docker Compose
-AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ make test-integration
+AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ \
+AMQP_TEST_MANAGEMENT_URL=http://guest:guest@localhost:15672 make test-integration
 make integration-down
 ```
 
