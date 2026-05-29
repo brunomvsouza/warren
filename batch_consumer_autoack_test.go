@@ -1866,6 +1866,14 @@ func TestBatchConsumer_HandlerTimeout_CtxCancelledDuringHandler_NoFrame(t *testi
 	bc.deliveryCh = deliveryCh
 	defer func() { _ = bc.Close(context.Background()) }()
 
+	// selectCommitted fires once the handler-timeout select has committed to the
+	// hCtx.Done() (outer-ctx-cancel) branch, just before it drains handlerDone. Without
+	// this seam the test would race the handler's successful return (handlerDone ready,
+	// → ack) against hCtx.Done() (ready, → no frame): Go selects uniformly at random when
+	// both are ready, so an ack would leak intermittently under CI scheduling pressure.
+	selectCommitted := make(chan struct{})
+	bc.testHookBeforeTimeoutDrain = func() { close(selectCommitted) }
+
 	var mu sync.Mutex
 	var ackCalls, nackCalls int
 	fa := &fakeAcknowledger{
@@ -1903,6 +1911,15 @@ func TestBatchConsumer_HandlerTimeout_CtxCancelledDuringHandler_NoFrame(t *testi
 	// Cancel parent ctx while handler is still blocked on handlerCanReturn.
 	// hCtx.Err() == context.Canceled (not DeadlineExceeded) → no ack/nack emitted.
 	cancel()
+
+	// Wait until the select has committed to the hCtx.Done() branch. Because the handler
+	// is still blocked on handlerCanReturn, handlerDone is guaranteed empty at this point,
+	// so the select can only have picked hCtx.Done() — the choice is now deterministic.
+	select {
+	case <-selectCommitted:
+	case <-time.After(time.Second):
+		t.Fatal("select did not commit to the ctx-done branch in time")
+	}
 
 	// Unblock the handler so <-handlerDone drains cleanly and Consume returns.
 	close(handlerCanReturn)

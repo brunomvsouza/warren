@@ -168,6 +168,14 @@ type BatchConsumer[M any] struct {
 	// returns it with done=nil (channel-close detection not exercised).
 	deliveryCh chan amqp091.Delivery
 
+	// testHookBeforeTimeoutDrain, when non-nil, is invoked inside the handler-timeout
+	// select's hCtx.Done() branch immediately before draining handlerDone. It is a
+	// test-only synchronization seam (nil in production, a no-op) that lets a test
+	// confirm the select has committed to the ctx-done branch before unblocking the
+	// handler goroutine — making the "no frame on outer-ctx cancel" assertion
+	// deterministic under -race instead of racing handlerDone vs hCtx.Done().
+	testHookBeforeTimeoutDrain func()
+
 	closedCh  chan struct{}
 	closeOnce sync.Once
 	started   atomic.Bool
@@ -336,6 +344,9 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 				// end, not a message outcome. No verdict is stamped on the span — mirroring
 				// Consumer.dispatch's outer-ctx-cancel path — and the deferred span.End()
 				// still closes it.
+				if c.testHookBeforeTimeoutDrain != nil {
+					c.testHookBeforeTimeoutDrain()
+				}
 				<-handlerDone // drain goroutine
 			}
 			return
