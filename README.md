@@ -251,6 +251,7 @@ if err := pub.Publish(ctx, msg); err != nil {
 ```bash
 make build              # compile all packages
 make test               # unit tests (-race -cover)
+make test-stress        # hammer scheduling-sensitive tests (-race, stress tag)
 make lint               # golangci-lint
 
 make integration-up     # RabbitMQ via Docker Compose

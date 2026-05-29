@@ -1887,14 +1887,16 @@ func TestBatchConsumer_HandlerTimeout_CtxCancelledDuringHandler_NoFrame(t *testi
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var handlerCtxErr error // read after <-done (happens-before via the channel)
 	done := make(chan error, 1)
 	go func() {
-		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+		done <- bc.Consume(ctx, func(hctx context.Context, _ *Batch[string]) error {
 			close(handlerStarted)
 			// Block on a test-controlled channel (not hCtx) so handlerDone stays empty.
 			// Cancelling ctx makes hCtx.Done() fire in the timeout select while
 			// handlerDone is not yet ready → select deterministically picks hCtx.Done().
 			<-handlerCanReturn
+			handlerCtxErr = hctx.Err() // by release time the cancel has propagated
 			return nil
 		})
 	}()
@@ -1925,6 +1927,11 @@ func TestBatchConsumer_HandlerTimeout_CtxCancelledDuringHandler_NoFrame(t *testi
 	close(handlerCanReturn)
 
 	require.NoError(t, <-done)
+
+	// The branch must have been taken for the right reason: outer-ctx cancel
+	// (context.Canceled), not a HandlerTimeout deadline (context.DeadlineExceeded).
+	assert.ErrorIs(t, handlerCtxErr, context.Canceled,
+		"handler ctx must carry Canceled, confirming the cancel branch (not the deadline) was taken")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -1958,8 +1965,9 @@ func (c *captureMaxRedeliveriesMetrics) RecordHandler(queue, outcome string, _ t
 // captureConsumerMetrics records handler calls for assertions.
 type captureConsumerMetrics struct {
 	metrics.NoOpConsumerMetrics
-	mu      sync.Mutex
-	records []struct {
+	mu       sync.Mutex
+	timeouts int
+	records  []struct {
 		queue   string
 		outcome string
 		elapsed time.Duration
@@ -1973,5 +1981,11 @@ func (c *captureConsumerMetrics) RecordHandler(queue, outcome string, elapsed ti
 		outcome string
 		elapsed time.Duration
 	}{queue, outcome, elapsed})
+	c.mu.Unlock()
+}
+
+func (c *captureConsumerMetrics) RecordHandlerTimeout(_ string) {
+	c.mu.Lock()
+	c.timeouts++
 	c.mu.Unlock()
 }
