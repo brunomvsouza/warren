@@ -117,6 +117,62 @@ func TestBatchConsumer_processBatchSpan_linksAndOutcome(t *testing.T) {
 	assert.Len(t, linkedTraces, 3, "the three links must point at three distinct producer traces")
 }
 
+// TestBatchConsumer_processBatchSpan_linksOnlyValidProducerContext asserts that a
+// delivery arriving with no producer traceparent contributes NO span Link:
+// startBatchSpan must filter out invalid (background) contexts so a downstream
+// LinkingTracer adapter is never handed an empty-context Link (LATER-62). The
+// otel.Link godoc already states "A Context with no valid span context contributes
+// no Link" — this pins the library side of that contract.
+func TestBatchConsumer_processBatchSpan_linksOnlyValidProducerContext(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	tr := &recordingTracer{}
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	bc := newTracedBatchConsumer(t, tr, deliveryCh, 3)
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error { return nil })
+	}()
+
+	// Two messages carry a producer traceparent; the middle one arrives with no
+	// headers (Extract returns context.Background(), an invalid span context).
+	deliveryCh <- markerDelivery(1, "a", 11, 21)
+	deliveryCh <- amqp091.Delivery{
+		DeliveryTag:  2,
+		Body:         []byte(`"b"`),
+		ContentType:  "application/json",
+		Acknowledger: &fakeAcknowledger{},
+	}
+	deliveryCh <- markerDelivery(3, "c", 13, 23)
+
+	assert.Eventually(t, func() bool { return tr.only() != nil }, time.Second, 10*time.Millisecond,
+		"expected exactly one process_batch span")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	span := tr.only()
+	require.NotNil(t, span)
+
+	// The batch still counts all three messages …
+	count, ok := span.attr("messaging.batch.message_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(3), count.AsInt64())
+
+	// … but only the two with a valid producer context contribute a Link.
+	require.Len(t, span.links, 2,
+		"only deliveries carrying a valid producer trace context may contribute a Link")
+	for _, l := range span.links {
+		sc := trace.SpanContextFromContext(l.Context)
+		assert.True(t, sc.IsValid(), "no Link may carry an invalid (background) span context")
+	}
+}
+
 // — process_batch span: handler error stamps the nack outcome ————————————————
 
 func TestBatchConsumer_processBatchSpan_errorOutcome(t *testing.T) {

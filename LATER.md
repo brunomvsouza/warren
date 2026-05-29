@@ -1072,22 +1072,8 @@ must be hit exactly — inject a synthetic marshal failure through a seam. Low v
 
 ---
 
-### LATER-62 — BatchConsumer span Links include deliveries with no valid producer trace context
-
-**Context:** `startBatchSpan` (`batch_consumer.go:478-482`) builds one `otel.Link` per delivery via
-`propagator.Extract(d.raw.Headers)`, including deliveries with no `traceparent` (Extract returns `context.Background()`,
-i.e. an invalid span context). The `otel.Link` godoc (`otel/tracer.go:50-52`) states "A Context with no valid span
-context contributes no Link," but enforcement is delegated entirely to the downstream (user-supplied) `LinkingTracer`
-adapter; the library hands it invalid-context Links.
-
-**Impact:** contract risk only, not exercisable today — no `LinkingTracer` SDK adapter ships in Phase 6, so nothing
-consumes the invalid Links yet. A naive adapter doing `trace.LinkFromContext` per Link could emit empty/no-op links.
-
-**Evidence:** Phase 6 `/ship` code review, 2026-05-29 (code-reviewer Suggestion).
-
-**Suggested solution:** filter with `if c.propagator.ActiveContext(linkCtx)` before appending, so only deliveries with a
-valid producer context contribute a Link.
-
-**Prerequisites:** T38 (the `otel/` release example wires a real `LinkingTracer` SDK adapter) — closing this matters
-once a concrete adapter actually consumes the Links.
+<!-- LATER-62 resolved (Phase 6 validation): startBatchSpan now skips deliveries whose producer
+     context is invalid (Extract → context.Background()) via propagator.ActiveContext, so a
+     LinkingTracer adapter only ever receives Links with a valid producer span context. Pinned by
+     TestBatchConsumer_processBatchSpan_linksOnlyValidProducerContext. -->
 
