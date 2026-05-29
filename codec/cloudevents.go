@@ -23,7 +23,20 @@ const (
 	// bridges 0-9-1 headers to AMQP 1.0 application-properties, so a non-Go
 	// AMQP-1.0 CloudEvents client reads these attributes unchanged.
 	ceAMQPPrefix = "cloudEvents:"
+	// maxCEBinaryExtensions bounds the number of cloudEvents:-prefixed extension
+	// attributes the binary decoder reconstructs from one delivery's headers,
+	// mirroring the maxHeaderDepth bounding philosophy. Realistic CloudEvents carry
+	// a handful of extensions; the AMQP frame size and shortstr (≤255B) header-key
+	// limits already bound the input, so this is defense-in-depth against a
+	// pathological extension count rather than a live vulnerability.
+	maxCEBinaryExtensions = 128
 )
+
+// marshalEvent serialises a validated CloudEvents envelope. It is a package var so
+// a test can inject a failure and cover the otherwise-unreachable json.Marshal
+// error branch in ceStructuredCodec.Encode (a validated cloudevents.Event always
+// marshals). Production always uses encoding/json.
+var marshalEvent = json.Marshal
 
 // ceStandardAttrs are the context-attribute names handled as typed event fields
 // (the rest of the cloudEvents:-prefixed headers are extensions). datacontenttype
@@ -84,7 +97,7 @@ func (c *ceStructuredCodec) Encode(v any) ([]byte, error) {
 	if err := ev.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
-	out, err := json.Marshal(ev)
+	out, err := marshalEvent(ev)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
@@ -225,6 +238,7 @@ func (c *ceBinaryCodec) DecodeWithHeaders(body []byte, headers map[string]any, c
 		ev.SetTime(ts)
 	}
 
+	extCount := 0
 	for k := range headers {
 		if !strings.HasPrefix(k, ceAMQPPrefix) {
 			continue
@@ -236,6 +250,10 @@ func (c *ceBinaryCodec) DecodeWithHeaders(body []byte, headers map[string]any, c
 		s, ok := ceHeaderString(headers, k)
 		if !ok {
 			continue
+		}
+		extCount++
+		if extCount > maxCEBinaryExtensions {
+			return fmt.Errorf("%w: CloudEvents binary message carries more than %d extension attributes", ErrInvalidMessage, maxCEBinaryExtensions)
 		}
 		ev.SetExtension(name, s)
 	}
