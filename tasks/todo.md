@@ -478,10 +478,10 @@ workloads.
 - **Deps:** T16. (`deadletter/` also depends on T15 for DLX expansion semantics — already a prerequisite of T16.)
 
 ### Checkpoint — Phase 3 done
-- [ ] Topology declare idempotent under repeat.
-- [ ] Mismatch detected and surfaced.
-- [ ] AttachTo re-declares cleanly after broker restart.
-- [ ] **`examples/topology/main.go` and `examples/deadletter/main.go` build (unit lane) and smoke-run end-to-end (integration lane)** per T16b — SPEC §7 + Rev decision 49.
+- [x] Topology declare idempotent under repeat.
+- [x] Mismatch detected and surfaced.
+- [x] AttachTo re-declares cleanly after broker restart.
+- [x] **`examples/topology/main.go` and `examples/deadletter/main.go` build (unit lane) and smoke-run end-to-end (integration lane)** per T16b — SPEC §7 + Rev decision 49.
 - [ ] **Review with human before Phase 4.**
 
 ---
