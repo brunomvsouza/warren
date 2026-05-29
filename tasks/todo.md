@@ -1246,6 +1246,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
   - [ ] Auto-declared `<source>.dlq` is `Durable` (quorum-capable) with configurable bounds (`x-max-length`/`x-max-length-bytes`).
   - [ ] A `Consumer` with `MaxRedeliveries>0` and a wired `Topology` lacking a DLX for the source queue warns at `Build` and increments a drop metric (parity with `Replier`'s `replier_drop_no_dlx_total`).
   - [ ] **Lens-05 (SRE-03):** highest blast radius in the spec — an unbounded DLQ fills disk → broker-wide `connection.blocked` (one service's poison storm → cluster-wide publish outage); bound the DLQ *by default* (overflow `drop-head`/`reject` is a deliberate bound, not unbounded) and emit a DLQ-depth signal so the storm is visible *before* the broker alarm.
+  - [ ] **Lens-07 (ST-08):** the unbounded DLQ is an *attacker-reachable* resource-exhaustion vector (a producer's poison flood → disk-fill → broker-wide `connection.blocked` → cluster-wide publish outage); the default bound is the security control, asserted under an *adversarial* poison flood (not just an accidental one).
 - **Verify:** Integration: nacked-poison lands in a durable bounded DLQ. Unit: consumer `Build` warns + metric increments when no DLX.
 - **Files:** `topology.go`, `consumer.go`, `consumer_builder.go`, `metrics/`.
 - **Deps:** T15, T47, T18, T30. **(R10-10, P1.3)**
@@ -1993,6 +1994,161 @@ lands in the same PR; a SPEC §10 "Rev 16" note records the pass.
 - [ ] README synced (metrics-default correction, `PrefetchBytes` removal, `ExchangeBindings`, independent-observability semantics).
 - [ ] SPEC §10 "Rev 16" note records the Lens-06 pass; no finding re-filed that a prior task owns (GA-03→T112, GA-05→T68/T69, GA-06→T70/T71, GA-09→T37); exactly **one** new `LATER.md` entry (LATER-41); T119–T129 contiguous, no duplicate IDs.
 
+## Phase 18 — Security & Threat-Modeling Re-review (Lens 07: credential confidentiality, fail-closed controls, untrusted-input boundedness, supply-chain surface)
+
+Closes the Lens-07 adversarial spec validation
+(`spec-validation/07-security-threat-modeling.md`, findings `ST-01..ST-14`; brief
+`spec-validation/07-security-threat-modeling-plan.md`). Lens verdict:
+**GO-WITH-CHANGES** — the posture is fundamentally sound (the `internal/redact`
+choke-point holds on owned egress incl. wrapped errors; the codec/handler
+panic-recover is type-only `%T`; bodies are never logged and never decompressed;
+internal buffers are bounded; `403` is permanent and never publish-retried; SASL
+EXTERNAL is fail-closed-validated; `UserID` is client-side-checked) — but the review
+found **one must-fix Blocker, a fail-open inbound DoS**: there is **no consume-side
+message-size cap** (`MaxMessageSizeBytes` §6.2 L796 is publish-side only), so a single
+hostile/buggy producer ships a ~512 MiB body that `amqp091` reassembles **in memory**
+before the codec, OOMing the consumer (security analog of the Lens-06 GA-01 Blocker;
+previously tracked **LOW as LATER-35**, now **re-classified Blocker and promoted to
+T131**); plus **one High** fail-open confidentiality gap (ST-01: PLAIN credentials
+base64-cleartext over `amqp://` with no warning). Owner decisions (2026-05-29,
+recommended dispositions, overridable before execution): **D1** inbound cap default
+**16 MiB** (`0` disables), over-cap → `ErrMessageTooLarge` + `Nack(requeue=false)` +
+drop metric, per-message for `BatchConsumer`; **D2** PLAIN-cleartext = **warn-only at
+Dial** for v0.1; **D3** codec split = **build-tag** CloudEvents (non-breaking);
+**D4** EXTERNAL principal = **doc-only** (CN + `ssl_cert_login_from` divergence;
+config → LATER-42); **D5** reconnect on permanent auth = **stop + surface
+`ErrAccessRefused` + degrade** (no 403 loop). **No new build-tag lane for the gates**
+— TG-1..TG-5 ride the existing unit + `integration` lanes (3.13 + 4.x); the T135
+codec build-tag is a *compilation* tag, not a CI lane. **One** finding is already
+owned by a prior-lens task and is **not** re-filed (ST-08→**T65**, gains a `Lens-07
+(ST-08)` bullet). Exactly **one** new `LATER.md` entry (LATER-42; LATER-43 only if D3
+is overridden to defer); the ST-06 fix **promotes/supersedes the pre-existing
+LATER-35**. **Gate task T130 runs first**; no SPEC edit to an affected section, and no
+fix, lands before its gate returns. Per-task SPEC amendment lands in the same PR; a
+SPEC §10 "Rev 17" note records the pass.
+
+### [ ] T130 — Verification gates TG-1–TG-5 (unit + existing `integration` lane, 3.13 + 4.x) [P0] · S
+- **Acceptance:**
+  - [ ] Ground truth captured (unit + the **existing** `integration` lane where broker-bound — **no new build-tag lane**) for: **TG-1** that a real `amqp091.Dial`/`DialConfig` failure with `amqp://user:secret@badhost` does **not** surface `secret` in warren's returned/wrapped error chain, any `log` adapter line, **or** the `amqp091` package `Logger` (capture the raw driver error-string shape); **TG-2** that a single ~256 MiB body is reassembled by `amqp091` **in memory before the codec runs** with **no consume-side cap** (measure consumer RSS; confirm it scales with body size independent of `FrameMax`); **TG-3** that EXTERNAL principal extraction = **CN** of the first client cert (`connection.go:122`) and how the client-side `UserID` check behaves under `ssl_cert_login_from` = `common_name` / `distinguished_name` / `subject_alternative_name`; **TG-4** whether forcing a reconnect against revoked creds makes the supervisor loop on **403 `ACCESS_REFUSED`** indefinitely (capture loop timing + log-spam) or surface/degrade; **TG-5** via `go list -deps ./...` + `go mod graph` the transitive surface `cloudevents/sdk-go/v2` adds to a **core** import and that a user cannot avoid it today.
+  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 17**.
+- **Verify:** Unit + integration lane (3.13 + 4.x where broker-bound) green with the TG assertions; the gate table is reviewable.
+- **Files:** `connection_internal_test.go`, `consumer_internal_test.go`, `*_integration_test.go`, `spec-validation/` (results table).
+- **Deps:** T07, T07c, T07d, T13, T18, T34b. **(ST gates, P0)**
+
+### [ ] T131 — Consume-side `MaxInboundMessageSizeBytes`: close the fail-open inbound DoS (ST-06, Blocker; supersedes LATER-35) [P0] · M
+- **Acceptance:**
+  - [ ] `MaxInboundMessageSizeBytes` added to `ConsumerBuilder` and `BatchConsumerBuilder` (default **16 MiB** mirroring the publish guard; `0` disables explicitly); **per-message** for `BatchConsumer`.
+  - [ ] An oversized delivery is rejected **before** the codec runs, fail-closed: `Nack(requeue=false)` + a classifiable `ErrMessageTooLarge` (DLQ if wired, observable, never a silent drop) + a `too_large` drop metric.
+  - [ ] §6.2 frame-size prose (L703–727) gains the "frame-max bounds frames, not the reassembled body — the inbound cap is the body guard" note; §6.3 documents the symmetry with the publish guard and that the cap measures the **encoded body** (cf. LATER-37 for the HeaderCodec-header gap); **LATER-35 promoted/superseded** (re-classified LOW→Blocker by the security lens).
+- **Verify:** TG-2 integration test publishes an over-cap body and asserts the consumer RSS stays bounded and the message lands in the DLQ (when wired), not an OOM; a unit test asserts the pre-codec reject + the `too_large` metric; `goleak` clean.
+- **Files:** `consumer_builder.go`, `batch_consumer_builder.go`, `consumer.go`, `batch_consumer.go`, `errors.go`, SPEC §6.2/§6.3, `metrics/`, `*_test.go`, `*_integration_test.go`, `LATER.md`, `README.md`.
+- **Deps:** T130 (TG-2), T18, T22, T47. **(ST-06, P0)** — the lone Blocker; land first.
+
+### [ ] T132 — `Dial`-time warning for PLAIN credentials over plaintext `amqp://` (ST-01, High; owner decision D2 warn-only) [P1] · S
+- **Acceptance:**
+  - [ ] A `Dial` with `WithAuth`/PLAIN over a non-TLS `amqp://` endpoint emits a warning through the `log` adapter (password travels base64-cleartext); §6.1 Authentication documents the exposure alongside the EXTERNAL fail-closed block.
+  - [ ] Warn-only for v0.1 (no behaviour break; `amqp://` still works); an opt-in acknowledgement (`AllowInsecureAuth()`) is noted for v1.0.
+- **Verify:** A unit test asserts the warning fires for PLAIN-over-`amqp://` and that EXTERNAL-over-`amqp://` remains a fail-closed `ErrInvalidOptions` (decision 35 unchanged); `make lint` clean.
+- **Files:** `connection.go`, `options_connection.go`, SPEC §6.1, `connection_internal_test.go`, `README.md`.
+- **Deps:** T07, T34b. **(ST-01, P1)**
+
+### [ ] T133 — Guarantee wrapped-error redaction + neutralise the `amqp091` `Logger` (ST-02, Med) [P1] · S
+- **Acceptance:**
+  - [ ] §8 makes explicit that the redaction guarantee covers errors **wrapped from `amqp091`** (not only wrapper-formatted strings); the wrapped dial error stays re-redacted (`connection.go:397`), now spec-pinned for wrapped errors.
+  - [ ] The `amqp091` package-level `Logger` (the un-owned egress) is pinned to a redacting adapter or a no-op by default, **or** documented that callers who enable it must redact.
+- **Verify:** An **end-to-end** test dials a bad host with `amqp://user:secret@…` and asserts `secret` appears in no returned error string, no `log` line, and no `amqp091` `Logger` output; `errorlint` clean.
+- **Files:** `connection.go`, SPEC §8/§6.9, `connection_internal_test.go`, `*_integration_test.go`, `README.md`.
+- **Deps:** T130 (TG-1), T07c. **(ST-02, P1)**
+
+### [ ] T134 — Payload-safe egress: never-log-bodies + panic-value type-only (ST-03/ST-14, Med + Low-Med) [P2] · S
+- **Acceptance:**
+  - [ ] (ST-03) "Never log message payloads / bodies" is added to the §8 *Never* list (today only credentials); a §9 criterion is backed by a grep/AST test that no non-test code path formats a body into a log/error string.
+  - [ ] (ST-14) §6.9 L2047 "wrapping the recovered value" is corrected to "wrapping the recovered value's **type only — never its content**" (matches the code, which stores `%T`).
+- **Verify:** A runtime test that `OnReturn` and the decode-error path emit no body bytes; a panic-with-payload test asserts no payload bytes in the resulting error string; the grep/AST test passes.
+- **Files:** SPEC §8/§6.9/§9, `consumer_test.go`, `publisher_test.go`, a grep/AST guard test, `README.md`.
+- **Deps:** T13, T18, T73. **(ST-03/ST-14, P2)** — code already correct; locks the spec + adds regression tests.
+
+### [ ] T135 — Build-tag the CloudEvents codec to keep the core dependency-light (ST-10, Med; owner decision D3 build-tag) [P1] · M
+- **Acceptance:**
+  - [ ] The CloudEvents codec is behind a `//go:build` tag so a core (non-cloudevents) import does **not** pull `cloudevents/sdk-go/v2`'s transitive closure (Protobuf assessed the same way); §2 (deps) + §6.9 amend to state the core stays dependency-light and how to opt into the heavy codecs.
+  - [ ] If the owner overrides D3 to a **sub-module** split (breaking, import-path change → §8 Ask-first) or to accept+document, **LATER-43** is filed for the full split and T135 ships as doc-only.
+- **Verify:** A build/import test proves a core import excludes `cloudevents/sdk-go/v2` (TG-5 surface quantified); `make build` + `make examples-build` green with and without the codec tag.
+- **Files:** `codec/cloudevents.go` (+ build tags), `go.mod`, SPEC §2/§6.9, a build/import test, possibly `Makefile`/CI, `README.md`.
+- **Deps:** T130 (TG-5), T25, T26. **(ST-10, P1)** — may file LATER-43 only if D3 overridden.
+
+### [ ] T136 — Document EXTERNAL CN principal extraction + `ssl_cert_login_from` divergence (ST-04, Med; owner decision D4 doc-only) [P2] · XS
+- **Acceptance:**
+  - [ ] §6.5/§6.1 + decision 35 document that warren extracts the EXTERNAL principal from the cert **CN** (`connection.go:122`) and that RabbitMQ's `ssl_cert_login_from` (CN / DN / SAN) must match or the client-side `UserID` check diverges (false reject, or a value the broker 406s).
+  - [ ] The R10-4 caveat (L3070) is extended to the **extraction** divergence (not only username-rewriting backends); empty `UserID` is recommended under non-CN broker mappings; **LATER-42** is filed for configurable SAN/DN extraction.
+- **Verify:** The §6.5/§6.1 + decision 35 wording matches `connection.go:122`; TG-3's characterisation is cited; `LATER.md` has a well-formed LATER-42.
+- **Files:** SPEC §6.1/§6.5/§10 dec.35, `LATER.md`, `README.md`.
+- **Deps:** T130 (TG-3), T13, T34b. **(ST-04, P2)** — files LATER-42.
+
+### [ ] T137 — `InsecureSkipVerify` `Dial`-time warning + TLS-floor note (ST-11, Low-Med) [P2] · XS
+- **Acceptance:**
+  - [ ] A `Dial` with `InsecureSkipVerify=true` on an `amqps://` connection emits a warning through the `log` adapter (a partial doc-only mitigation today, L758–759 → a runtime control).
+  - [ ] §6.1 states warren relies on Go's default min TLS (1.2+) and never overrides the caller's `*tls.Config` (never sets `InsecureSkipVerify`, `options_connection.go:114`). Non-breaking.
+- **Verify:** A unit test asserts the warning fires for `InsecureSkipVerify=true` on `amqps://` and is silent otherwise; `make lint` clean.
+- **Files:** `connection.go`, SPEC §6.1, `connection_internal_test.go`, `README.md`.
+- **Deps:** T07. **(ST-11, P2)**
+
+### [ ] T138 — Specify reconnect on a permanent auth failure: no infinite 403 loop (ST-09, Med; owner decision D5 stop+surface+degrade) [P1] · M
+- **Acceptance:**
+  - [ ] The supervisor does **not** loop on `403 ACCESS_REFUSED` indefinitely; on a permanent auth/authorization failure during re-dial or redeclare it surfaces `ErrAccessRefused`, stops or applies bounded backoff (confirmed against TG-4), and fires the degraded signal (`WithOnTopologyDegraded`-style).
+  - [ ] §6.1/§6.8 amend; coordinates with T61/T63/T66 (reconnect supervisor) and T79 (channel-vs-connection reply-code annotation) — distinct findings, cited not re-filed.
+- **Verify:** A chaos/integration test revokes creds, forces a reconnect, and asserts the supervisor surfaces `ErrAccessRefused` + bounded backoff/stop + the degraded signal, not an unbounded 403 loop; `goleak` clean.
+- **Files:** `connection.go`, `internal/reconnect`, SPEC §6.1/§6.8, `*_integration_test.go`, `README.md`.
+- **Deps:** T130 (TG-4), T07, T61, T63, T66. **(ST-09, P1)** — cites T61/T63/T66/T79.
+
+### [ ] T139 — State the decompression-bomb boundary (ST-07, Med — doc; rides T131) [P2] · XS
+- **Acceptance:**
+  - [ ] §6.5/§8 state that decompression is the **caller's** responsibility (the lib never decompresses; `ContentEncoding` is metadata-only; no `compress/*` import) and recommend a bounded (`io.LimitReader`-wrapped) decompressor.
+  - [ ] §6.5 notes the T131 inbound cap applies to the **compressed** wire body (pre-inflation) — the cap alone does not bound the inflated size; the caller must bound that too.
+- **Verify:** The §6.5/§8 wording is present and references T131's pre-inflation boundary; no code change required (boundary doc).
+- **Files:** SPEC §6.5/§8, `README.md`.
+- **Deps:** T131. **(ST-07, P2)** — rides T131.
+
+### [ ] T140 — Extend fuzzing: `FuzzAMQPCode` + field-table encoder (ST-13, Low; coord T98) [P3] · S
+- **Acceptance:**
+  - [ ] `FuzzAMQPCode` fuzzes the `internal/amqperror` reply-code translation over a malformed `*amqp091.Error`; a field-table encoder fuzz/round-trip covers the `message.go` typing path (both parse attacker-influenced input, currently un-fuzzed).
+  - [ ] §7 amends the fuzz-target list; coordinates with T98 (Lens-03, extends `FuzzCodecJSON` for `int64`) — same surface, different targets; confirms `FuzzXDeathParser` + `FuzzCodecCloudEventsBinary` already cover their surfaces.
+- **Verify:** `go test -run=Fuzz` smoke + a short `-fuzz` run is green for both new targets; `make lint` clean.
+- **Files:** `internal/amqperror/*_test.go`, `message_test.go`, SPEC §7, `README.md`.
+- **Deps:** T06, T08. **(ST-13, P3)** — coord T98.
+
+### [ ] T141 — Document the accepted trace-context spoofing risk (ST-05, Low — risk-accepted) [P3] · XS
+- **Acceptance:**
+  - [ ] §6.9 states that caller/upstream `traceparent`/`tracestate` win last-wins over warren's injected values (L2033–2042), so a hostile producer can forge/oversize them (trace poisoning); the risk is **accepted** under producer-trust and trace context MUST NOT drive security/authorization decisions.
+  - [ ] The encryption-at-rest / message-level-payload-encryption boundary is noted here (application concern, out of scope for a transport wrapper).
+- **Verify:** The §6.9 threat-model note is present and explicit about the no-security-decisions rule; no code change required.
+- **Files:** SPEC §6.9, `README.md`.
+- **Deps:** T28. **(ST-05, P3)**
+
+### [ ] T142 — §9 security-success-criteria capstone (ST-12, Low, high-leverage) [P2] · S
+- **Acceptance:**
+  - [ ] §9 gains criteria/tests for: the inbound size cap (ST-06/T131), the PLAIN-cleartext warning (ST-01/T132), never-log-payloads (ST-03/ST-14/T134), e2e wrapped-error redaction (ST-02/T133), the `InsecureSkipVerify` warning (ST-11/T137), and the new fuzz targets (ST-13/T140).
+  - [ ] Each new criterion has a backing test (depends on the WS-1..WS-5 controls landing).
+- **Verify:** The §9 security criteria are present and each maps to a green test; `go test -race ./...` covers them.
+- **Files:** SPEC §9, `*_test.go` (cross-cutting), `README.md`.
+- **Deps:** T131, T132, T133, T134, T137, T140. **(ST-12, P2)** — lands last; asserts the controls T131–T141 added.
+
+### Checkpoint — Phase 18 (Lens 07) closed
+- [ ] T130 gate results (TG-1..TG-5) captured on unit + the **existing** `integration` lane (3.13 **and** 4.x where broker-bound); results table committed; downstream tasks cite their gate; **no new build-tag lane** introduced; first task records §10 **Rev 17**.
+- [ ] Inbound DoS closed (ST-06/T131, Blocker): a consume-side `MaxInboundMessageSizeBytes` (default 16 MiB; `0` disables) rejects an oversized delivery **before** the codec with `ErrMessageTooLarge` + `Nack(requeue=false)` + a drop metric; an integration test proves the RSS stays bounded and the message lands in the DLQ (when wired), not an OOM; LATER-35 promoted/superseded.
+- [ ] Cleartext-auth warning (ST-01/T132): a `Dial` with PLAIN over `amqp://` warns; EXTERNAL-over-`amqp://` stays a fail-closed `ErrInvalidOptions`.
+- [ ] Egress credential-safe end-to-end (ST-02/T133): an e2e test proves `secret` leaks into no returned error, no `log` line, and no `amqp091` `Logger` output; the `amqp091` `Logger` is pinned/redacted/documented.
+- [ ] Egress payload-safe (ST-03/ST-14/T134): §8 *Never* lists "log message payloads"; §6.9 says the panic-recover wraps the recovered value's **type only**; the grep/AST + panic-with-payload tests pass.
+- [ ] Supply-chain surface shrunk (ST-10/T135): a build/import test proves a core import excludes `cloudevents/sdk-go/v2` (build-tag) — or the split is deferred to LATER-43 with the surface documented in §2.
+- [ ] EXTERNAL principal documented (ST-04/T136): §6.5/decision 35 document the CN extraction + `ssl_cert_login_from` divergence and recommend empty `UserID` under non-CN mappings; LATER-42 filed.
+- [ ] `InsecureSkipVerify` warning (ST-11/T137): a `Dial` with `InsecureSkipVerify=true` on `amqps://` warns; §6.1 states the Go-default min-TLS floor + verbatim-config policy.
+- [ ] Reconnect on permanent auth (ST-09/T138): a chaos/integration test asserts the supervisor surfaces `ErrAccessRefused` + bounded backoff/stop + the degraded signal, not an unbounded 403 loop; cites T61/T63/T66/T79.
+- [ ] Residual risks stated/tested (ST-05/ST-07/ST-13): the trace-spoofing + decompression boundaries are documented; `FuzzAMQPCode` + a field-table fuzz are added and green.
+- [ ] §9 capstone (ST-12/T142): the new security success criteria are present and each has a backing test.
+- [ ] Cross-lens (ST-08): T65 carries a `Lens-07 (ST-08)` bullet and a test that the default DLQ bound holds under an adversarial poison flood; not re-filed.
+- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 **and** 4.x) green; `goleak.VerifyNone` clean.
+- [ ] README synced (the inbound size cap, the cleartext-auth warning, the codec build-tag, the `InsecureSkipVerify` warning, the EXTERNAL CN caveat).
+- [ ] SPEC §10 "Rev 17" note records the Lens-07 pass; no finding re-filed that a prior task owns (ST-08→T65); the ST-06 fix promotes/supersedes LATER-35; exactly **one** new `LATER.md` entry (LATER-42; LATER-43 only if D3 is overridden); T130–T142 contiguous, no duplicate IDs.
+
 ### Checkpoint — v0.1.0 shipped
 - [ ] Every SPEC §9 success criterion ticked.
 - [ ] `v0.1.0` tag on `main`.
@@ -2002,8 +2158,8 @@ lands in the same PR; a SPEC §10 "Rev 16" note records the pass.
 ---
 
 ## Quick stats
-- Total tasks: **138** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane); Phase 16 (2026-05-28): +T111-T118 Lens-05 SRE/production-operability re-review, pulls T67/T72 forward, extends T61/T62/T63/T65/T66/T70/T71 (cross-lens), no new build-tag lane, no new LATER; Phase 17 (2026-05-28): +T119-T129 Lens-06 Go-API/library-design re-review, fixes the GA-01 DeliveryMode silent-non-persistence Blocker, extends T37/T68/T69/T70/T71/T112 (cross-lens), adds LATER-41, no new build-tag lane).
-- Phases: **17**.
+- Total tasks: **151** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane); Phase 16 (2026-05-28): +T111-T118 Lens-05 SRE/production-operability re-review, pulls T67/T72 forward, extends T61/T62/T63/T65/T66/T70/T71 (cross-lens), no new build-tag lane, no new LATER; Phase 17 (2026-05-28): +T119-T129 Lens-06 Go-API/library-design re-review, fixes the GA-01 DeliveryMode silent-non-persistence Blocker, extends T37/T68/T69/T70/T71/T112 (cross-lens), adds LATER-41, no new build-tag lane; Phase 18 (2026-05-29): +T130-T142 Lens-07 security/threat-modeling re-review, fixes the ST-06 inbound-DoS Blocker (promotes/supersedes LATER-35), extends T65 (cross-lens), adds LATER-42, no new build-tag lane).
+- Phases: **18**.
 - Estimated sizing: 8× XS · 40× S · 23× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.
