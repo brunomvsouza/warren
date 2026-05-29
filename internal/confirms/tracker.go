@@ -64,6 +64,20 @@ func New() *Tracker {
 	return &Tracker{pending: make(map[uint64]*waiter)}
 }
 
+// waitTimerPool reuses the per-Wait confirm-timeout timer (Lens-09 PC-06).
+// The default ConfirmTimeout=30s arms a timer on every publish and every batch
+// element; a fresh time.NewTimer per call allocates three objects (the Timer,
+// its runtime timer, and the channel). Pooling reuses one stopped timer per
+// goroutine, so arming it costs no allocation on the hot path.
+var waitTimerPool = sync.Pool{
+	New: func() any {
+		// A stopped timer with no pending value, ready for Reset on first use.
+		t := time.NewTimer(time.Hour)
+		t.Stop()
+		return t
+	},
+}
+
 // Register prepares a pending slot for deliveryTag. Must be called before the
 // corresponding publish so that subsequent Ack/Nack/CloseAll can resolve it.
 // Returns ErrClosed if CloseAll has already been called on this Tracker —
@@ -168,9 +182,22 @@ func (t *Tracker) Wait(ctx context.Context, deliveryTag uint64, timeout time.Dur
 	// timeout ≤ 0 effectively disables the confirm-deadline case.
 	var timerC <-chan time.Time
 	if timeout > 0 {
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
+		timer := waitTimerPool.Get().(*time.Timer)
+		timer.Reset(timeout)
 		timerC = timer.C
+		defer func() {
+			// Stop and drain before returning the timer to the pool so the next
+			// Reset starts clean. Under Go 1.23 timer semantics the drain is never
+			// needed (Stop guarantees no stale send) but it stays correct and
+			// harmless under all supported versions.
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			waitTimerPool.Put(timer)
+		}()
 	}
 
 	select {
