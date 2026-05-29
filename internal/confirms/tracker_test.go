@@ -347,3 +347,32 @@ func TestTracker_Cancel_WhileWaitBlocking_ReturnsErrClosed(t *testing.T) {
 		t.Fatal("Wait did not unblock after Cancel")
 	}
 }
+
+// — Lens-09 (PC-06): pooled confirm-timeout timer ————————————————————————————
+
+// TestTracker_Wait_ArmingTimer_DoesNotAllocate is the PC-06 allocation guard.
+// The default ConfirmTimeout=30s arms a time.Timer on every Wait — i.e. on every
+// publish and every batch element. A fresh time.NewTimer per call allocates; the
+// timer must be pooled/reset so arming it adds no per-Wait allocation. The guard
+// measures the same Register→Ack→Wait cycle with a timeout (arms the timer) and
+// without (no timer) and asserts the two allocate identically.
+func TestTracker_Wait_ArmingTimer_DoesNotAllocate(t *testing.T) {
+	ctx := context.Background()
+
+	var tag uint64
+	cycle := func(timeout time.Duration) func() {
+		return func() {
+			tag++
+			tr := confirms.New()
+			_ = tr.Register(tag)
+			tr.Ack(tag, false)
+			_ = tr.Wait(ctx, tag, timeout)
+		}
+	}
+
+	withTimer := testing.AllocsPerRun(2000, cycle(30*time.Second))
+	noTimer := testing.AllocsPerRun(2000, cycle(0))
+
+	assert.Equal(t, noTimer, withTimer,
+		"arming the confirm-timeout timer must not allocate; pool/reset the timer (Lens-09 PC-06)")
+}
