@@ -298,6 +298,7 @@ fix: `ContentType` (MIME) is a separate field from `ContentEncoding`
     - `Headers`: enumerates the supported AMQP field-table value types and references `ErrInvalidMessage` for rejections.
     - `ContentType` vs `ContentEncoding`: one-line cross-reference clarifying the MIME-vs-transfer-encoding split.
   - [ ] Unit tests cover defaulting, that `applyDefaults` doesn't overwrite user-set fields, and the Headers validation matrix (one happy + one rejected case per unsupported Go kind).
+  - [ ] **Lens-09 (PC-09):** call `uuid.EnableRandPool()` once at init to batch the per-publish `crypto/rand` reads; document the google/uuid **process-global `timeMu` lock** taken per UUIDv7 (a process-wide serialization point at the billions/day bar) and that `MessageID` is load-bearing for at-least-once dedupe so it cannot be skipped; an `AllocsPerRun` guard asserts the per-call entropy buffer is gone (coordinated with T148's combined guard). dep PG-1.
 - **Verify:** `go test -run TestMessage ./...`; `golangci-lint run --enable=revive` passes the missing-godoc rule on `message.go`.
 - **Files:** `message.go`, `message_test.go`.
 - **Deps:** T02, T09.
@@ -313,6 +314,7 @@ Publisher confirm tracker preserved across reconnects. Rev 5 adds
   - [ ] Reset on channel close (in-flight publishes become `ErrChannelClosed`).
   - [ ] **One tracker per channel.** Each acquired channel from the per-conn pool gets its own tracker; channel close drops the tracker; new channel from pool gets a fresh one.
   - [ ] `goleak.VerifyNone` clean.
+  - [ ] **Lens-09 (PC-06 + PC-11):** two hot-path fixes — (PC-06) pool/reset the per-`Wait` `time.Timer` (the default `ConfirmTimeout=30s` arms a timer on every publish and every batch element, `tracker.go:171`), `AllocsPerRun` guard; (PC-11) replace the `resolveUpTo` whole-map scan + `slices.Sort` on every `multiple=true` frame under `t.mu` (`tracker.go:219-230` — O(outstanding)/frame, not the O(resolved) the §6.2 "single pass … critical for high-throughput batching" wording implies) with a contiguous confirmed low-water-mark + an ordered index (or min-heap) → O(resolved + log n), and amend §6.2 to state the real complexity; the one-shot resolve / `Wait`-self-delete / `CloseAll` mechanism stays do-not-regress. dep PG-1, PG-3.
 - **Verify:** Table-driven unit tests covering ordered, out-of-order, multiple-ack, multiple-nack, return-then-ack (mandatory unroutable), broker-nack alone, broker-nack with `multiple=true`, and channel-close scenarios. The return-then-ack and nack-only tests use a hand-rolled fake `amqp091.Channel` that emits frames in the documented order.
 - **Files:** `internal/confirms/tracker.go`, `internal/confirms/*_test.go`.
 - **Deps:** T02.
@@ -492,6 +494,7 @@ workloads.
   - [x] `DeathCountByReason(reason string) int` and `DeathReasons() []string` (unique reasons in declaration order) expose the full parsed shape for custom policies (e.g. users who DO want to count `expired` for their workload).
   - [x] `AckIf(err error) error` implements the error-mapping semantics (nil → Ack; `errors.Is(err, ErrRequeue)` → `Nack(true)`; any other err → `Nack(false)`).
   - [x] `Ack` / `Nack` / `AckIf` return `ErrChannelClosed` when the underlying channel is closed and `ErrAlreadyClosed` when the consumer was closed; otherwise `nil` on success — documented behaviour.
+  - [ ] **Lens-09 (PC-08):** allocate the x-death `byReason` map lazily — `make(map[string]int)` runs before the `tbl==nil` / x-death-absent / `![]any` early returns today (`xdeath.go:32`), so a map is allocated on 100 % of deliveries including the common no-DLX path; move the alloc after the early returns → zero map alloc on the no-DLX delivery; `AllocsPerRun` guard. dep PG-2.
 - **Verify:** Unit tests with hand-built `amqp091.Delivery` values + table-driven AckIf cases + closed-channel error path test + `x-death` parser test fixtures (absent, empty, single entry, multiple entries, mixed reasons `rejected`+`expired`+`delivery-limit`, wrong shape) + a `FuzzXDeathParser` fuzz target (per `plan.md` §"Fuzz targets"). Reason-discrimination test: a delivery with `x-death=[{reason: expired, count: 100}, {reason: rejected, count: 2}]` reports `DeathCount() == 2` (not 102).
 - **Files:** `delivery.go`, `internal/headers/xdeath.go`, `delivery_test.go`, `internal/headers/xdeath_test.go`, `internal/headers/xdeath_fuzz_test.go`.
 - **Deps:** T02, T09.
@@ -521,6 +524,7 @@ documented Concurrency-vs-ordering trade-off.
   - [ ] Codec calls are wrapped in `defer recover` → `ErrInvalidMessage` (per T09 contract).
   - [ ] **Functional-options last-wins on `ConsumerBuilder`** (Rev 7, per SPEC §6.1 line 515). Unit-test matrix: (a) `.Concurrency(2).Concurrency(8).Build()` produces a consumer running 8 handlers in parallel (assert via in-flight gauge under load); (b) `.HandlerTimeout(50*time.Millisecond).HandlerTimeout(0).Build()` disables the timeout (no `consumer_handler_timeout_total` increment under a slow handler); (c) `.Codec(jsonStrict).Codec(jsonLax).Build()` decodes a payload with an unknown field successfully (lax wins); (d) `.HandlerTimeoutVerdict(TimeoutNackRequeue).HandlerTimeoutVerdict(TimeoutNackNoRequeue).Build()` plus `.HandlerTimeout(50ms)` lands the timed-out message in the DLX, not the source.
   - [ ] **Lens-08 (CR-06):** §6.3 states the non-blocking dispatcher's **sole** bound is `prefetch` (the `out` channel is prefetch-sized, `consumer.go:487`); there is **no second queue**; the reader blocks when the buffer is full (that *is* the backpressure); `basic.cancel`/channel-close stay observable via the closed deliveries channel even when all `n` handler slots are busy; a test asserts the dispatch buffer == prefetch and `basic.cancel` is observed with all slots busy.
+  - [ ] **Lens-09 (PC-10):** amend §6.3 to state the consume scaling lever — one consumer = one channel = one reader on one TCP, so beyond the per-TCP I/O ceiling raising `Concurrency` alone does not add throughput; scale needs more consumer channels/connections (`WithConsumerConnections` / more consumers). (The new §9 consume-side throughput target + latency SLO is the capstone T149.)
 - **Verify:** Integration test sending good + bad payloads + handlers that return each of the three result classes. **`ChannelQoS()` is verified at the wire level** via a channel recorder that captures the `basic.qos` frame and asserts the `global` bit is `true` when `ChannelQoS()` is set and `false` otherwise. A second, longer-running integration test reuses the recorded channel via package-private accessors to attach a second raw `Consume` and asserts that the prefetch budget is shared rather than doubled — flagged as a conformance probe, not part of the public-API surface.
 
   **Re-subscribe regression test:** start a consumer, kill its underlying TCP connection via the testcontainer driver, wait for reconnect, assert `consumer_resubscribed_total{queue}` == 1 and a fresh publish lands in the handler. `goleak.VerifyNone` clean.
@@ -637,6 +641,7 @@ documents the channel-close recovery contract, and clarifies
   - [ ] Overall error wraps `ErrPartialBatch` if any failed.
   - [ ] Pipelines all publishes, then waits one confirm window — including correctly resolving a single `multiple=true` ack that covers many delivery tags (see T11) and a single `multiple=true` nack that covers many delivery tags with `ErrPublishNacked`.
   - [ ] **Channel-close recovery contract documented in godoc** (per SPEC §6.2): "Per-message `ErrChannelClosed` does NOT distinguish 'broker persisted' from 'broker did not receive'. Retry produces duplicates when the broker persisted but the ack was lost. `PublishRetry` does NOT apply to `PublishBatch` — chunking and partial-retry are the caller's responsibility, because the right strategy is workload-specific. Consumers MUST be idempotent per §6.2.1."
+  - [ ] **Lens-09 (PC-13):** document the `PublishBatchMaxSize=1024` memory/throughput trade-off + sizing guidance (a deeper window = more pipelining vs more tracker memory held per call); the per-call cap is decision 31 (not a sliding in-flight window) — do not reopen it.
 - **Verify:**
   - **Always-all integration test:** 1000 messages, 3 deliberately invalid via client-side rejection (Headers with `chan int`); the remaining 997 traverse normally, get confirmed, and the batch returns 997 nil + 3 `ErrInvalidMessage` per-message results plus an overall error wrapping `ErrPartialBatch`. The channel stays open across the batch.
   - **`ErrBatchTooLarge`:** publish 2000 messages with default `PublishBatchMaxSize=1024`; assert `(nil, ErrBatchTooLarge)` is returned immediately; no broker work observed (channel recorder snapshot empty for that call).
@@ -1057,6 +1062,7 @@ on a reference runner. Bench gates block the `v0.1.0` tag.
   - [ ] `BenchmarkPublishBatch` ≥ 5× the `BenchmarkPublishConfirmed` single-publish rate.
   - [ ] `BenchmarkConsume`: ≥ 30k msg/s consume with `Concurrency(8) + Prefetch(256)`.
   - [ ] Bench results CI-recorded as a JSON artifact; nightly drift report compares against the previous tag.
+  - [ ] **Lens-09 (PC-03/04/05/14):** the bench must report + pin **payload size** and **queue type**, stating both a classic and a quorum number (quorum's majority Raft commit raises confirm latency materially, so "100k" without the queue type is uninterpretable — D4); reframe `BenchmarkPublishBatch ≥ 5×` into an RTT-stated absolute (the `5×` is pegged to the local single-publish baseline where sync is already writer-bound and ~20× understates the remote benefit) with `PublishBatch` documented as the RTT-decoupled scale path; document the release-tag-only regression cadence (perf can rot between releases on a normal PR), optionally adding a lightweight CI microbench smoke; and source the "~50k msg/s per socket" figure (§6.1) with a measured single-socket ceiling + the `sendM`-writer knee (PG-4). dep PG-4, PG-6.
 - **Verify:** `go test -bench=. -benchmem -run=^$ ./...` reaches the gates locally and on the reference CI runner. Bench gate fails the build if a number drops > 20% versus the previous tag.
 - **Files:** `bench_publish_test.go`, `bench_publish_batch_test.go`, `bench_consume_test.go`, `bench_multiconn_test.go`, CI workflow `.github/workflows/bench.yml`.
 - **Deps:** Phases 1–5, T37.
@@ -1433,6 +1439,7 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 ### [ ] T83 — §9 throughput-honesty wording (RMQ-11) [P2] · XS
 - **Acceptance:**
   - [ ] SPEC §9 qualifies the 30k/100k targets with the local-broker/sub-ms-RTT assumption, documents the `pool/RTT` ceiling + a remote projection, and cross-references LATER-34.
+  - [ ] **Lens-09 (PC-01):** bake the explicit RTT-collapse model table (rate @1/5/10 ms — brief §11) into §9 *beside* the 30k/100k numbers as the "remote projection", so the load-bearing local-only caveat is computable at the number rather than parked ~680 lines away in LATER-34 (the 30k/100k targets imply ~0.27–0.64 ms loopback RTT; they collapse to ~64k/~12.8k/~6.4k multi-conn at 1/5/10 ms). dep PG-5.
 - **Verify:** Doc review.
 - **Files:** SPEC §9.
 - **Deps:** —. **(RMQ-11, P2)**
@@ -1811,6 +1818,7 @@ to NO-GO.
 - **Acceptance:**
   - [ ] The default `publisher_publish_seconds` / consumer latency buckets are extended past the current `[0.5…5000]`ms top (add `10s, 30s, 60s`) so the 30s `ConfirmTimeout` + ~20s reconnect-barrier envelope + cross-region RTT are visible, not collapsed into `+Inf`.
   - [ ] `WithLatencyBuckets` remains the override; SPEC §6.9 explains the envelope rationale (and that the barrier-cap SRE-02/T63 default should sit ≤ the new top bucket).
+  - [ ] **Lens-09 (PC-12, confirm/do-not-regress):** confirm the SRE-11 extended buckets (`10s/30s/60s`) span the confirm-RTT capacity tail for p99/p999 (the default 5000 ms top bucket otherwise collapses 5–30s — with the 30s `ConfirmTimeout` — into `+Inf` exactly where capacity problems live); add a one-line §6.9 capacity-tail rationale. No re-file.
 - **Verify:** SG-2 mock-channel unit test withholds the ack for 30s and asserts the observation lands in a **finite** bucket, not `+Inf`.
 - **Files:** `metrics/`, SPEC §6.9, `metrics/*_test.go`, `README.md`.
 - **Deps:** T111 (SG-2), T04. **(SRE-11, P1)**
@@ -1835,6 +1843,7 @@ to NO-GO.
 - **Acceptance:**
   - [ ] SPEC §9/§6.2 state prominently that the 30k/100k targets are **local-broker (sub-ms RTT)**, that the per-`Publish` ceiling is `pool/RTT` (a pooled channel is held for a full confirm RTT, R10-18/LATER-34), that a remote broker collapses the rate 1–2 orders of magnitude, and that a confirm-latency spike cascades into `ErrChannelPoolExhausted`.
   - [ ] Every throughput number carries its RTT + hardware + broker config; the async/streaming publish-API decision **remains LATER-34** (not pulled).
+  - [ ] **Lens-09 (PC-02):** add the quantified pool-sizing-for-rate formula (`pool ≥ target_rate × confirm_RTT` per connection) so the `ErrChannelPoolExhausted` cascade onset under a confirm-latency spike (broker GC, disk sync, quorum Raft) is computable, not just narrated; confirm SG-4 covers the onset. dep PG-5.
 - **Verify:** SG-4 injected-RTT test demonstrates the `pool/RTT` relationship and the `ErrChannelPoolExhausted` onset; the §9 benchmark prose states RTT/hardware/broker.
 - **Files:** SPEC §9/§6.2, the benchmark suite (T44b), `README.md`.
 - **Deps:** T111 (SG-4). **(SRE-14, P1)** — doc + benchmark caveat; coordinate with LATER-34.
@@ -2240,6 +2249,89 @@ note records the pass.
 - [ ] README synced if the external contract changed (the `OnReturn` callback invocation contract; a `WithMaxInFlightConfirms` option only if D4 ships it).
 - [ ] SPEC §10 "Rev 18" note records the Lens-08 pass; nine findings extend their owning task in place (T07/T08/T13/T18/T20/T34c/T45/T60/T70), not re-filed; exactly **one** new `LATER.md` entry (LATER-43); T143–T146 contiguous, no duplicate IDs.
 
+## Phase 20 — Performance & Capacity Re-review (Lens 09: every throughput number reduced to its Little's-Law model + back-solved RTT re-projected at 1/5/10 ms, every per-message hot-path allocation traced, every "single pass"/"efficient" claim read for real complexity)
+
+Closes the Lens-09 adversarial spec validation
+(`spec-validation/09-performance-capacity.md`, findings `PC-01..PC-15`; brief
+`spec-validation/09-performance-capacity-plan.md`). Lens verdict: **GO-WITH-CHANGES**, **no
+Blocker**. The performance architecture is sound where it counts (the `amqp091-go`
+per-connection serialization premise is real — a `sendM` mutex serialises all writes + a
+single `reader` goroutine demuxes all reads, v1.11.0 — so the multi-TCP role-split fan-out
+of §1/§6.1 is the *correct* answer to the single-socket ceiling; Prometheus uses
+`WithLabelValues` not per-message `Labels{}` maps; trace injection zero-allocates on the
+no-span path; decode runs off the per-channel reader; the NoOp tracer/metrics bodies are
+empty). Unusually, **the headline this lens exists to raise was already caught by a prior
+lens**: the sync-confirm capacity-honesty finding (the `pool/RTT` ceiling, the local-only
+30k/100k numbers, the confirm-latency → `ErrChannelPoolExhausted` cascade) is **already
+owned by T83/RMQ-11 + T116/SRE-14**, and the histogram capacity-tail by **T113/SRE-11**, so
+Lens-09 confirms their scope (do-not-regress) and contributes the artifacts they lack (the
+explicit rate-@1/5/10 ms model table; the pool-sizing-for-rate formula) rather than
+re-filing. The net-new value is **performance debt the prior lenses did not touch**: a
+cluster of avoidable **per-message hot-path allocations** (a `time.Timer` per `Publish`
+confirm-wait PC-06; span name/attrs/`url.Parse` built even under the NoOp tracer on both
+publish and consume PC-07; an x-death `map` on every delivery before the absence check
+PC-08; an un-pooled UUIDv7 entropy draw + a process-global `timeMu` lock per publish PC-09),
+one **algorithmic** finding (the `multiple=true` resolution is O(outstanding)/frame under
+the tracker mutex, not the O(resolved) its "single pass" wording implies PC-11), and the
+**§9-criteria / benchmark-methodology gaps** (no payload size or queue type on the numbers;
+no consume-side throughput target and no latency SLO; the `5×` batch ratio pegged to the
+wrong baseline). Owner decisions (2026-05-29, recommended, overridable): **D1** allocation
+depth = land the cheap wins now (timer pool T11; span-arg gating T148; `EnableRandPool` T10;
+lazy x-death map T17; Prometheus child caching T148) + **defer the deep wins to LATER-45**
+(pooled-buffer codec + a `timeMu`-free UUIDv7); **D2** PC-07 vs decision 3 = gate only the
+*argument construction* behind a precomputed `tracingActive` flag (single `Start`/`Record`
+call site, **no** `if tracer != nil` branch); **D3** PC-11 = contiguous low-water-mark +
+ordered index → O(resolved + log n); **D4** benchmark queue type = require **both** a
+classic and a quorum number; **D5** §9 consume criteria = add a consume-side throughput
+target **and** a publish/handle latency SLO (p99/p999). **No new build-tag lane** — the
+allocation gates ride unit / `-benchmem` / `AllocsPerRun`; the RTT/throughput/queue-type
+gates ride the existing `integration`/bench lanes + the T44b release-tag cadence; the
+injected-RTT gate coordinates with T116's SG-4. **Nine** findings **extend an existing task
+in place** (cross-lens; `Lens-09 (PC-xx)` bullet, not re-filed): T83 (PC-01), T116 (PC-02),
+T44b (PC-03/04/05/14), T11 (PC-06 + PC-11), T17 (PC-08), T10 (PC-09), T18 (PC-10), T22
+(PC-13); **T113 confirmed** (PC-12, do-not-regress). Exactly **one** new `LATER.md` entry
+(LATER-45, gated on D1; the Phase-18 conditional LATER-44 reservation stands). **Gate task
+T147 runs first**; no SPEC edit/fix to an affected finding lands before its gate returns.
+Per-task SPEC amendment lands in the same PR; a SPEC §10 "Rev 19" note records the pass.
+
+### [ ] T147 — Verification gates PG-1–PG-6 (unit + `-benchmem`/`AllocsPerRun` + existing `integration`/bench lanes; no new build-tag lane) [P0] · S
+- **Acceptance:**
+  - [ ] Ground truth captured (unit + `-benchmem`/`testing.AllocsPerRun` + the **existing** `integration`/bench lanes — **no new build-tag lane**) for: **PG-1** the **publish** hot-path allocs/op for `Publish` at the NoOp tracer + default config, attributing each alloc (the confirm-`Wait` `time.Timer`, the span name concat + attrs slice + `peerAddress`/`url.Parse`, the `waiter`+`done` chan, the UUIDv7 string, the JSON body, the release closure) → gates T11/T148/T10; **PG-2** the **consume** hot-path allocs/op per delivery at the NoOp tracer + **no x-death header** (confirm the `map` alloc lands on the no-DLX delivery, plus the span-arg slice + the `context.WithCancelCause`) → gates T17/T148; **PG-3** a microbench of `resolveUpTo` cost vs in-flight depth D (16/256/1024) for a `multiple=true` frame resolving **one** tag, showing per-frame cost grows **O(D)** (whole-map scan + sort) while holding `t.mu` → gates T11; **PG-4** the **single-socket** publish-confirm ceiling (1 conn, sweep `WithChannelPoolSize`) to **source** the "~50k msg/s per socket" figure + locate the `sendM`-writer knee → gates T44b/T07d; **PG-5** an injected-RTT publish-confirm bench at RTT ∈ {~0,1,5,10} ms (default pool, then `4×16`) → the §11 model-table numbers + the `ErrChannelPoolExhausted` onset under a confirm-latency spike (**extends T116's SG-4**) → gates T83/T116; **PG-6** a full-conditions bench recording RTT + **payload size** + broker version + **queue type**, demonstrating the **classic-vs-quorum** confirm-latency delta on the same target → gates T44b/T149.
+  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 19**.
+- **Verify:** Unit + `-benchmem`/`AllocsPerRun` + integration/bench lanes green with the PG measurements captured; the gate table is reviewable.
+- **Files:** `publisher_internal_test.go`, `consumer_internal_test.go`, `internal/confirms/*_test.go`, `internal/headers/*_test.go`, `message_internal_test.go`, `metrics/prometheus_test.go`, `*_integration_test.go`, `spec-validation/` (results table).
+- **Deps:** T10, T11, T17, T44b, T83, T116, T07d. **(PC gates, P0)**
+
+### [ ] T148 — Hot-path allocation hardening: NoOp-tracer arg gating + Prometheus child caching + combined `AllocsPerRun` guard (PC-07 + PC-15) [P1] · M
+- **Acceptance:**
+  - [ ] **PC-07:** the span argument-construction (the `exchange+" publish"` / consume name concat, the `[]attribute.KeyValue` attrs slice, and `peerAddress()`'s `url.Parse`) is gated behind a precomputed `tracingActive` flag on both publish (`publisher.go:371/423`, `connection.go:842`) and consume (`consumer.go:571/716`) paths, **preserving decision 3** — one `Start`/`Record` call site, **no** `if tracer != nil` behavioral branch (per **D2**: set once via `_, isNoOp := tracer.(NoOpTracer)`); the reconciliation is documented in §6.9/decision 3; the no-span zero-alloc trace-injection fast path (`publisher.go:444`) is **do-not-regress**.
+  - [ ] **PC-15:** the Prometheus child `Observer`/`Counter` for the fixed-outcome label sets is resolved **once at build**, not per-message (`prometheus.go:125/130/235` currently do a `WithLabelValues` hash + `RWMutex` lookup per message); a `prometheus.Labels{}` map is **not** reintroduced (do-not-regress).
+  - [ ] T148 owns the **combined `AllocsPerRun` hot-path guard** asserting PC-06/07/08/09/15 collectively at the NoOp tracer + default config (a future regression on any of them fails one test).
+- **Verify:** `AllocsPerRun` guard green at NoOp + default config (publish + consume); `go test -race ./...` + `-benchmem` show the gated allocs gone; the no-span fast path and the `WithLabelValues`-not-`Labels{}` invariant unchanged.
+- **Files:** `publisher.go`, `consumer.go`, `connection.go`, `otel/`, `metrics/prometheus.go`, SPEC §6.9/decision 3, `*_internal_test.go`.
+- **Deps:** T147 (PG-1/PG-2), T11, T17, T10. **(PC-07/PC-15, P1)**
+
+### [ ] T149 — Capacity & performance capstone: §9 model appendix + consume target + latency SLO + batch-as-scale-path + §6.1 write-mechanism wording (PC-05 + PC-10 + PC-14 §9 portions) [P2] · S
+- **Acceptance:**
+  - [ ] §9 gains a **performance-model appendix** referencing the explicit rate-@1/5/10 ms RTT-collapse table that T83 inlines beside the numbers; §9 gains the **missing consume-side throughput target** (per **D5**: e.g. `BenchmarkConsume ≥ 30k msg/s` at `Concurrency(8)+Prefetch(256)` — already benched by T44b but never encoded in §9) **and** a **publish/handle latency SLO** (p99/p999 against the §6.9 histogram).
+  - [ ] The batch-target wording is reframed as the RTT-decoupled **scale path** (PC-05, paired with T44b's absolute reframe); §6.1's "one goroutine drives the socket" write-mechanism wording is corrected → writes are **`sendM`-mutex-serialised**, reads are a **single `reader` goroutine** (the "serializes I/O per connection" *conclusion* is correct; the write *mechanism* was imprecise; PC-14).
+  - [ ] Asserts the WS-2/WS-3/WS-4 controls (T11/T17/T10/T148/T44b) landed.
+- **Verify:** The §9 appendix + consume target + latency SLO + the §6.1 wording fix are present and each maps to a backing bench/test; the controls B–D are referenced; `make lint` clean.
+- **Files:** SPEC §9/§6.1/§6.3, `*_test.go` (cross-cutting), `README.md`.
+- **Deps:** T147, T11, T17, T10, T148, T44b, T18, T83. **(PC-05/PC-10/PC-14, P2)** — lands last; asserts the controls B–D added.
+
+### Checkpoint — Phase 20 (Lens 09) closed
+- [ ] T147 gate results (PG-1..PG-6) captured on unit + `-benchmem`/`AllocsPerRun` + the **existing** `integration`/bench lanes; results table committed; downstream tasks cite their gate; **no new build-tag lane** introduced; first task records §10 **Rev 19**.
+- [ ] Capacity model inline (PC-01/T83, PC-02/T116): §9 carries the explicit rate-@1/5/10 ms RTT-collapse table beside the 30k/100k numbers; §6.2/§9 carry the pool-sizing-for-rate formula (`pool ≥ target_rate × confirm_RTT`) + the `ErrChannelPoolExhausted` onset; the async-publish API stays LATER-34, decision 31 stays closed; the headline is **not** re-filed.
+- [ ] Publish hot path (PC-06/T11, PC-09/T10, PC-07/T148): an `AllocsPerRun` test asserts `Publish` at the NoOp tracer + default config no longer allocates the confirm-`Wait` timer, the span name/attrs/`url.Parse`, or (via `EnableRandPool`) the per-call entropy buffer; the `timeMu` global-lock cost is documented; the no-span fast path is unchanged.
+- [ ] Consume hot path (PC-08/T17, PC-07/T148): an `AllocsPerRun` test asserts a no-x-death, NoOp-tracer delivery allocates **no** x-death `byReason` map and **no** span name/attrs slice; decode still runs off the per-channel reader goroutine.
+- [ ] Confirm complexity (PC-11/T11): a microbench shows `multiple=true` resolution is O(resolved + log n), not O(outstanding); §6.2 states the real complexity; the one-shot resolve / `Wait`-self-delete / `CloseAll` mechanism is unchanged.
+- [ ] Benchmark methodology (PC-03/04/05/14/T44b): the bench reports + pins RTT + payload size + broker version + **queue type**, with both a classic and a quorum number; the `PublishBatch` target is an RTT-stated absolute with batch documented as the scale path; the release-tag-only regression cadence is documented; the ~50k/socket figure is replaced with a measured single-socket ceiling + the `sendM` knee.
+- [ ] Pin & capstone (PC-10/T18+T149, PC-13/T22, PC-12/T113, §9/T149): §6.3 states consume scaling needs more channels/connections beyond the per-TCP ceiling; §9 gains a consume-side throughput target **and** a p99/p999 latency SLO; §6.2 documents the `PublishBatchMaxSize` trade-off; §6.9's extended buckets (T113) span the confirm-RTT tail; §6.1's write mechanism is described accurately.
+- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + the `-benchmem`/`AllocsPerRun` guards green; integration on 3.13 **and** 4.x + the T44b bench cadence green.
+- [ ] README synced if the external contract changed (none expected — internal hot-path + spec wording; no new public option in this phase).
+- [ ] SPEC §10 "Rev 19" note records the Lens-09 pass; nine findings extend their owning task in place (T10/T11/T17/T18/T22/T44b/T83/T116) + T113 confirmed, not re-filed; exactly **one** new `LATER.md` entry (LATER-45; the Phase-18 conditional LATER-44 reservation stands); T147–T149 contiguous, no duplicate IDs.
+
 ### Checkpoint — v0.1.0 shipped
 - [ ] Every SPEC §9 success criterion ticked.
 - [ ] `v0.1.0` tag on `main`.
@@ -2249,8 +2341,8 @@ note records the pass.
 ---
 
 ## Quick stats
-- Total tasks: **155** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane); Phase 16 (2026-05-28): +T111-T118 Lens-05 SRE/production-operability re-review, pulls T67/T72 forward, extends T61/T62/T63/T65/T66/T70/T71 (cross-lens), no new build-tag lane, no new LATER; Phase 17 (2026-05-28): +T119-T129 Lens-06 Go-API/library-design re-review, fixes the GA-01 DeliveryMode silent-non-persistence Blocker, extends T37/T68/T69/T70/T71/T112 (cross-lens), adds LATER-41, no new build-tag lane; Phase 18 (2026-05-29): +T130-T142 Lens-07 security/threat-modeling re-review, fixes the ST-06 inbound-DoS Blocker (promotes/supersedes LATER-35), extends T65 (cross-lens), adds LATER-42, no new build-tag lane; Phase 19 (2026-05-29): +T143-T146 Lens-08 go-concurrency-runtime re-review, fixes the CR-02 counter-B lost-update Blocker, extends T07/T08/T13/T18/T20/T34c/T45/T60/T70 (cross-lens), adds LATER-43, no new build-tag lane).
-- Phases: **19**.
+- Total tasks: **158** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane); Phase 16 (2026-05-28): +T111-T118 Lens-05 SRE/production-operability re-review, pulls T67/T72 forward, extends T61/T62/T63/T65/T66/T70/T71 (cross-lens), no new build-tag lane, no new LATER; Phase 17 (2026-05-28): +T119-T129 Lens-06 Go-API/library-design re-review, fixes the GA-01 DeliveryMode silent-non-persistence Blocker, extends T37/T68/T69/T70/T71/T112 (cross-lens), adds LATER-41, no new build-tag lane; Phase 18 (2026-05-29): +T130-T142 Lens-07 security/threat-modeling re-review, fixes the ST-06 inbound-DoS Blocker (promotes/supersedes LATER-35), extends T65 (cross-lens), adds LATER-42, no new build-tag lane; Phase 19 (2026-05-29): +T143-T146 Lens-08 go-concurrency-runtime re-review, fixes the CR-02 counter-B lost-update Blocker, extends T07/T08/T13/T18/T20/T34c/T45/T60/T70 (cross-lens), adds LATER-43, no new build-tag lane; Phase 20 (2026-05-29): +T147-T149 Lens-09 performance-capacity re-review, no Blocker, extends T10/T11/T17/T18/T22/T44b/T83/T116 (cross-lens) + confirms T113, adds LATER-45, no new build-tag lane; net-new value is the per-message hot-path allocation cluster (PC-06/07/08/09), the multiple=true O(n) resolution (PC-11), and the §9-criteria/benchmark-methodology gaps — the capacity-honesty headline is already owned by T83/T116/T113).
+- Phases: **20**.
 - Estimated sizing: 8× XS · 40× S · 23× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.
