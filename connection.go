@@ -223,10 +223,14 @@ func closeManagedConns(conns []*managedConn) {
 // Dial returns and does not change.
 func (c *Connection) AuthenticatedUser() string { return c.authUser }
 
-// Health opens a temporary AMQP channel on the first publisher connection and
-// immediately closes it.  Returns ErrAlreadyClosed if the Connection is shut
-// down, ErrReconnecting if a reconnect barrier is active, ErrNotConnected if
-// the socket is not yet established.
+// Health verifies broker responsiveness by opening and immediately closing a
+// temporary AMQP channel on the first publisher connection (SPEC §6.1).
+//
+// It returns, in precedence order: ctx.Err() if ctx is already done;
+// ErrAlreadyClosed if the Connection is shut down; ErrReconnecting if a
+// reconnect barrier is active; ErrTopologyRedeclareFailed if the connection is
+// in a degraded topology state; ErrNotConnected if the socket is not yet
+// established; otherwise any error from the channel open/close round-trip.
 func (c *Connection) Health(ctx context.Context) error {
 	c.closedMu.Lock()
 	closed := c.closed
@@ -376,7 +380,10 @@ func (mc *managedConn) negotiatedChannelMax() uint16 {
 	return mc.raw.Config.ChannelMax
 }
 
-func (mc *managedConn) health(_ context.Context) error {
+func (mc *managedConn) health(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	mc.barrierMu.Lock()
 	reconnecting := mc.reconnecting
 	mc.barrierMu.Unlock()
@@ -385,7 +392,13 @@ func (mc *managedConn) health(_ context.Context) error {
 	}
 	mc.mu.RLock()
 	raw := mc.raw
+	degradedErr := mc.degradedErr
 	mc.mu.RUnlock()
+	// SPEC §6.1: Health reports a degraded topology state rather than masking it
+	// behind a successful channel open.
+	if degradedErr != nil {
+		return degradedErr
+	}
 	if raw == nil {
 		return ErrNotConnected
 	}
