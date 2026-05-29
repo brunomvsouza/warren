@@ -652,3 +652,40 @@ tracker in `internal/confirms` and the publisher confirm path.
 
 ---
 
+### LATER-45 — Deeper hot-path allocation elimination (pooled-buffer codec + a `timeMu`-free UUIDv7 generator)
+
+**Context:** Phase 20 (Lens-09) lands the *cheap, zero-risk* per-message hot-path allocation wins — pool/reset
+the confirm-`Wait` `time.Timer` (T11/PC-06), gate the NoOp-tracer span argument-construction (T148/PC-07),
+`uuid.EnableRandPool()` (T10/PC-09), lazy-allocate the x-death `byReason` map (T17/PC-08), and cache the
+Prometheus child collectors (T148/PC-15) — under a combined `AllocsPerRun` guard (T148). Three deeper
+allocations/locks remain on the per-message path after those: the JSON codec `Marshal`s the body **without a
+buffer pool** (`codec/json.go:39`), the confirm tracker allocates a `&waiter{}` + a `make(chan error, 1)` **per
+`Register`** (`tracker.go:77`), and google/uuid takes a **process-global `timeMu` lock per UUIDv7** even after
+`EnableRandPool` (`message.go:73`).
+
+**Impact:** At the billions/day bar these are residual per-message costs the cheap wins do not remove — a body
+allocation + copy per publish, a waiter+channel allocation per in-flight publish, and a process-wide
+serialization point on `timeMu` under high publish concurrency. Low-Med severity: none is a correctness or
+message-loss issue (the body and waiter are *necessary* objects, just poolable; `timeMu` is a contention point,
+not a deadlock), and the cheap-win baseline already removes the highest-frequency avoidable allocations. The
+deep wins carry codec-API and dependency implications (a pooled `Encode` changes the codec call shape; a
+`timeMu`-free generator means a custom UUIDv7 source rather than google/uuid), so they are consciously deferred.
+
+**Evidence:** Lens-09 performance & capacity spec validation, 2026-05-29 (§12 hot-path allocation ledger;
+`spec-validation/09-performance-capacity-plan.md`). Owner decision D1: land the cheap wins in Phase 20; defer
+the deep wins.
+
+**Suggested solution:** (1) A pooled-buffer codec `Encode` path — a `sync.Pool` of `bytes.Buffer` + a reused
+`json.Encoder` so the per-message body buffer is recycled (assess the consume-side `json.NewDecoder`/
+`bytes.Reader` per delivery the same way, `codec/json.go:48-55`). (2) A `sync.Pool` of `*waiter` (with its
+`done` channel) recycled when `Wait` returns, so a steady-state publish stream reuses waiters. (3) A UUIDv7
+generator that avoids the google/uuid process-global `timeMu` (a per-P / sharded monotonic time source, or an
+internal generator), keeping RFC 9562 v7 layout and the at-least-once dedupe contract. Each lands behind the
+T148 `AllocsPerRun` guard so the win is measured against the cheap-win baseline.
+
+**Prerequisites:** T148 (the cheap-win allocation hardening + the combined `AllocsPerRun` baseline these deeper
+wins are measured against); the codec interface (`codec/`), the confirm tracker (`internal/confirms`), and the
+UUIDv7 default-apply path (`message.go`).
+
+---
+
