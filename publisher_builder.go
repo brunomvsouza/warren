@@ -126,8 +126,20 @@ func (b *PublisherBuilder[M]) PublishTimeout(d time.Duration) *PublisherBuilder[
 }
 
 // PublishBatchMaxSize sets the per-call cap for PublishBatch (T22). Default:
-// 1024. This is NOT a sliding in-flight window — it is a per-call limit.
-// Validated at PublishBatch-time only.
+// 1024. Passing more messages than the cap in a single PublishBatch call
+// returns ErrBatchTooLarge immediately, before any broker work; the caller
+// should chunk.
+//
+// Sizing trade-off: the cap bounds the confirm tracker memory held per call
+// (one outstanding entry per in-flight delivery tag) and the confirm-window
+// worst case. A deeper window pipelines more publishes before the single
+// confirm round-trip, which raises throughput against fast or remote brokers
+// at the cost of more tracker memory held for the duration of the call. Raise
+// it for higher throughput; lower it to bound per-call memory.
+//
+// This is a per-call cap, NOT a sliding in-flight window across calls:
+// Publisher[M] does not throttle concurrent PublishBatch invocations against
+// one another. Validated at PublishBatch-time only.
 func (b *PublisherBuilder[M]) PublishBatchMaxSize(n int) *PublisherBuilder[M] {
 	b.publishBatchMaxSize = n
 	return b
