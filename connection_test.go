@@ -70,6 +70,39 @@ func TestDial_frameMaxExactlyMinimum_doesNotFailOnValidation(t *testing.T) {
 		"FrameMax=4096 must pass validation; got: %v", err)
 }
 
+func TestDial_channelPoolSizeExceedsChannelMax_returnsErrInvalidOptions(t *testing.T) {
+	// A channel pool larger than the requested channel-max can never be
+	// satisfied; Dial must reject it synchronously before opening any socket.
+	ctx := context.Background()
+	_, err := warren.Dial(ctx,
+		warren.WithChannelMax(4),
+		warren.WithChannelPoolSize(8),
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
+			return nil, errors.New("no broker")
+		}),
+	)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions),
+		"pool size above channel-max must return ErrInvalidOptions; got: %v", err)
+}
+
+func TestDial_channelPoolSizeEqualToChannelMax_doesNotFailOnValidation(t *testing.T) {
+	// Boundary: pool size equal to channel-max is permitted (the spec rejects
+	// strictly-greater only). Validation must pass; only the network dial fails.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := warren.Dial(ctx,
+		warren.WithChannelMax(8),
+		warren.WithChannelPoolSize(8),
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
+			return nil, errors.New("no broker")
+		}),
+	)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
+		"pool size equal to channel-max must pass validation; got: %v", err)
+}
+
 func TestDial_sASLExternal_withoutTLSConfig_returnsErrInvalidOptions(t *testing.T) {
 	ctx := context.Background()
 	_, err := warren.Dial(ctx,

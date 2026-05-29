@@ -72,8 +72,9 @@ type connOptions struct {
 	reconnectBackoff RetryPolicy
 
 	// channelPoolSize is the number of pre-opened channels in the per-connection
-	// pool used by publishers. Validated against the negotiated channel-max at
-	// Dial time. Default 8 (applied in T08).
+	// pool used by publishers. Validated against the requested channel-max
+	// (fail-fast) and the broker-negotiated channel-max (post-handshake) in Dial.
+	// Default 8.
 	channelPoolSize int
 
 	// pubConns / conConns are used by T07d (multi-conn fan-out). They are
@@ -208,9 +209,13 @@ func WithReconnectBackoff(p RetryPolicy) Option {
 }
 
 // WithChannelPoolSize sets the number of pre-opened channels per publisher
-// TCP connection. The pool is implemented in T08; this option is validated
-// against the negotiated channel-max at Dial time.
-// Default is 8.
+// TCP connection. Default is 8.
+//
+// The value must be ≥ 1 and must not exceed the channel-max ceiling, otherwise
+// Dial returns ErrInvalidOptions. When WithChannelMax is set explicitly this is
+// checked synchronously before any socket is opened; when WithChannelMax is 0
+// (server-driven, RabbitMQ defaults to 2047) it is checked against the
+// broker-negotiated value once the handshake completes.
 func WithChannelPoolSize(n int) Option {
 	return func(o *connOptions) { o.channelPoolSize = n }
 }
