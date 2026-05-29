@@ -689,3 +689,38 @@ UUIDv7 default-apply path (`message.go`).
 
 ---
 
+### LATER-46 — Residual fuzz target for otel propagation-header extraction (`FuzzHeadersExtract`)
+
+**Context:** The 6 v0.1 fuzz targets cover every attacker-influenced **byte-parser** in the library —
+`FuzzRedactURI` (`internal/redact`), `FuzzCodecJSON` + the strict variant (`codec/json.go`),
+`FuzzCodecProtobuf` (`codec/protobuf.go`), `FuzzCodecCloudEventsBinary` (`codec/cloudevents.go`), and
+`FuzzXDeathParser` (`internal/headers`). Lens-10 (test-strategy & verifiability) checked for residual fuzz
+gaps and found one genuine candidate and one non-candidate. The **non-candidate:** `internal/amqperror` keys
+on the **numeric** reply code (`*amqp091.Error.Code`, a `uint16`), not free-form bytes — there is no
+byte-parser to break, so a `FuzzAMQPCode` would be low-value (noted honestly, not filed as a gap). The
+**genuine residual:** the otel propagation-header **extraction** path in `internal/headers` reads
+producer-controlled header *values* (the inbound `traceparent`/`tracestate`/baggage carrier on consume),
+which are attacker-influenceable but not currently fuzzed.
+
+**Impact:** Low. The extraction path is bounded (it feeds the otel propagator, not a hand-rolled parser) and a
+malformed carrier degrades to "no parent span", not a panic or message loss; but a `FuzzHeadersExtract` would
+close the last attacker-influenced-input gap and lock the no-panic / bounded-allocation contract on the consume
+header path, matching the bar the other 6 targets already hold.
+
+**Evidence:** Lens-10 test-strategy & verifiability spec validation, 2026-05-29 (brief §5 WS-5 + §13 finding row
+"LATER-46 residual fuzz"; `spec-validation/10-test-strategy-verifiability-plan.md`). The lens routes the
+load-bearing byte-parsers to the existing 6 targets and defers this one residual.
+
+**Suggested solution:** Add `FuzzHeadersExtract` in `internal/headers` that feeds randomized `amqp091.Table`
+header sets (string + `[]byte` `traceparent`/`tracestate`/baggage values, including oversized / non-UTF-8 /
+deeply-nested forms) through the otel extraction path and asserts no panic, bounded allocation, and a
+well-formed-or-empty `SpanContext`. Wire it into the nightly fuzz 10m-budget runner (T151) alongside the
+existing targets. Explicitly record in the test-strategy docs that `internal/amqperror` is intentionally
+**not** fuzzed (numeric-code keyed, no byte-parser).
+
+**Prerequisites:** T44 / T37 (the conformance + `amqptest` harness this rides alongside) and T151 (the nightly
+fuzz-budget runner that gives the new target a cadence beyond the unit-lane seed corpus); the otel header
+extraction path in `internal/headers`.
+
+---
+
