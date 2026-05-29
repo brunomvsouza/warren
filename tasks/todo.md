@@ -635,14 +635,14 @@ preserve input order. Rev 6 renames to `PublishBatchMaxSize`,
 documents the channel-close recovery contract, and clarifies
 `PublishRetry` does NOT apply to batches.
 - **Acceptance:**
-  - [ ] `Publisher.PublishBatch(ctx, []Message[M]) ([]PublishResult, error)` publishes every input message (never short-circuits, except the size-cap guard below).
-  - [ ] **Size-cap guard:** if `len(msgs) > PublishBatchMaxSize`, returns immediately with `(nil, ErrBatchTooLarge)`. No channel work performed. Caller chunks.
-  - [ ] **Single-channel pipelining:** all N publishes occur on **one** acquired channel from the publisher pool, so RabbitMQ's per-channel ordering guarantee makes input order = consume order. Documented as a hard guarantee in godoc.
-  - [ ] Returns `[]PublishResult` with one slot per input; per-message error in `Result.Err` (`ErrInvalidMessage`, `ErrPublishNacked`, `ErrUnroutable`, `ErrChannelClosed`).
-  - [ ] Overall error wraps `ErrPartialBatch` if any failed.
-  - [ ] Pipelines all publishes, then waits one confirm window — including correctly resolving a single `multiple=true` ack that covers many delivery tags (see T11) and a single `multiple=true` nack that covers many delivery tags with `ErrPublishNacked`.
-  - [ ] **Channel-close recovery contract documented in godoc** (per SPEC §6.2): "Per-message `ErrChannelClosed` does NOT distinguish 'broker persisted' from 'broker did not receive'. Retry produces duplicates when the broker persisted but the ack was lost. `PublishRetry` does NOT apply to `PublishBatch` — chunking and partial-retry are the caller's responsibility, because the right strategy is workload-specific. Consumers MUST be idempotent per §6.2.1."
-  - [ ] **Lens-09 (PC-13):** document the `PublishBatchMaxSize=1024` memory/throughput trade-off + sizing guidance (a deeper window = more pipelining vs more tracker memory held per call); the per-call cap is decision 31 (not a sliding in-flight window) — do not reopen it.
+  - [x] `Publisher.PublishBatch(ctx, []Message[M]) ([]PublishResult, error)` publishes every input message (never short-circuits, except the size-cap guard below).
+  - [x] **Size-cap guard:** if `len(msgs) > PublishBatchMaxSize`, returns immediately with `(nil, ErrBatchTooLarge)`. No channel work performed. Caller chunks.
+  - [x] **Single-channel pipelining:** all N publishes occur on **one** acquired channel from the publisher pool, so RabbitMQ's per-channel ordering guarantee makes input order = consume order. Documented as a hard guarantee in godoc.
+  - [x] Returns `[]PublishResult` with one slot per input; per-message error in `Result.Err` (`ErrInvalidMessage`, `ErrPublishNacked`, `ErrUnroutable`, `ErrChannelClosed`).
+  - [x] Overall error wraps `ErrPartialBatch` if any failed.
+  - [x] Pipelines all publishes, then waits one confirm window — including correctly resolving a single `multiple=true` ack that covers many delivery tags (see T11) and a single `multiple=true` nack that covers many delivery tags with `ErrPublishNacked`.
+  - [x] **Channel-close recovery contract documented in godoc** (per SPEC §6.2): "Per-message `ErrChannelClosed` does NOT distinguish 'broker persisted' from 'broker did not receive'. Retry produces duplicates when the broker persisted but the ack was lost. `PublishRetry` does NOT apply to `PublishBatch` — chunking and partial-retry are the caller's responsibility, because the right strategy is workload-specific. Consumers MUST be idempotent per §6.2.1."
+  - [x] **Lens-09 (PC-13):** document the `PublishBatchMaxSize=1024` memory/throughput trade-off + sizing guidance (a deeper window = more pipelining vs more tracker memory held per call); the per-call cap is decision 31 (not a sliding in-flight window) — do not reopen it.
 - **Verify:**
   - **Always-all integration test:** 1000 messages, 3 deliberately invalid via client-side rejection (Headers with `chan int`); the remaining 997 traverse normally, get confirmed, and the batch returns 997 nil + 3 `ErrInvalidMessage` per-message results plus an overall error wrapping `ErrPartialBatch`. The channel stays open across the batch.
   - **`ErrBatchTooLarge`:** publish 2000 messages with default `PublishBatchMaxSize=1024`; assert `(nil, ErrBatchTooLarge)` is returned immediately; no broker work observed (channel recorder snapshot empty for that call).
@@ -665,7 +665,7 @@ Rev 5 documents the handler error semantics (auto-Ack/Nack with
     - Handler called `Batch.Ack` / `Batch.Nack` / per-`Deliveries()` acks/nacks → framework skips the auto-verdict (idempotent guard).
   - [x] `HandlerTimeout(d)` derives a per-batch ctx; on timeout the default verdict is `Nack(requeue=false)` for the whole batch (`ErrPartialBatch`-style aggregate not applicable here — it's a batch verdict, not per-message).
   - [x] Flush triggers: size reached OR timer elapsed.
-  - [ ] `MaxRedeliveries` counter B (from T20) increments per message in the batch when a `Nack(requeue=true)` is emitted for the whole batch.
+  - [x] `MaxRedeliveries` counter B (from T20) increments per message in the batch when a `Nack(requeue=true)` is emitted for the whole batch.
 - **Verify:**
   - [x] Integration test: send 500 messages with `Size(100)` → 5 batches; send 50 messages with `FlushAfter(1s)` → 1 batch after 1s.
   - [x] **Multiple=true ack test:** unit tests assert single `basic.ack` frame with `multiple=true` per nil-returning handler via fakeAcknowledger.
@@ -690,9 +690,15 @@ before Phase 5 can close.
 
 ### Checkpoint — Phase 5 done
 - [ ] Bench documented: `PublishBatch` ≥ 5× `Publish` on local broker.
-- [ ] BatchConsumer flushes on both triggers.
-- [ ] **`examples/batch_publish/main.go` and `examples/batch_consume/main.go` build (unit lane) and smoke-run end-to-end (integration lane)** per T23b — SPEC §7 + Rev decision 49.
-- [ ] **Review with human before Phase 6.**
+      *(Deferred by design to **T44b** — the throughput-benchmark suite,
+      `deps: Phases 1–5, T37`. The `5×` gate is owned there, not in Phase 5;
+      it requires the testcontainers helper (T37) + reference hardware.)*
+- [x] BatchConsumer flushes on both triggers. *(Unit-tested:
+      `TestBatchConsumer_SizeFlush` + `TestBatchConsumer_FlushAfterTimer`;
+      integration `TestBatchConsumer_SizeFlush_integration` +
+      `TestBatchConsumer_FlushAfterTimer_integration`.)*
+- [x] **`examples/batch_publish/main.go` and `examples/batch_consume/main.go` build (unit lane) and smoke-run end-to-end (integration lane)** per T23b — SPEC §7 + Rev decision 49. *(Unit-lane build verified green; integration smoke-run runs on the `integration` CI lane via `example_integration_test.go` in each subdir — compiles under `-tags=integration`; not executed locally, no broker.)*
+- [ ] **Review with human before Phase 6.** *(Human gate — pending.)*
 
 ---
 

@@ -672,23 +672,27 @@ documented Ack/Nack-with-`multiple=true` semantics.
 - **T23b** Checkpoint examples `examples/batch_publish/main.go` and `examples/batch_consume/main.go` (SPEC §7 + Rev decision 49): both `package main` reading `AMQP_URL`. `batch_publish/` demonstrates `PublishBatch` always-all + `[]PublishResult` interpretation + `ErrBatchTooLarge` guard. `batch_consume/` demonstrates `BatchConsumerFor[M]` with `Size(100)` + `FlushAfter(1s)` + auto-`multiple=true` ack on nil handler return. CI build (unit lane) + smoke-run (integration lane).
 
 **Checkpoint Phase 5:**
-- [ ] `PublishBatch` of 1000 JSON messages: zero loss, single
-      confirm-window round-trip.
-- [ ] `PublishBatch` of 2000 messages with default `PublishBatchMaxSize=1024`:
+- [x] `PublishBatch` of 1000 JSON messages: zero loss, single
+      confirm-window round-trip. *(integration `TestPublishBatch_AlwaysAll_integration`;
+      unit `TestPublishBatch_AllSuccess`.)*
+- [x] `PublishBatch` of 2000 messages with default `PublishBatchMaxSize=1024`:
       returns `ErrBatchTooLarge` immediately, empty result slice; no
-      channel work performed.
-- [ ] `PublishBatch` preserves input order: deliveries on the consumer
+      channel work performed. *(`TestPublishBatch_ErrBatchTooLarge` +
+      `TestPublishBatch_ErrBatchTooLarge_integration`.)*
+- [x] `PublishBatch` preserves input order: deliveries on the consumer
       side arrive in the same order they were published (single-channel
-      guarantee).
-- [ ] `BatchConsumer` flushes on `Size(N)` reached.
-- [ ] `BatchConsumer` flushes on `FlushAfter(d)` even if size <N.
-- [ ] `BatchConsumer` handler returning nil: single `basic.ack` frame
+      guarantee). *(`TestPublishBatch_SingleChannelOrdering` +
+      `TestPublishBatch_OrderPreservation_integration`.)*
+- [x] `BatchConsumer` flushes on `Size(N)` reached.
+- [x] `BatchConsumer` flushes on `FlushAfter(d)` even if size <N.
+- [x] `BatchConsumer` handler returning nil: single `basic.ack` frame
       with `multiple=true` for the highest delivery-tag (verified via
-      channel recorder).
+      channel recorder). *(`batch_consumer_autoack_test.go`.)*
 - [ ] Per-message benchmark report: `Publish` baseline vs
       `PublishBatch` throughput (must be at least 5× faster on local
-      broker).
-- [ ] **Example(s):** `examples/batch_publish/main.go` and
+      broker). *(Deferred by design to **T44b** — throughput-benchmark
+      suite; the `5×` gate is owned there, `deps: Phases 1–5, T37`.)*
+- [x] **Example(s):** `examples/batch_publish/main.go` and
       `examples/batch_consume/main.go` build on the unit lane and
       smoke-run end-to-end on the integration lane. Demonstrate
       `PublishBatch` always-all + `[]PublishResult` and
