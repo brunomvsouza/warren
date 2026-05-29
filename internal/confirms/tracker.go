@@ -259,6 +259,11 @@ func (t *Tracker) resolveOne(deliveryTag uint64, baseErr error) {
 // over the channel's lifetime, so a multiple=true frame costs O(resolved) amortised
 // with no per-frame allocation (Lens-09 PC-11) — not the O(outstanding) scan +
 // O(outstanding·log) sort of the previous design.
+//
+// Note: the current publisher feed (amqp091-go's NotifyPublish) expands and
+// resequences multiple=true frames into individual confirmations before the
+// tracker sees them, so this path is a contract-level safety net for direct
+// multiple=true frames rather than the production hot path (see SPEC §6.2).
 func (t *Tracker) resolveUpTo(deliveryTag uint64, baseErr error) {
 	i := t.head
 	for i < len(t.order) && t.order[i] <= deliveryTag {
@@ -297,6 +302,12 @@ func (t *Tracker) advanceLowWater() {
 	t.compactOrder()
 }
 
+// orderCompactMinPrefix is the smallest dead-prefix length that triggers an
+// in-place compaction of the order index. Below it, the leftover capacity is
+// cheap enough to leave alone; above it (and once the dead prefix is at least
+// half the slice) reclaiming keeps the index bounded by the outstanding window.
+const orderCompactMinPrefix = 64
+
 // compactOrder reclaims the dead prefix of the order index so it stays bounded by
 // the outstanding window on a long-lived channel. Must be called with t.mu held.
 func (t *Tracker) compactOrder() {
@@ -306,7 +317,7 @@ func (t *Tracker) compactOrder() {
 	case t.head >= len(t.order):
 		t.order = t.order[:0]
 		t.head = 0
-	case t.head > 64 && t.head*2 >= len(t.order):
+	case t.head > orderCompactMinPrefix && t.head*2 >= len(t.order):
 		n := copy(t.order, t.order[t.head:])
 		t.order = t.order[:n]
 		t.head = 0

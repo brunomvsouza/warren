@@ -857,15 +857,23 @@ Semantics:
   (classified `ErrTransient`). For `reject-publish-dlx`, the broker
   also dead-letters the message; the publisher caller still sees
   `ErrPublishNacked` so the application can re-publish or back off.
-- **`multiple=true` resolution.** The confirm tracker handles `basic.ack`
-  and `basic.nack` frames with `multiple=true` efficiently, resolving all
-  outstanding `delivery-tags` up to and including the given tag by advancing a
-  contiguous confirmed low-water-mark over an ascending index of registered
-  tags. Each frame costs **O(resolved)** amortised — the count actually
-  confirmed by the frame, not O(outstanding) — with no per-frame allocation,
-  because the watermark only moves forward and each tag is visited at most once
-  over the channel's lifetime. This is critical for high-throughput batching
-  against RabbitMQ 4.x.
+- **`multiple=true` resolution.** Batching against RabbitMQ is efficient at the
+  wire level: the broker coalesces many confirms into one `basic.ack`/`basic.nack`
+  frame with `multiple=true`. **In the current wiring the confirm tracker never
+  sees that flag, though:** `amqp091-go`'s confirm listener (`NotifyPublish`)
+  expands and resequences a `multiple=true` frame into individual, in-order
+  `Confirmation` values before they reach the tracker, so steady-state production
+  resolution is one `delivery-tag` at a time (`tracker.Ack(tag, false)`). The
+  tracker still resolves a `multiple=true` frame correctly — a contract-level
+  safety net for direct-frame use, not the production confirm path — by advancing
+  a contiguous confirmed low-water-mark over an ascending index of registered
+  tags. That index, maintained on `Register`, is what keeps both the per-confirm
+  steady state ordered and any `multiple=true` frame **O(resolved)** amortised
+  (the count actually confirmed, not O(outstanding)) with no per-frame
+  allocation; it is also self-compacting so it stays bounded by the outstanding
+  window. The earlier "single pass, critical for high-throughput batching"
+  framing overstated the tracker's role: the throughput win is the broker's
+  frame coalescing, which `amqp091-go` unfolds client-side.
 - **`basic.return` / `basic.ack` correlation for mandatory publishes.**
   For an unroutable mandatory publish, RabbitMQ sends `basic.return`
   *first*, then `basic.ack` (the broker acks because *it* handled the
