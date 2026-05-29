@@ -144,10 +144,11 @@ func Dial(ctx context.Context, options ...Option) (*Connection, error) {
 		return nil, err
 	}
 
-	// Validate the channel pool against the broker-negotiated channel-max.
-	// When WithChannelMax is left at 0 the server drives the ceiling (RabbitMQ
-	// defaults to 2047); a pool larger than that can never be fully populated,
-	// so fail-closed here rather than surfacing channel-open errors lazily.
+	// Validate the channel pool against the actual broker-negotiated channel-max,
+	// regardless of whether WithChannelMax was set (the server may negotiate a
+	// lower ceiling than requested; with WithChannelMax(0) RabbitMQ drives it,
+	// defaulting to 2047). A pool larger than the ceiling can never be fully
+	// populated, so fail-closed here rather than surfacing channel-open errors lazily.
 	if negMax := c.pubConns[0].negotiatedChannelMax(); negMax > 0 && opts.channelPoolSize > int(negMax) {
 		closeManagedConns(c.pubConns)
 		return nil, fmt.Errorf("%w: WithChannelPoolSize (%d) exceeds the broker-negotiated channel-max (%d)",
@@ -226,11 +227,12 @@ func (c *Connection) AuthenticatedUser() string { return c.authUser }
 // Health verifies broker responsiveness by opening and immediately closing a
 // temporary AMQP channel on the first publisher connection (SPEC §6.1).
 //
-// It returns, in precedence order: ctx.Err() if ctx is already done;
-// ErrAlreadyClosed if the Connection is shut down; ErrReconnecting if a
-// reconnect barrier is active; ErrTopologyRedeclareFailed if the connection is
-// in a degraded topology state; ErrNotConnected if the socket is not yet
-// established; otherwise any error from the channel open/close round-trip.
+// It returns, in precedence order: ErrAlreadyClosed if the Connection is shut
+// down; ErrNotConnected if the connection pool is empty; ctx.Err() if ctx is
+// already done; ErrReconnecting if a reconnect barrier is active;
+// ErrTopologyRedeclareFailed if the connection is in a degraded topology state;
+// ErrNotConnected if the socket is not yet established; otherwise any error from
+// the channel open/close round-trip.
 func (c *Connection) Health(ctx context.Context) error {
 	c.closedMu.Lock()
 	closed := c.closed
@@ -367,7 +369,6 @@ func (c *Connection) openDeclareChannel(_ context.Context) (topologyChannel, err
 	return c.pubConns[0].openChannel()
 }
 
-// health opens a temporary AMQP channel and closes it to verify liveness.
 // negotiatedChannelMax returns the channel-max the broker negotiated during the
 // AMQP handshake (amqp091 resolves 0 to its 2047 default), or 0 if the socket is
 // not yet established.
@@ -380,6 +381,9 @@ func (mc *managedConn) negotiatedChannelMax() uint16 {
 	return mc.raw.Config.ChannelMax
 }
 
+// health probes broker responsiveness on this socket: it honors a done ctx and
+// the reconnect/degraded state, then opens and immediately closes a temporary
+// AMQP channel. See Connection.Health for the full error precedence.
 func (mc *managedConn) health(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err

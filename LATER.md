@@ -828,3 +828,27 @@ unrelated (Phase-18's conditional codec-split reservation) and is left untouched
 
 ---
 
+### LATER-50 — `ChannelPoolSize == channel-max` leaves no channel-ID headroom for transient channels
+
+**Context:** `connection.go` — `Dial` now rejects `WithChannelPoolSize` strictly greater than the
+broker-negotiated channel-max (SPEC §6.1 / Phase 1 checkpoint), so `poolSize == channelMax` is permitted.
+But the publisher channel pool, `Connection.Health` (`openChannel` on `pubConns[0]`), and topology redeclare
+during the reconnect barrier all open channels on the *same* publisher TCP connection. With `poolSize` equal
+to the negotiated ceiling and the pool fully populated, no channel ID remains for those transient channels.
+
+**Impact:** Under a maxed-out pool, `Health` and post-reconnect topology redeclare can fail with a broker
+channel-max error (504 `CHANNEL_ERROR` / connection-level `NOT_ALLOWED`) instead of succeeding — a latent
+operational footgun that only manifests at peak channel usage. Not a correctness bug (the validation matches
+the literal protocol ceiling), but surprising.
+
+**Evidence:** `/agent-skills:review` five-axis review of branch `fix/phase1-verification-gaps`, 2026-05-29
+(fresh-context code-reviewer, "operational tightness" suggestion).
+
+**Suggested solution:** Either (a) document in the `WithChannelPoolSize` godoc that the pool should be sized
+below the channel-max to leave headroom for Health/redeclare/transient channels, or (b) reserve a small fixed
+headroom (e.g. validate `poolSize <= channelMax - reserved`, reserved ≥ 1) — note (b) tightens the SPEC §6.1
+"strictly greater" wording and must amend SPEC first.
+
+**Prerequisites:** none (self-contained doc or validation tweak); coordinates with T34 (`WithFrameMax`/sizing
+godoc sweep) if the doc route is chosen.
+
