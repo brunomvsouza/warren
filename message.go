@@ -51,9 +51,12 @@ type Message[M any] struct {
 	ReplyTo       string
 	Type          string
 	AppID         string
-	// UserID is validated client-side at publish time: if non-empty and differs
-	// from the connection's authenticated user, Publish returns ErrInvalidMessage
-	// without a broker round-trip.
+	// UserID, when set, must equal the connection's authenticated user: RabbitMQ
+	// closes the channel with a 406 (PRECONDITION_FAILED) if it does not. To turn
+	// that footgun into a local error, Publish validates UserID client-side — a
+	// non-empty value that differs from the authenticated user returns
+	// ErrInvalidMessage without writing the publish frame. Leave it empty, or use
+	// the publisher's StampUserID() option to stamp the authenticated user for you.
 	UserID string
 	// ContentType is the MIME type of the body (e.g. "application/json").
 	// Default: set from codec.ContentType() when empty.
