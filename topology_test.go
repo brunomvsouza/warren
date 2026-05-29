@@ -391,6 +391,75 @@ func TestTopology_expand_injectsMaxPriority(t *testing.T) {
 	assert.Equal(t, int64(10), expanded.Queues[0].Args["x-max-priority"])
 }
 
+// findQueue returns a pointer to the queue named name in topo, or nil.
+func findQueue(topo *Topology, name string) *Queue {
+	for i := range topo.Queues {
+		if topo.Queues[i].Name == name {
+			return &topo.Queues[i]
+		}
+	}
+	return nil
+}
+
+// SPEC §10 decision 52 (Rev 9): Topology.Declare implicitly injects
+// x-dead-letter-strategy: at-least-once for quorum queues with a DLX, so
+// dead-lettering preserves messages (the project's at-least-once contract).
+
+func TestTopology_expand_injectsAtLeastOnceStrategyForQuorumWithDLX(t *testing.T) {
+	topo := &Topology{
+		Queues:      []Queue{{Name: "orders", Durable: true, Type: QueueTypeQuorum}},
+		DeadLetters: []DeadLetter{{Source: "orders"}},
+	}
+	expanded := topo.expand()
+	src := findQueue(expanded, "orders")
+	require.NotNil(t, src)
+	assert.Equal(t, "at-least-once", src.Args["x-dead-letter-strategy"])
+}
+
+func TestTopology_expand_injectsStrategyForQuorumWithManualDLX(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{
+			Name: "orders", Durable: true, Type: QueueTypeQuorum,
+			Args: map[string]any{"x-dead-letter-exchange": "my.dlx"},
+		}},
+	}
+	expanded := topo.expand()
+	assert.Equal(t, "at-least-once", expanded.Queues[0].Args["x-dead-letter-strategy"])
+}
+
+func TestTopology_expand_noStrategyForQuorumWithoutDLX(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{Name: "orders", Durable: true, Type: QueueTypeQuorum}},
+	}
+	expanded := topo.expand()
+	assert.NotContains(t, expanded.Queues[0].Args, "x-dead-letter-strategy")
+}
+
+func TestTopology_expand_noStrategyForClassicWithDLX(t *testing.T) {
+	topo := &Topology{
+		Queues:      []Queue{{Name: "orders", Durable: true, Type: QueueTypeClassic}},
+		DeadLetters: []DeadLetter{{Source: "orders"}},
+	}
+	expanded := topo.expand()
+	src := findQueue(expanded, "orders")
+	require.NotNil(t, src)
+	assert.NotContains(t, src.Args, "x-dead-letter-strategy")
+}
+
+func TestTopology_expand_respectsUserDeadLetterStrategy(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{
+			Name: "orders", Durable: true, Type: QueueTypeQuorum,
+			Args: map[string]any{"x-dead-letter-strategy": "at-most-once"},
+		}},
+		DeadLetters: []DeadLetter{{Source: "orders"}},
+	}
+	expanded := topo.expand()
+	src := findQueue(expanded, "orders")
+	require.NotNil(t, src)
+	assert.Equal(t, "at-most-once", src.Args["x-dead-letter-strategy"])
+}
+
 // — T15: Topology.Declare — broker declare order (via recorder) —————————
 
 // declareRecorder captures the sequence of broker declare calls.
