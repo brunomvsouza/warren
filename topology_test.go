@@ -846,12 +846,19 @@ func TestTopology_validate_rejectsRawQueueTypeArg(t *testing.T) {
 
 // FuzzTopologyExpand locks the no-panic guarantee of validate()+expand() against
 // arbitrary caller-supplied args (LATER-56). A panic in either fails the fuzz.
+//
+// The queue and exchange paths are kept separate on purpose: exchange kinds and
+// queue types are disjoint string sets, so reusing one fuzz string for both
+// would make validate() always fail and expand() never run. The queue topology
+// (Type from kind) reaches expand() for valid queue types; the delayed-exchange
+// topology exercises the x-delayed-type type-assertion branch.
 func FuzzTopologyExpand(f *testing.F) {
 	f.Add("orders", "quorum", "x-dead-letter-exchange", "dlx", 0)
-	f.Add("delay", "x-delayed-message", "x-delayed-type", "", 1)
-	f.Add("q", "stream", "x-queue-type", "quorum", 2)
+	f.Add("feed", "stream", "x-dead-letter-exchange", "dlx", 0)
+	f.Add("q", "classic", "x-max-priority", "5", 1)
+	f.Add("q", "", "x-queue-type", "quorum", 2)
+	f.Add("delay", "topic", "x-delayed-type", "direct", 0)
 	f.Add("", "bogus", "", "", 3)
-	f.Add("n", "", "x-max-priority", "5", 1)
 
 	f.Fuzz(func(t *testing.T, name, kind, argKey, argVal string, valKind int) {
 		var v any
@@ -869,16 +876,24 @@ func FuzzTopologyExpand(f *testing.F) {
 		if argKey != "" {
 			args[argKey] = v
 		}
-		topo := &Topology{
-			Exchanges:   []Exchange{{Name: name, Kind: ExchangeKind(kind), Args: args}},
+
+		// Queue path: Type ranges over (in)valid queue types. When it validates,
+		// expand() runs — exercising arg injection and the nil-map write paths.
+		queueTopo := &Topology{
 			Queues:      []Queue{{Name: name, Type: QueueType(kind), Args: args}},
 			DeadLetters: []DeadLetter{{Source: name}},
 		}
-		// validate() must never panic on any input.
-		if err := topo.validate(); err != nil {
-			return
+		if err := queueTopo.validate(); err == nil {
+			_ = queueTopo.expand()
 		}
-		// expand() must never panic on validated input.
-		_ = topo.expand()
+
+		// Exchange path: a delayed exchange exercises the x-delayed-type
+		// type-assertion/validation branch with arbitrary arg shapes.
+		exchTopo := &Topology{
+			Exchanges: []Exchange{{Name: name, Kind: ExchangeDelayed, Args: args}},
+		}
+		if err := exchTopo.validate(); err == nil {
+			_ = exchTopo.expand()
+		}
 	})
 }
