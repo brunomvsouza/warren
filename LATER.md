@@ -963,3 +963,46 @@ queue-recreation requirement.
 **Prerequisites:** the `CHANGELOG.md` creation task (SPEC §4 L179 / §8 L2343 — currently missing) is the natural home
 for the migration note; the optional error-wrapping enhancement is self-contained in `topology.go`/`internal/amqperror`.
 
+---
+
+### LATER-58 — `BatchConsumer.applyBatchCounterB` keeps the non-atomic counter-B RMW that was fixed in `Consumer.applyCounterB`
+
+**Context:** T20/CR-02 (this session) made `Consumer[M].applyCounterB`'s in-process redelivery counter (counter B)
+an atomic read-modify-write by adding a `sync.Mutex` to the shared `redeliveryCounter` type (`consumer.go`) and
+holding it across the whole `load → check → store/delete`. `BatchConsumer[M].applyBatchCounterB`
+(`batch_consumer.go:512-580`) implements the *same* counter B on the *same* `redeliveryCounter` type but still does a
+bare `cs.load(key)` → `cs.m.Store(key, count+1)` (single-delivery fast path `:534→:544`; multi-delivery collect/increment
+`:558→:577`) **without taking `cs.mu`**. It is not a live bug today: a single `BatchConsumer` dispatches batches
+**sequentially** (`batch_consumer.go:138-139` — "run multiple `BatchConsumer[M]` instances for parallelism"), each
+instance owns its own per-channel `redeliveryCounter`, and instances do not share that map — so only one goroutine
+ever touches a given counter. The hazard is **latent + a maintenance divergence**.
+
+**Impact:**
+- The two counter-B implementations now diverge: one atomic, one not, on a type that *carries* a mutex the batch path
+  silently ignores. A future reader can reasonably assume both paths are protected and they are not.
+- If `BatchConsumer` ever gains intra-instance concurrent batch dispatch (a `Concurrency(n)`-style option), or the
+  per-channel counter is ever shared across goroutines, the exact CR-02 lost-update reappears — `MaxRedeliveries`
+  undercounts and a poison batch loops past its limit, and `go test -race` will *not* catch it (memory-safe `sync.Map`).
+- Secondary, pre-existing and sequential (not a race): a single multi-delivery batch that contains two deliveries
+  sharing one `MessageId` (at-least-once duplicates inside one batch window) reads `count` for both before either
+  `Store`, so the two collapse to a single increment — counter B undercounts by one per duplicate pair. Minor; worth a
+  decision (de-dup keys within a batch, or document as accepted).
+
+**Evidence:** Phase 4 validation, 2026-05-29 (user flagged the noted-but-not-fixed batch RMW during `/agent-skills:build`).
+The `Consumer` lost-update was proven by `TestConsumer_MaxRedeliveries_CounterB_AtomicUnderConcurrency` (500 goroutines,
+~50/500 increments survived pre-fix). The batch path was left untouched as out-of-Phase-4 scope.
+
+**Suggested solution:** Factor the atomic RMW into a method on `redeliveryCounter` (e.g.
+`incrementIfWithin(key string, limit int) (count int64, allowed bool)` that locks `mu` across load→check→store/delete,
+and a `delete(key)` that locks `mu`), then have both `Consumer.applyCounterB` and `BatchConsumer.applyBatchCounterB`
+call it — eliminating the duplication and the divergence in one move. For the multi-delivery batch, hold `mu` once
+across the whole collect-then-increment pass so the batch verdict is computed atomically. Add a behavioural
+N-goroutine-same-key test for the batch path mirroring the `Consumer` one (only meaningful once concurrent batch
+dispatch exists; until then it guards the shared helper). Decide and document the within-batch duplicate-`MessageId`
+collapse.
+
+**Prerequisites:** none to refactor the shared helper now (pure internal cleanup, behaviour-preserving for the current
+sequential dispatch). The behavioural concurrency guard only becomes load-bearing if/when a concurrent batch-dispatch
+option is added. Aligns with the Phase 19 counter-B atomicity scope (T143/CG-1, T20 extension) — fold in there if that
+phase is tackled first.
+
