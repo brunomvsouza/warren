@@ -20,8 +20,10 @@
 //   - Creates exchange "warren.examples.dl.topic" (topic, durable)
 //   - Creates exchange "warren.examples.dl.orders.dlx" (topic, durable)
 //   - Creates queue "warren.examples.dl.orders" (quorum, durable,
+//     x-delivery-limit=3,
 //     x-dead-letter-exchange=warren.examples.dl.orders.dlx,
-//     x-dead-letter-routing-key=dead.#)
+//     x-dead-letter-routing-key=dead.#,
+//     x-dead-letter-strategy=at-least-once — auto-injected for quorum + DLX)
 //   - Creates queue "warren.examples.dl.orders.dlq" (classic, durable)
 //   - Binds orders queue to topic exchange with routing key "order.#"
 //   - Binds DLQ to DLX with routing key "dead.#"
@@ -96,6 +98,10 @@ func run() error {
 				Name:    "warren.examples.dl.orders",
 				Durable: true,
 				Type:    warren.QueueTypeQuorum,
+				// Broker-enforced redelivery cap (x-delivery-limit). On a
+				// quorum queue the broker dead-letters a message after this
+				// many failed deliveries — the canonical poison-message shield.
+				DeliveryLimit: 3,
 			},
 			{
 				// DLQ — also created by the DLX pre-pass, declared here
