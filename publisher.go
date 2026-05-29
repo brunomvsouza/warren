@@ -473,10 +473,15 @@ func (p *Publisher[M]) injectTrace(ctx context.Context, headers Headers) Headers
 // messaging.rabbitmq.outcome attribute always, and on failure the error.type
 // attribute, an Error status, and a recorded error (SPEC §6.9).
 //
-// Unlike finishConsumeSpan, the raw err.Error() is kept as the status description:
-// publish errors are framework/broker diagnostics (routing, confirms, channel
-// state), never handler- or payload-derived, so there is no message content to
-// leak (SPEC §8) and the broker's reason text is useful when debugging.
+// The codec-encode / client-validation class (ErrInvalidMessage) is the one
+// publish error whose text can be payload-derived: a caller-supplied custom
+// Codec.Encode may embed the message body in its error. That class is reduced to
+// the sentinel label on both the status description and the recorded error —
+// mirroring the consume path's redactedSpanError — so SPEC §8 ("never leak
+// message content into observability") holds uniformly, while errors.Is-based
+// backends still unwrap to the original sentinel. Every other publish error is a
+// framework/broker diagnostic (routing, confirms, channel state) with no message
+// content, so its reason text is kept verbatim — it is useful when debugging.
 func finishPublishSpan(span otel.Span, err error) {
 	outcome, errType := publishOutcome(err)
 	span.SetAttributes(attribute.String("messaging.rabbitmq.outcome", outcome))
@@ -485,6 +490,11 @@ func finishPublishSpan(span otel.Span, err error) {
 		return
 	}
 	span.SetAttributes(semconv.ErrorTypeKey.String(errType))
+	if errors.Is(err, ErrInvalidMessage) {
+		span.SetStatus(otelcodes.Error, errType)
+		span.RecordError(redactedSpanError{label: errType, err: err})
+		return
+	}
 	span.SetStatus(otelcodes.Error, err.Error())
 	span.RecordError(err)
 }

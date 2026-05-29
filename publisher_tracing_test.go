@@ -3,6 +3,7 @@ package warren
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -483,6 +484,48 @@ func TestPublisher_Publish_span_encodeError(t *testing.T) {
 	et, _ := span.attr("error.type")
 	assert.Equal(t, "ErrInvalidMessage", et.AsString())
 	assert.Equal(t, codes.Error, span.status)
+}
+
+// — finishPublishSpan: §8 leakage symmetry with the consume path ————————————
+//
+// The codec-encode / client-validation class (ErrInvalidMessage) is the only
+// publish error whose text can be payload-derived (a caller-supplied custom
+// Codec.Encode may embed the message body). It must be redacted to the sentinel
+// label on the span, mirroring the consume path's redactedSpanError. Broker /
+// framework diagnostics carry no message content and stay verbatim (LATER-59).
+
+func TestFinishPublishSpan_redactsCodecClassKeepsBrokerVerbatim(t *testing.T) {
+	const secret = "super-secret-payload-42"
+
+	t.Run("ErrInvalidMessage class is redacted to the sentinel label", func(t *testing.T) {
+		s := &recordingSpan{}
+		leak := fmt.Errorf("%w: bad value %s", ErrInvalidMessage, secret)
+		finishPublishSpan(s, leak)
+
+		assert.Equal(t, codes.Error, s.status)
+		assert.Equal(t, "ErrInvalidMessage", s.statMsg,
+			"status description must be the closed-vocabulary label, never err.Error()")
+		assert.NotContains(t, s.statMsg, secret)
+
+		require.Len(t, s.errs, 1)
+		assert.Equal(t, "ErrInvalidMessage", s.errs[0].Error(),
+			"recorded error must render the label, not the payload-bearing message")
+		assert.NotContains(t, s.errs[0].Error(), secret)
+		assert.ErrorIs(t, s.errs[0], ErrInvalidMessage,
+			"the recorded error must still unwrap to the sentinel for errors.Is backends")
+	})
+
+	t.Run("broker/framework diagnostics stay verbatim", func(t *testing.T) {
+		s := &recordingSpan{}
+		brokerErr := fmt.Errorf("%w: NO_ROUTE reply-code 312", ErrUnroutable)
+		finishPublishSpan(s, brokerErr)
+
+		assert.Equal(t, codes.Error, s.status)
+		assert.Equal(t, brokerErr.Error(), s.statMsg,
+			"broker diagnostics (no message content) are useful and kept verbatim")
+		require.Len(t, s.errs, 1)
+		assert.ErrorIs(t, s.errs[0], ErrUnroutable)
+	})
 }
 
 func TestPublisher_Publish_span_poolExhausted(t *testing.T) {
