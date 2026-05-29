@@ -248,3 +248,12 @@ type fakeCodec struct {
 func (f *fakeCodec) Encode(v any) ([]byte, error)    { return nil, nil }
 func (f *fakeCodec) Decode(data []byte, v any) error { return nil }
 func (f *fakeCodec) ContentType() string             { return f.contentType }
+
+func TestMetricsTypeName(t *testing.T) {
+	type sampleEvent struct{ ID int }
+	assert.Equal(t, "sampleEvent", metricsTypeName[sampleEvent](), "named type → bare name")
+	assert.Equal(t, "string", metricsTypeName[string](), "builtin named type")
+	// Unnamed types have no reflect Name(); the helper falls back to String().
+	assert.Equal(t, "[]uint8", metricsTypeName[[]byte](), "unnamed slice → String() fallback")
+	assert.Equal(t, "map[string]int", metricsTypeName[map[string]int](), "unnamed map → String() fallback")
+}

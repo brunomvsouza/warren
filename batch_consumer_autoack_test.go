@@ -1130,6 +1130,8 @@ func TestBatchConsumer_MetricsRecorded(t *testing.T) {
 	require.Len(t, capturedCM.records, 1)
 	assert.Equal(t, "myq", capturedCM.records[0].queue)
 	assert.Equal(t, "ack", capturedCM.records[0].outcome)
+	// The batch consumer threads its message type (M = string) into RecordHandler.
+	assert.Equal(t, "string", capturedCM.records[0].messageType)
 }
 
 // TestBatchConsumer_HandlerTimeout_TimeoutNackRequeue verifies that
@@ -1968,19 +1970,21 @@ type captureConsumerMetrics struct {
 	mu       sync.Mutex
 	timeouts int
 	records  []struct {
-		queue   string
-		outcome string
-		elapsed time.Duration
+		queue       string
+		messageType string
+		outcome     string
+		elapsed     time.Duration
 	}
 }
 
-func (c *captureConsumerMetrics) RecordHandler(queue, _, outcome string, elapsed time.Duration) {
+func (c *captureConsumerMetrics) RecordHandler(queue, messageType, outcome string, elapsed time.Duration) {
 	c.mu.Lock()
 	c.records = append(c.records, struct {
-		queue   string
-		outcome string
-		elapsed time.Duration
-	}{queue, outcome, elapsed})
+		queue       string
+		messageType string
+		outcome     string
+		elapsed     time.Duration
+	}{queue, messageType, outcome, elapsed})
 	c.mu.Unlock()
 }
 
