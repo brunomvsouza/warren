@@ -505,3 +505,43 @@ convention this builds on).
 
 ---
 
+### LATER-40 — Pluggable schema-registry / validation hook for event evolution
+
+**Context:** `warren` relies on lax-JSON-by-default (Postel, decision 23) for
+*additive* schema evolution, and Phase 15 (T106, EDA-13) documents the boundary —
+**breaking** evolution (field removal, rename, semantic change) is user-owned via
+versioned type names (`order.created.v2`) and the `Message.Type` discriminator
+convention. There is no library primitive to *enforce* a schema or validate a payload
+against a registered contract before it reaches the handler (consume side) or hits the
+wire (publish side). Across dozens of independently-deployed services, schema drift is
+currently caught only at the first decode failure or, worse, a silently-mis-decoded
+field that lax JSON tolerates.
+
+**Impact:** Event-mesh / multi-team estates have no central, machine-checkable contract
+enforcement. A producer can ship a breaking change and the only signal is downstream
+decode errors (or silent data corruption where lax JSON tolerates the change). Teams
+that want Confluent-style schema-registry guarantees (compatibility checks, schema IDs
+on the wire) must hand-roll them on top of the codec interface.
+
+**Evidence:** Lens-04 event-driven-architecture spec validation, 2026-05-28 (finding
+EDA-13; `spec-validation/04-event-driven-architecture-plan.md`). Owner decision
+(2026-05-28): document the boundary + versioned-type convention now (T106), defer a
+pluggable registry hook to LATER.
+
+**Suggested solution:** Offer an opt-in, codec-adjacent `SchemaValidator` hook — e.g. a
+builder option on `PublisherFor`/`ConsumerFor` taking an interface
+`Validate(ctx, contentType, typeName string, body []byte) error` — that runs after
+encode / before decode and rejects (publish: `ErrInvalidMessage`; consume:
+nack-no-requeue + a `schema_invalid` outcome metric) on a contract violation. Provide a
+no-op default and a reference adapter for one registry (e.g. JSON Schema, or a
+Confluent-compatible registry that carries a schema ID in a header). Keep it additive —
+the lax-JSON default and the `Message.Type` convention stay the baseline; the validator
+is for teams that need enforced contracts. Any wire-format change (a schema-ID header)
+must amend SPEC §6.9 first.
+
+**Prerequisites:** T106 (documents the evolution boundary + the `Message.Type`
+versioned-type convention this builds on); coordinates with the codec/`HeaderCodec`
+interface in `codec/`.
+
+---
+

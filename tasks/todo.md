@@ -1263,16 +1263,18 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 ### [ ] T68 — Alternate-exchange support [P2] · S
 - **Acceptance:**
   - [ ] `x-alternate-exchange` declarable on an `Exchange` (server-side catch-all for unroutable messages), complementing `Mandatory()`+`OnReturn`.
+  - [ ] **Lens-04 (EDA-01):** the platform-level unroutable safety net — a mis-routed publish *without* `Mandatory()` vanishes silently (EG-1); the AE catches it server-side regardless of per-publish discipline. Complements T103's client-side exchange-name validation.
 - **Verify:** Integration: publish (non-mandatory) to no matching binding with an AE configured → message arrives on the AE-bound queue.
 - **Files:** `topology.go`, `topology_test.go`, `topology_integration_test.go`.
-- **Deps:** T14, T15. **(R10-13, P2.4)**
+- **Deps:** T14, T15. **(R10-13, P2.4)** — *pulled into Phase 15 (v0.1).*
 
 ### [ ] T69 — Exchange-to-exchange bindings [P2] · S
 - **Acceptance:**
   - [ ] `Binding` (or a typed variant) supports an exchange destination (`exchange.bind`) for layered fan-out.
+  - [ ] **Lens-04 (EDA-03):** ingest→per-domain layered fan-out is declarable without flattening the topology; the declare-once/deep-snapshot semantics stay intact.
 - **Verify:** Integration: bind exchange→exchange, publish to source, assert delivery via the destination exchange's bound queue (`rabbitmqctl list_bindings`).
 - **Files:** `topology.go`, `topology_test.go`, `topology_integration_test.go`.
-- **Deps:** T14, T15. **(R10-14, P2.3)**
+- **Deps:** T14, T15. **(R10-14, P2.3)** — *pulled into Phase 15 (v0.1).*
 
 ### [ ] T70 — Graceful-shutdown completeness [P2] · M
 - **Acceptance:**
@@ -1449,6 +1451,7 @@ the same PR; a SPEC §10 "Rev 12" note records the pass.
   - [ ] **DS-15:** the "UUIDv7 makes eviction-by-recency trivial" non-sequitur is dropped (an `lru.Cache` evicts by access order, not the key's timestamp); SPEC §6.2.1/§6.5 document that `MessageID`/`Timestamp` ordering is per-publisher wall clock — not global, not monotonic across NTP steps — and only ID *uniqueness* is load-bearing for dedupe.
   - [ ] **DS-16:** the forced-close (ctx-deadline) abandoned-in-flight duplicate window is named in §6.2.1.
   - [ ] `examples/idempotent_consume/` ships a persistent (Redis/DB) variant.
+  - [ ] **Lens-04 (EDA-18):** the §6.2.1 L1067–1068 dangling `examples/idempotent_consume/` reference is closed by this task + T38b — the directory ships and matches the reworked pattern.
 - **Verify:** A chaos test crashes the consumer mid-handler and asserts the persistent path dedupes the redelivery while the in-memory path does not.
 - **Files:** SPEC §6.2.1/§6.5, `examples/idempotent_consume/`, a chaos test.
 - **Deps:** T38b, T84. **(DS-01/DS-15/DS-16, P0)**
@@ -1617,6 +1620,123 @@ note records the pass.
 - [ ] README interop contract synced (CloudEvents binary scoped to 0-9-1 / structured = cross-ecosystem, `time.Time` header caveat, JSON int64 caveat, low-interop field-table types).
 - [ ] SPEC §10 "Rev 13" note records the Lens-03 pass; no duplicate tasks created; exactly one new `LATER.md` entry (LATER-39).
 
+## Phase 15 — Event-Driven-Architecture Re-review (Lens 04: pattern expressiveness, safe-default analysis, topology completeness)
+
+Closes the Lens-04 adversarial spec validation
+(`spec-validation/04-event-driven-architecture.md`, findings `EDA-01..EDA-18`;
+brief `spec-validation/04-event-driven-architecture-plan.md`). Lens verdict:
+**GO-WITH-CHANGES** — no *new* §1 message-loss bug (unbounded-DLQ/`Close`-loss are
+already T65/T70), but ordered keyed streams at scale are effectively unsupported
+(no consistent-hash, EDA-04), the platform-level unroutable black-hole has no
+server-side net (EDA-01/EDA-02), the lossy delayed exchange is the easy retry tool
+(EDA-05/EDA-06), `return nil` silently acks a batch poison (EDA-15), and several
+boundaries are unstated (redrive, breaking schema evolution, structured-mode
+routing opacity, layered fan-out). Owner decisions (2026-05-28): **pull into scope**
+the `x-consistent-hash` ordered-keyed-stream primitive (EDA-04); **pull T68 + T69
+forward** (alternate exchange + e2e bindings); **build a DLQ redrive helper**
+(EDA-09); **document the schema-evolution boundary + versioned-type convention +
+LATER-40** (EDA-13). **No new build-tag lane** — gates ride the existing integration
+(3.13 + 4.x) + `chaos` lanes. Five findings are already owned by prior-lens tasks
+and are **not** re-filed (EDA-07/08→T65, EDA-10→T91, EDA-11→T90, EDA-16→T70,
+EDA-18 extends T85). One new `LATER.md` entry (LATER-40). Pattern claims are tested
+by exercising the pattern on a live broker, not a unit of API in isolation. **Gate
+task T101 runs first**; no SPEC edit to an affected section lands before its gate
+returns. Per-task SPEC amendment lands in the same PR; a SPEC §10 "Rev 14" note
+records the pass.
+
+### [ ] T101 — Verification gates EG-1–EG-4 (real broker, existing integration lane, 3.13 + 4.x) [P0] · S
+- **Acceptance:**
+  - [ ] Ground truth captured on **both** versions (existing integration lane — **no new build-tag lane**) for: **EG-1** a publish to a non-existent/mis-routed exchange **without** `Mandatory()` succeeds silently (no error, no `OnReturn`, message gone) — confirm `Mandatory()` is the only client-side net; **EG-2** a short per-message-TTL message **behind** a long-TTL message fails to expire at its own TTL on a single queue (head-of-line blocking); **EG-3** a `BatchConsumer` handler returning `nil` emits one `basic.ack` with `multiple=true` over the **whole** delivery range; **EG-4** `SingleActiveConsumer` permits exactly one active consumer (no horizontal scale) **and** an `x-consistent-hash` exchange distributes by routing-key hash across N bound queues.
+  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate.
+- **Verify:** The integration lane (3.13 + 4.x) green with the EG assertions; the gate table is reviewable.
+- **Files:** `*_integration_test.go`, `spec-validation/` (results table).
+- **Deps:** T09, T15, T18, T22. **(EDA gates, P0)**
+
+### [ ] T102 — Consistent-hash exchange + partitioned ordered consumer (EDA-04) [P0] · M
+- **Acceptance:**
+  - [ ] An `x-consistent-hash` `ExchangeKind` is declarable in `Topology`; the partitioned-consumer wiring preserves per-key ordering across N queues each consumed by one consumer (ordered work scaled horizontally), eliminating the v0.1-only `SingleActiveConsumer + Concurrency(1)` (one active consumer, no scale) forced choice.
+  - [ ] SPEC §6.3/§6.6 document the per-key-ordering-across-N-queues pattern and the rebalancing trade-off (changing the partition count reshuffles keys).
+- **Verify:** EG-4 integration test: N consistent-hash-bound queues preserve per-key order while distributing across queues; `goleak` clean. `examples/partitioned_consume/` builds + smoke-runs.
+- **Files:** `topology.go`, `consumer.go`, SPEC §6.3/§6.6, `examples/partitioned_consume/`, `topology_integration_test.go`, `README.md`.
+- **Deps:** T101 (EG-4), T15, T18. **(EDA-04, P0)**
+
+### [ ] T103 — Publisher-side unroutable safety / exchange-name validation (EDA-02) [P1] · S
+- **Acceptance:**
+  - [ ] SPEC §6.6 documents the silent-drop-without-`Mandatory()` behaviour (per EG-1) and the topology-drift risk (an `Exchange("oders")` typo publishes into the void).
+  - [ ] An **optional** validation, when a `*Topology` is wired to the builder, checks the referenced exchange exists and warns/errors at `Build`; `Mandatory()` is recommended as the default discipline.
+- **Verify:** A `PublisherFor[M]` given a `Topology` lacking the named exchange warns/fails at `Build`; the silent-drop behaviour is asserted + documented (EG-1).
+- **Files:** `publisher.go`, `publisher_builder.go`, SPEC §6.6, a publisher build test, an integration test.
+- **Deps:** T101 (EG-1), T13, T15. **(EDA-02, P1)** — complements T68 (server-side AE net).
+
+### [ ] T104 — Durable retry-ladder example + per-message-TTL HOL doc (EDA-05/EDA-06) [P1] · M
+- **Acceptance:**
+  - [ ] `examples/retry_ladder/` ships a runnable, durable, **multi-tier TTL+DLX** backoff ladder (one queue per delay tier), so users don't reach for the lossy delayed-message exchange (R10-1, do-not-regress).
+  - [ ] SPEC §6.5 documents the **per-message-TTL head-of-line-blocking** trap (RabbitMQ only expires from the head) and the queue-per-tier requirement (per EG-2).
+- **Verify:** `examples-build` + `examples-smoke` green; the example demonstrates a message cycling through delay tiers and finally to the DLQ; EG-2 captures the HOL behaviour.
+- **Files:** `examples/retry_ladder/`, SPEC §6.5, an integration/example smoke test, `README.md`.
+- **Deps:** T101 (EG-2), T15, T31. **(EDA-05/EDA-06, P1)**
+
+### [ ] T105 — DLQ redrive helper + example (EDA-09) [P1] · M
+- **Acceptance:**
+  - [ ] A minimal `DLQ → source` republish utility dedupes by `MessageID` (preserving at-least-once) and is observable (metric/log).
+  - [ ] SPEC §6.6 documents the redrive pattern and its scope boundary; `examples/redrive/` ships.
+- **Verify:** Integration: dead-letter N messages, run the helper, assert they reappear on the source queue exactly once per `MessageID`; `examples-build` + `examples-smoke` green; `goleak` clean.
+- **Files:** a redrive helper (`redrive.go` or `dlq.go`), SPEC §6.6, `examples/redrive/`, an integration test, `README.md`.
+- **Deps:** T13, T15, T18, T47. **(EDA-09, P1)** — DLQ bounds + Consumer DLX validation are T65.
+
+### [ ] T106 — Event-evolution boundary + versioned-type convention + LATER-40 (EDA-13) [P2] · S
+- **Acceptance:**
+  - [ ] SPEC §6.9/§8 state the boundary: additive change is safe (lax JSON / Postel, decision 23); **breaking** evolution (field removal, rename, semantic change) is user-owned via **versioned type names** (`order.created.v2`) / a new exchange / dual-publish.
+  - [ ] SPEC recommends the `Message.Type` discriminator convention for versioned events; an example or godoc branches on `Type` before decode.
+  - [ ] **LATER-40** files a pluggable schema-registry/validation hook (prereq T106).
+- **Verify:** Doc review of the boundary + convention; the `Type`-branching snippet builds.
+- **Files:** SPEC §6.9/§8/§10, `message.go` (godoc), `LATER.md`, optionally an example.
+- **Deps:** T09. **(EDA-13, P2)**
+
+### [ ] T107 — Structured-mode CloudEvents routing-opacity doc (EDA-14) [P2] · S
+- **Acceptance:**
+  - [ ] SPEC §6.9 documents that a structured event (`application/cloudevents+json` body, the T97 cross-ecosystem path) is **opaque to broker routing** — the broker cannot route on a `type`/`subject` that lives in the body — and recommends setting the AMQP routing key / a routing header explicitly (or binary mode for 0-9-1 attribute routing).
+- **Verify:** An example routes a structured CloudEvent by an explicitly-set routing key; doc review.
+- **Files:** SPEC §6.9, `examples/cloudevents/` (or a routing example), `README.md`.
+- **Deps:** T26. **(EDA-14, P2)** — coordinate with T97 (same §6.9 CloudEvents subsection).
+
+### [ ] T108 — Batch partial-failure footgun doc + example (EDA-15) [P1] · S
+- **Acceptance:**
+  - [ ] SPEC §6.4 **prominently** (up front, not buried) documents that a `BatchConsumer` handler returning `nil` triggers one `basic.ack` with `multiple=true` over the **whole** range — acking an in-batch poison the handler never individually processed — and documents the per-delivery `Batch.Deliveries()` idiom for safe partial failure.
+  - [ ] A worked example demonstrates per-delivery ack/nack for a 1-poison-in-N batch.
+- **Verify:** EG-3 captures the `multiple=true` whole-range ack; the example asserts the poison is nacked while the rest are acked; `examples-build` + `examples-smoke` green.
+- **Files:** SPEC §6.4, `examples/batch_consume/` (or a new partial-failure example), an integration test.
+- **Deps:** T101 (EG-3), T22. **(EDA-15, P1)**
+
+### [ ] T109 — RPC usage-guidance preamble (EDA-12) [P2] · XS
+- **Acceptance:**
+  - [ ] SPEC §6.7 carries a usage-guidance preamble framing RPC as a deliberate-use primitive: the synchronous-coupling-over-async-transport caveat, when to prefer a normal request/response *event* pair, and the blind-retry/amplification consequence (cross-link T91's opt-in structured-error reply mode).
+- **Verify:** Doc review of the §6.7 preamble.
+- **Files:** SPEC §6.7, `README.md` (if the roadmap copy references RPC).
+- **Deps:** —. **(EDA-12, P2)** — coordinate with T91 (Lens-02 structured-error RPC).
+
+### [ ] T110 — Consumer-tag pinning clarity (EDA-17) [P3] · XS
+- **Acceptance:**
+  - [ ] SPEC §6.1 documents the stable-hash-of-consumer-tag pinning to consumer connections, the hot-spot risk at low connection/consumer counts (all tags hash to one socket with the default 2 connections), and whether adding consumer connections migrates live consumers (and the reconnect cost) or only affects new ones.
+  - [ ] If a code clarification is warranted (e.g. the rebalancing mechanism), it is scoped here.
+- **Verify:** Doc review; if code touched, a unit test asserts the pinning/rebalancing behaviour.
+- **Files:** SPEC §6.1, optionally `connection.go`/`consumer.go`.
+- **Deps:** T07d, T18. **(EDA-17, P3)**
+
+### Checkpoint — Phase 15 (Lens 04) closed
+- [ ] T101 gate results (EG-1..EG-4) captured on the existing integration lane (3.13 **and** 4.x); results table committed; downstream tasks cite their gate; **no new build-tag lane** introduced.
+- [ ] Ordered keyed streams scale (EDA-04/T102): `x-consistent-hash` `ExchangeKind` + partitioned-consumer wiring + example preserve per-key order across N parallel-consumed queues; §6.6 documents the pattern + rebalancing trade-off.
+- [ ] Unroutable black-hole closed: `x-alternate-exchange` exposed (EDA-01/T68); publisher-side exchange-name validation warns/errors at `Build` + silent-drop-without-`Mandatory()` documented (EDA-02/T103).
+- [ ] Layered fan-out enabled (EDA-03/T69): exchange-to-exchange bindings declarable without breaking declare-once/deep-snapshot.
+- [ ] Safe retry is the easy one (EDA-05/EDA-06/T104): `examples/retry_ladder/` ships (durable multi-tier TTL+DLX); §6.5 documents the per-message-TTL HOL trap + queue-per-tier; R10-1 warning preserved.
+- [ ] DLQ lifecycle complete (EDA-09/T105): redrive helper republishes DLQ→source (dedupe by `MessageID`), observable; `examples/redrive/` ships; §6.6 documents the pattern.
+- [ ] Boundaries stated: schema-evolution (EDA-13/T106, LATER-40 filed), structured-mode routing opacity (EDA-14/T107), RPC usage framing (EDA-12/T109), consumer-tag pinning (EDA-17/T110).
+- [ ] Batch footgun defused (EDA-15/T108): §6.4 prominently documents the `return nil` → `multiple=true` trap + the per-delivery idiom; example covers 1-poison-in-N.
+- [ ] `examples/idempotent_consume/` ships (EDA-18) via T85 + T38b; the §6.2.1 dangling reference closed.
+- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 **and** 4.x) green (incl. new examples' smoke run); `goleak.VerifyNone` clean.
+- [ ] README "Available now / On the roadmap" synced (consistent-hash + alternate + e2e-binding topology, redrive helper, retry-ladder + schema-evolution guidance).
+- [ ] SPEC §10 "Rev 14" note records the Lens-04 pass; no finding re-filed that a prior lens owns; exactly one new `LATER.md` entry (LATER-40).
+
 ### Checkpoint — v0.1.0 shipped
 - [ ] Every SPEC §9 success criterion ticked.
 - [ ] `v0.1.0` tag on `main`.
@@ -1626,8 +1746,8 @@ note records the pass.
 ---
 
 ## Quick stats
-- Total tasks: **109** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39).
-- Phases: **14**.
+- Total tasks: **119** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane)).
+- Phases: **15**.
 - Estimated sizing: 8× XS · 40× S · 23× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.
