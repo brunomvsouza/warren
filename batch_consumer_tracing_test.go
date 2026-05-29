@@ -388,11 +388,13 @@ func TestBatchConsumer_processBatchSpan_outerCtxCancel_noOutcome(t *testing.T) {
 
 	entered := make(chan struct{})
 	canReturn := make(chan struct{})
+	var handlerCtxErr error // read after <-done (happens-before via the channel)
 	done := make(chan error, 1)
 	go func() {
-		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error {
+		done <- bc.Consume(ctx, func(hctx context.Context, _ *Batch[string]) error {
 			close(entered)
-			<-canReturn // released only after the select committed to the cancel branch
+			<-canReturn                // released only after the select committed to the cancel branch
+			handlerCtxErr = hctx.Err() // by release time the cancel has propagated
 			return nil
 		})
 	}()
@@ -409,6 +411,11 @@ func TestBatchConsumer_processBatchSpan_outerCtxCancel_noOutcome(t *testing.T) {
 	}
 	close(canReturn) // unblock the handler so <-handlerDone drains and Consume returns
 	require.NoError(t, <-done)
+
+	// Confirm the cancel branch was taken for the right reason: outer-ctx cancel
+	// (context.Canceled), not a HandlerTimeout deadline (context.DeadlineExceeded).
+	assert.ErrorIs(t, handlerCtxErr, context.Canceled,
+		"handler ctx must carry Canceled, confirming the outer-ctx-cancel branch was taken")
 
 	span := tr.only()
 	require.NotNil(t, span)

@@ -673,12 +673,14 @@ func TestConsumer_Consume_TimeoutPath_OuterCtxCancelled_NoAckNoMetric(t *testing
 	handlerStarted := make(chan struct{})
 	handlerCanReturn := make(chan struct{})
 
+	var handlerCtxErr error // read after <-consumeDone (happens-before via the channel)
 	consumeDone := make(chan struct{})
 	go func() {
 		defer close(consumeDone)
-		_ = consumer.Consume(ctx, func(_ context.Context, _ string) error {
+		_ = consumer.Consume(ctx, func(hCtx context.Context, _ string) error {
 			close(handlerStarted)
-			<-handlerCanReturn // released only after dispatch committed to the cancel branch
+			<-handlerCanReturn         // released only after dispatch committed to the cancel branch
+			handlerCtxErr = hCtx.Err() // by release time the cancel has propagated
 			return nil
 		})
 	}()
@@ -711,6 +713,141 @@ func TestConsumer_Consume_TimeoutPath_OuterCtxCancelled_NoAckNoMetric(t *testing
 	// No timeout metric must be recorded — this was an outer cancel, not a deadline.
 	assert.Equal(t, 0, cm.handlerTimeouts,
 		"RecordHandlerTimeout must not be called when outer ctx is cancelled")
+	// Confirm dispatch took the cancel branch for the right reason: context.Canceled,
+	// not a HandlerTimeout deadline (context.DeadlineExceeded).
+	assert.ErrorIs(t, handlerCtxErr, context.Canceled,
+		"handler ctx must carry Canceled, confirming the outer-ctx-cancel branch was taken")
+}
+
+func TestConsumer_Consume_HandlerTimeout_CompletesBeforeDeadline_Acks(t *testing.T) {
+	// Covers the timeout-path handlerDone-wins branch (consumer.go: HandlerTimeout > 0 and
+	// the handler returns before the deadline). The normal verdict must apply: exactly one
+	// basic.ack with multiple=false, RecordHandler outcome "ack", and NO timeout metric.
+	// The fast path (HandlerTimeout == 0) is covered by TestConsumer_Consume_HandlerNilReturn_Acks;
+	// this pins the otherwise-untested success branch of the timeout select. No cancel races
+	// here — the handler returns immediately, so handlerDone is the only ready select case.
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	capCM := &captureConsumerMetrics{}
+	consumer, err := ConsumerFor[string](conn).
+		Queue("testq").
+		HandlerTimeout(200 * time.Millisecond). // generous; the handler returns immediately
+		Metrics(capCM).
+		Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type ackCall struct {
+		tag      uint64
+		multiple bool
+	}
+	acked := make(chan ackCall, 1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = consumer.Consume(ctx, func(_ context.Context, _ string) error {
+			return nil // returns immediately, well before the 200 ms deadline
+		})
+	}()
+
+	deliveryCh <- amqp091.Delivery{
+		DeliveryTag: 7,
+		Body:        []byte(`"hello"`),
+		ContentType: "application/json",
+		Acknowledger: &fakeAcknowledger{
+			ackFn:  func(tag uint64, multiple bool) error { acked <- ackCall{tag, multiple}; cancel(); return nil },
+			nackFn: func(_ uint64, _, _ bool) error { t.Error("unexpected nack on handler success"); return nil },
+		},
+	}
+
+	var got ackCall
+	select {
+	case got = <-acked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected an ack after the handler completed before the deadline")
+	}
+	<-done
+
+	assert.Equal(t, uint64(7), got.tag)
+	assert.False(t, got.multiple, "Consumer acks a single delivery with multiple=false")
+
+	capCM.mu.Lock()
+	defer capCM.mu.Unlock()
+	require.Len(t, capCM.records, 1)
+	assert.Equal(t, "ack", capCM.records[0].outcome, "outcome must be 'ack', not a timeout variant")
+	assert.Equal(t, 0, capCM.timeouts, "no timeout metric must be recorded on the success path")
+}
+
+func TestConsumer_Consume_HandlerTimeout_CompletesBeforeDeadline_HandlerError_NacksNoRequeue(t *testing.T) {
+	// Complement of the success case: on the timeout-path handlerDone branch, a handler that
+	// returns a plain (non-ErrRequeue) error before the deadline must produce exactly one
+	// basic.nack with requeue=false, RecordHandler outcome "nack_no_requeue", and NO timeout
+	// metric — the normal verdict, not the timeout verdict.
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	capCM := &captureConsumerMetrics{}
+	consumer, err := ConsumerFor[string](conn).
+		Queue("testq").
+		HandlerTimeout(200 * time.Millisecond). // generous; the handler returns immediately
+		Metrics(capCM).
+		Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type nackCall struct {
+		tag     uint64
+		requeue bool
+	}
+	nacked := make(chan nackCall, 1)
+	handlerErr := errors.New("boom")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = consumer.Consume(ctx, func(_ context.Context, _ string) error {
+			return handlerErr // returns immediately, well before the 200 ms deadline
+		})
+	}()
+
+	deliveryCh <- amqp091.Delivery{
+		DeliveryTag: 9,
+		Body:        []byte(`"hello"`),
+		ContentType: "application/json",
+		Acknowledger: &fakeAcknowledger{
+			ackFn:  func(_ uint64, _ bool) error { t.Error("unexpected ack on handler error"); return nil },
+			nackFn: func(tag uint64, _, requeue bool) error { nacked <- nackCall{tag, requeue}; cancel(); return nil },
+		},
+	}
+
+	var got nackCall
+	select {
+	case got = <-nacked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a nack after the handler returned an error before the deadline")
+	}
+	<-done
+
+	assert.Equal(t, uint64(9), got.tag)
+	assert.False(t, got.requeue, "a plain handler error must nack without requeue")
+
+	capCM.mu.Lock()
+	defer capCM.mu.Unlock()
+	require.Len(t, capCM.records, 1)
+	assert.Equal(t, "nack_no_requeue", capCM.records[0].outcome, "outcome must be the normal verdict, not a timeout variant")
+	assert.Equal(t, 0, capCM.timeouts, "no timeout metric must be recorded on the error path")
 }
 
 func TestConsumer_Consume_BasicCancel_RecordsCancelled(t *testing.T) {

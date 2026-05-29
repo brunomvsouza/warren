@@ -8,7 +8,12 @@ PKG       := ./...
 GO_MOD_VERSION := $(shell awk '/^go [0-9]/{print $$2}' go.mod)
 GOTOOLCHAIN     ?= go$(GO_MOD_VERSION)
 
-.PHONY: help build test test-integration test-conformance test-all lint mocks tidy doc hooks clean examples-build examples-smoke integration-up integration-down
+# Repetition depth for the stress lane. The set of scheduling-sensitive tests is declared
+# in stress_test.go behind the 'stress' build tag (TestStress), not as a -run regex here,
+# so membership stays next to the code and a rename breaks the build instead of going stale.
+STRESS_COUNT ?= 200
+
+.PHONY: help build test test-stress test-integration test-conformance test-all lint mocks tidy doc hooks clean examples-build examples-smoke integration-up integration-down
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -33,6 +38,9 @@ test-conformance: ## Run AMQP 0-9-1 conformance tests (requires Docker).
 
 test-all: ## Run unit + integration + conformance tests.
 	$(GO) test -race -cover -tags='integration conformance' $(PKG)
+
+test-stress: ## Hammer scheduling-sensitive tests (stress build tag) under -race to guard determinism (override STRESS_COUNT).
+	$(GO) test -race -tags=stress -count=$(STRESS_COUNT) -run '^TestStress$$' .
 
 tidy: ## Tidy go.mod/go.sum using the Go version declared in go.mod (prevents toolchain drift).
 	GOTOOLCHAIN=$(GOTOOLCHAIN) $(GO) mod tidy

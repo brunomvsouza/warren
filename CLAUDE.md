@@ -15,6 +15,7 @@ When the user references "Txx", look it up in `tasks/plan.md` for scope and acce
 ```
 make build              # go build ./...
 make test               # go test -race -cover ./...
+make test-stress        # go test -race -tags=stress -count=N -run TestStress (determinism guard; STRESS_COUNT default 200)
 make test-integration   # build tag 'integration' (requires AMQP_TEST_URL set)
 make test-conformance   # build tag 'conformance' (requires Docker)
 make test-all           # unit + integration + conformance
