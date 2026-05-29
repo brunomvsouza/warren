@@ -826,3 +826,59 @@ func TestCopyArgs_emptyMap(t *testing.T) {
 	assert.Empty(t, dst)
 	assert.NotNil(t, dst)
 }
+
+// LATER-55: queue type must come from the Type field, not a raw Args entry, so
+// a single source of truth drives type-gated behavior (notably the
+// at-least-once injection, which keys on the Type field).
+func TestTopology_validate_rejectsRawQueueTypeArg(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{
+			Name:    "orders",
+			Durable: true,
+			Args:    map[string]any{"x-queue-type": "quorum"},
+		}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+	assert.Contains(t, err.Error(), "Type field")
+}
+
+// FuzzTopologyExpand locks the no-panic guarantee of validate()+expand() against
+// arbitrary caller-supplied args (LATER-56). A panic in either fails the fuzz.
+func FuzzTopologyExpand(f *testing.F) {
+	f.Add("orders", "quorum", "x-dead-letter-exchange", "dlx", 0)
+	f.Add("delay", "x-delayed-message", "x-delayed-type", "", 1)
+	f.Add("q", "stream", "x-queue-type", "quorum", 2)
+	f.Add("", "bogus", "", "", 3)
+	f.Add("n", "", "x-max-priority", "5", 1)
+
+	f.Fuzz(func(t *testing.T, name, kind, argKey, argVal string, valKind int) {
+		var v any
+		switch ((valKind % 4) + 4) % 4 {
+		case 0:
+			v = argVal
+		case 1:
+			v = len(argVal) // int
+		case 2:
+			v = len(argVal)%2 == 0 // bool
+		case 3:
+			v = nil
+		}
+		args := map[string]any{}
+		if argKey != "" {
+			args[argKey] = v
+		}
+		topo := &Topology{
+			Exchanges:   []Exchange{{Name: name, Kind: ExchangeKind(kind), Args: args}},
+			Queues:      []Queue{{Name: name, Type: QueueType(kind), Args: args}},
+			DeadLetters: []DeadLetter{{Source: name}},
+		}
+		// validate() must never panic on any input.
+		if err := topo.validate(); err != nil {
+			return
+		}
+		// expand() must never panic on validated input.
+		_ = topo.expand()
+	})
+}
