@@ -477,6 +477,13 @@ func (t *Topology) validate() error {
 		}
 		queueNames[q.Name] = struct{}{}
 
+		// x-queue-type is set by the library from the Type field. Accepting it
+		// raw in Args would create a second source of truth that bypasses the
+		// type-gated expansion (e.g. the at-least-once DLX strategy keys on Type).
+		if _, raw := q.Args["x-queue-type"]; raw {
+			return fmt.Errorf("%w: Queue %q: set the Type field instead of Args[\"x-queue-type\"]", ErrInvalidOptions, q.Name)
+		}
+
 		if _, ok := validQueueTypes[q.Type]; !ok {
 			return fmt.Errorf("%w: Queue %q: unknown Type %q", ErrInvalidOptions, q.Name, q.Type)
 		}

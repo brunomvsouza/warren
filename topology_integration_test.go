@@ -4,6 +4,12 @@ package warren_test
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +20,61 @@ import (
 
 	"github.com/brunomvsouza/warren"
 )
+
+// queueArgsViaManagement reads a queue's declared arguments from the RabbitMQ
+// management HTTP API (port 15672), deriving host and credentials from amqpURL.
+// It skips the test when the management API is unreachable so environments
+// without the management plugin/port do not hard-fail.
+func queueArgsViaManagement(t *testing.T, amqpURL, queue string) map[string]any {
+	t.Helper()
+
+	u, err := url.Parse(amqpURL)
+	require.NoError(t, err)
+	user, pass := "guest", "guest"
+	if u.User != nil {
+		user = u.User.Username()
+		if p, ok := u.User.Password(); ok {
+			pass = p
+		}
+	}
+	host := u.Hostname()
+	if host == "" {
+		host = "localhost"
+	}
+	vhost := strings.TrimPrefix(u.Path, "/")
+	if vhost == "" {
+		vhost = "/"
+	}
+	apiURL := fmt.Sprintf("http://%s:15672/api/queues/%s/%s",
+		host, url.PathEscape(vhost), url.PathEscape(queue))
+
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	require.NoError(t, err)
+	req.SetBasicAuth(user, pass)
+
+	// DisableKeepAlives so no pooled connection goroutine survives into goleak.
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	defer client.CloseIdleConnections()
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Skipf("management API unreachable at %s:15672: %v", host, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("management API GET %s returned %d: %s", apiURL, resp.StatusCode, string(body))
+	}
+
+	var payload struct {
+		Arguments map[string]any `json:"arguments"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	return payload.Arguments
+}
 
 // deleteDurableQueue removes a durable queue left behind by a test so reruns
 // start clean. Best-effort: failures are ignored.
@@ -227,4 +288,45 @@ func TestTopology_Declare_quorumWithDeliveryLimit_integration(t *testing.T) {
 
 	err = topo.Declare(ctx, conn)
 	require.NoError(t, err)
+}
+
+// TestTopology_Declare_quorumDLXStrategy_integration is the T15 broker-side
+// assertion (LATER-54): a quorum source queue with a DeadLetter entry must carry
+// x-dead-letter-strategy=at-least-once (SPEC §10 decision 52) plus the DLX args
+// and x-delivery-limit, verified by reading them back from the management API
+// rather than only trusting the in-memory expansion.
+func TestTopology_Declare_quorumDLXStrategy_integration(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	brokerURL := amqpTestURL(t)
+	ctx := context.Background()
+
+	const qname = "test.quorum.dlx.strategy"
+	t.Cleanup(func() { deleteDurableQueue(brokerURL, qname) })
+	t.Cleanup(func() { deleteDurableQueue(brokerURL, qname+".dlq") })
+
+	conn, err := warren.Dial(ctx, warren.WithAddr(brokerURL))
+	require.NoError(t, err)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	}()
+
+	topo := &warren.Topology{
+		Queues: []warren.Queue{
+			{Name: qname, Durable: true, Type: warren.QueueTypeQuorum, DeliveryLimit: 3},
+		},
+		DeadLetters: []warren.DeadLetter{
+			{Source: qname, Exchange: qname + ".dlx"},
+		},
+	}
+	require.NoError(t, topo.Declare(ctx, conn))
+
+	args := queueArgsViaManagement(t, brokerURL, qname)
+	assert.Equal(t, "at-least-once", args["x-dead-letter-strategy"],
+		"quorum + DLX must declare x-dead-letter-strategy=at-least-once (SPEC §10 decision 52)")
+	assert.Equal(t, qname+".dlx", args["x-dead-letter-exchange"])
+	assert.Equal(t, "quorum", args["x-queue-type"])
+	assert.EqualValues(t, 3, args["x-delivery-limit"]) // JSON number decodes as float64
 }
