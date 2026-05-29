@@ -470,33 +470,38 @@ Note this is a metric-label vocabulary change and may affect downstream dashboar
 
 ---
 
-### LATER-39 — Consume-path span setup allocates eagerly even when tracing is a no-op
+### LATER-39 — Protobuf multi-type-queue discriminator (Any / type-URL / type registry)
 
-**Context:** `consumer.go:dispatch` and `batch_consumer.go:flush` build the span on every
-delivery/flush before knowing whether a real tracer is configured: `Consumer.processSpanAttrs`
-allocates a fresh `[]attribute.KeyValue` per message, `BatchConsumer.startBatchSpan` allocates
-both the attrs slice and a `[]otel.Link` sized to the batch, and `propagator.ExtractTo` /
-`propagator.Extract` run a header map lookup per message. All of this happens unconditionally —
-the default `otel.NoOpTracer` (and the no-op propagator) still pay the attribute-slice allocation
-on the hot consume loop. T27 established the same pattern on the publish side
-(`publisher.go:publishSpanAttrs`), so the gap is symmetric, not consumer-specific.
+**Context:** `codec.NewProtobuf()` decodes proto3 binary, which carries **no type
+information on the wire**. `ConsumerFor[M]` fixes the Go message type at compile
+time, so a single-type queue decodes fine — but a topic-exchange queue carrying
+**multiple** proto event types (a common event-driven pattern) cannot be decoded:
+the consumer has no way to know which `proto.Message` a given body is. Phase 14
+(T99, IW-05) documents this single-type-per-`Consumer` constraint but deliberately
+defers a first-class fix.
 
-**Impact:** Avoidable per-message allocation in the consume hot path for users who have not
-configured tracing (the default). At the §9 throughput targets (~50k msg/s per connection) a
-per-message `[]attribute.KeyValue` is measurable GC pressure. No correctness impact; the no-op
-tracer/propagator produce correct (empty) results, only at an allocation cost.
+**Impact:** Polyglot/event-driven pipelines that publish several proto types to one
+queue must either split the queue per type or hand-roll a discriminator on top of
+the library (e.g. read `Message[M].Type` and switch). Without a built-in mechanism,
+`ConsumerFor[M]` is effectively single-type-only for protobuf, which is a real
+ergonomics + interop gap relative to JSON/CloudEvents where the body is
+self-describing.
 
-**Evidence:** `/agent-skills:review` of T28 (2026-05-28, OTel in Consumer + BatchConsumer) —
-Suggestion (performance). Related to the publisher-side pattern noted alongside T27.
+**Evidence:** Lens-03 interoperability/wire-format spec validation, 2026-05-28
+(finding IW-05; `spec-validation/03-interoperability-wire-format-plan.md`). Owner
+decision (2026-05-28): defer the discriminator to LATER, document the constraint now.
 
-**Suggested solution:** Add a cheap "tracing enabled" gate so the span machinery is skipped when
-the configured tracer is the package no-op. Options: (a) a sentinel/`bool` set at build time when
-`Tracer(...)` receives a non-no-op tracer, guarding `processSpanAttrs`/`startBatchSpan`/`ExtractTo`;
-or (b) a `noOpTracer` type assertion checked once per dispatch. Apply the same fix to the publisher
-(`publishSpanAttrs`) in the same change so the two paths stay symmetric. Benchmark the consume loop
-before/after to confirm the allocation is removed on the no-op path without regressing the traced path.
+**Suggested solution:** Offer an opt-in discriminator strategy that does not break
+the typed `ConsumerFor[M]` ergonomics, e.g. (a) a documented convention that
+`Message[M].Type` (`basic.properties.type`) carries the proto full message name,
+plus a registry-backed `RawConsumer` / decode helper that dispatches by name to the
+right `proto.Message`; or (b) support `google.protobuf.Any` (type-URL carried in
+the body) for self-describing multi-type payloads. Prefer (a) for cross-language
+interop (Java/Python set `type` too) and reserve (b) for callers already on `Any`.
+Either way it is additive — single-type `ConsumerFor[M]` stays the default.
 
-**Prerequisites:** None. Standalone cross-cutting performance hardening (consumer + publisher).
+**Prerequisites:** T99 (documents the single-type constraint + the `type`-as-name
+convention this builds on).
 
 ---
 
