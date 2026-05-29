@@ -130,6 +130,47 @@ func TestTopology_validate_delayedExchangeWithXDelayedTypeAllowed(t *testing.T) 
 	require.NoError(t, topo.validate())
 }
 
+func TestTopology_validate_delayedExchangeWithInvalidXDelayedType(t *testing.T) {
+	topo := &Topology{
+		Exchanges: []Exchange{{
+			Name: "delay",
+			Kind: ExchangeDelayed,
+			Args: map[string]any{"x-delayed-type": "bogus"},
+		}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+// x-delayed-type may not itself be a delayed exchange (only a routing kind).
+func TestTopology_validate_delayedExchangeWithDelayedXDelayedType(t *testing.T) {
+	topo := &Topology{
+		Exchanges: []Exchange{{
+			Name: "delay",
+			Kind: ExchangeDelayed,
+			Args: map[string]any{"x-delayed-type": string(ExchangeDelayed)},
+		}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
+// A non-string x-delayed-type is rejected rather than silently ignored.
+func TestTopology_validate_delayedExchangeWithNonStringXDelayedType(t *testing.T) {
+	topo := &Topology{
+		Exchanges: []Exchange{{
+			Name: "delay",
+			Kind: ExchangeDelayed,
+			Args: map[string]any{"x-delayed-type": 42},
+		}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+}
+
 func TestTopology_validate_duplicateQueueNames(t *testing.T) {
 	topo := &Topology{
 		Queues: []Queue{

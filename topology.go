@@ -427,8 +427,18 @@ func (t *Topology) validate() error {
 		}
 		if e.Kind == ExchangeDelayed {
 			v, ok := e.Args["x-delayed-type"]
-			if !ok || v == "" {
+			if !ok {
 				return fmt.Errorf("%w: Exchange %q with Kind=ExchangeDelayed must set Args[\"x-delayed-type\"]", ErrInvalidOptions, e.Name)
+			}
+			s, isStr := v.(string)
+			if !isStr || s == "" {
+				return fmt.Errorf("%w: Exchange %q: Args[\"x-delayed-type\"] must be a non-empty exchange-kind string", ErrInvalidOptions, e.Name)
+			}
+			// x-delayed-type must name a routing kind, not the delayed kind itself.
+			if kind := ExchangeKind(s); kind == ExchangeDelayed {
+				return fmt.Errorf("%w: Exchange %q: Args[\"x-delayed-type\"] must be a routing kind (direct, fanout, topic, headers), not %q", ErrInvalidOptions, e.Name, s)
+			} else if _, valid := validKinds[kind]; !valid {
+				return fmt.Errorf("%w: Exchange %q: Args[\"x-delayed-type\"] %q is not a valid exchange kind", ErrInvalidOptions, e.Name, s)
 			}
 		}
 	}
