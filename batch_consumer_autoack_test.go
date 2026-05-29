@@ -46,7 +46,6 @@ func makeFakeDelivery(tag uint64, body string, fa *fakeAcknowledger) *Delivery[s
 func newTestBatch(deliveries []*Delivery[string]) *Batch[string] {
 	b := &Batch[string]{deliveries: deliveries}
 	for _, d := range deliveries {
-		d := d // capture
 		d.ackNotify = func() {
 			b.mu.Lock()
 			b.acked = true

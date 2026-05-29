@@ -76,7 +76,7 @@ func TestTracker_LongLived_OrderStaysBounded(t *testing.T) {
 	const window = 8
 	var next uint64
 
-	for round := 0; round < 5000; round++ {
+	for range 5000 {
 		next++
 		require.NoError(t, tr.Register(next))
 		if next > window {
