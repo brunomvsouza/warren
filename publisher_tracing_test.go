@@ -280,6 +280,85 @@ func TestPublisher_Publish_callerTraceParentWins(t *testing.T) {
 		"caller-supplied traceparent must win (last-wins)")
 }
 
+// TestPublisher_Publish_doesNotMutateCallerHeaders asserts the publish path never
+// writes the injected trace context back into the caller's Headers map. The
+// HeaderCodec path is already guarded (TestPublisher_encodeMsg_DoesNotMutateCallerHeaders);
+// this covers the plain-codec path, where encodeMsg returns the caller's own map
+// reference and injectTrace would otherwise mutate it in place.
+func TestPublisher_Publish_doesNotMutateCallerHeaders(t *testing.T) {
+	fake := newFakePubCh(true)
+	tr := &recordingTracer{}
+	pub, stopPool := newTracedPub[testPayload](fake, tr)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	shared := Headers{"x-keep": "v"}
+	require.NoError(t, pub.Publish(context.Background(), Message[testPayload]{
+		Body:    &testPayload{},
+		Headers: shared,
+	}))
+
+	_, mutated := shared["traceparent"]
+	assert.False(t, mutated, "publish must not write traceparent back into the caller's Headers map")
+	assert.Len(t, shared, 1, "caller Headers map must be left exactly as supplied")
+}
+
+// TestPublisher_Publish_reusedHeadersMapGetsFreshTraceParent proves each publish
+// carries its OWN span's traceparent even when the caller reuses one Headers map.
+// If injectTrace mutates the caller map, the first publish's traceparent persists
+// into the map and the last-wins restore then treats it as caller-supplied,
+// silently stitching every later publish into the first publish's trace.
+func TestPublisher_Publish_reusedHeadersMapGetsFreshTraceParent(t *testing.T) {
+	fake := newFakePubCh(true)
+	tr := &recordingTracer{}
+	pub, stopPool := newTracedPub[testPayload](fake, tr)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	shared := Headers{}
+	require.NoError(t, pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}, Headers: shared}))
+	first, ok := fake.lastPublish()
+	require.True(t, ok)
+	tp1, _ := first.Headers["traceparent"].(string)
+	require.NotEmpty(t, tp1)
+
+	require.NoError(t, pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}, Headers: shared}))
+	second, ok := fake.lastPublish()
+	require.True(t, ok)
+	tp2, _ := second.Headers["traceparent"].(string)
+	require.NotEmpty(t, tp2)
+
+	assert.NotEqual(t, tp1, tp2,
+		"each publish must carry its own span's traceparent, not a stale value carried over via the reused map")
+}
+
+// TestPublisher_Publish_callerTraceStateWins asserts a caller-supplied tracestate
+// is preserved (last-wins) alongside the injected traceparent — exercising the
+// tracestate branch of injectTrace that the traceparent-only tests do not.
+func TestPublisher_Publish_callerTraceStateWins(t *testing.T) {
+	fake := newFakePubCh(true)
+	tr := &recordingTracer{}
+	pub, stopPool := newTracedPub[testPayload](fake, tr)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	const callerTS = "vendor=opaqueValue"
+	require.NoError(t, pub.Publish(context.Background(), Message[testPayload]{
+		Body:    &testPayload{},
+		Headers: Headers{"tracestate": callerTS},
+	}))
+
+	p, ok := fake.lastPublish()
+	require.True(t, ok)
+	assert.Equal(t, callerTS, p.Headers["tracestate"],
+		"caller-supplied tracestate must win (last-wins)")
+	_, hasTP := p.Headers["traceparent"]
+	assert.True(t, hasTP, "traceparent must still be injected alongside the preserved tracestate")
+}
+
 // — Publish span: failure matrix ——————————————————————————————————————————
 
 func TestPublisher_Publish_span_nacked(t *testing.T) {
@@ -403,6 +482,70 @@ func TestPublisher_Publish_span_encodeError(t *testing.T) {
 	assert.Equal(t, "error", outcome.AsString())
 	et, _ := span.attr("error.type")
 	assert.Equal(t, "ErrInvalidMessage", et.AsString())
+	assert.Equal(t, codes.Error, span.status)
+}
+
+func TestPublisher_Publish_span_poolExhausted(t *testing.T) {
+	fake := newFakePubCh(true)
+	tr := &recordingTracer{}
+	pub, stopPool := newTracedPub[testPayload](fake, tr)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	// Drain the single pool token so acquire has no slot; a short-deadline ctx then
+	// makes acquire return ErrChannelPoolExhausted deterministically (with the token
+	// gone, only ctx.Done() can fire in acquire's select — no token race).
+	<-pub.pools[0].tokens
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err := pub.Publish(ctx, Message[testPayload]{Body: &testPayload{}})
+	require.ErrorIs(t, err, ErrChannelPoolExhausted)
+
+	span := tr.only()
+	require.NotNil(t, span)
+	assert.True(t, span.ended)
+	outcome, _ := span.attr("messaging.rabbitmq.outcome")
+	assert.Equal(t, "pool_exhausted", outcome.AsString())
+	et, _ := span.attr("error.type")
+	assert.Equal(t, "ErrChannelPoolExhausted", et.AsString())
+	assert.Equal(t, codes.Error, span.status)
+}
+
+func TestPublisher_Publish_span_blocked(t *testing.T) {
+	fake := newFakePubCh(true)
+	tr := &recordingTracer{}
+	pub, stopPool := newTracedPub[testPayload](fake, tr)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	// Pin the publisher to a blocked connection; the publish barrier returns
+	// ErrConnectionBlocked once ctx is cancelled while still blocked.
+	mc := newBareManaged(t)
+	mc.barrierMu.Lock()
+	mc.blocked = true
+	mc.barrierMu.Unlock()
+	pub.mcs[0] = mc
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+		mc.barrierCond.Broadcast()
+	}()
+
+	err := pub.Publish(ctx, Message[testPayload]{Body: &testPayload{}})
+	require.ErrorIs(t, err, ErrConnectionBlocked)
+
+	span := tr.only()
+	require.NotNil(t, span)
+	assert.True(t, span.ended)
+	outcome, _ := span.attr("messaging.rabbitmq.outcome")
+	assert.Equal(t, "blocked", outcome.AsString())
+	et, _ := span.attr("error.type")
+	assert.Equal(t, "ErrConnectionBlocked", et.AsString())
 	assert.Equal(t, codes.Error, span.status)
 }
 
