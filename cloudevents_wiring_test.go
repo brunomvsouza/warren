@@ -58,6 +58,21 @@ func TestPublisher_encodeMsg_DoesNotMutateCallerHeaders(t *testing.T) {
 	assert.Len(t, callerHeaders, 1)
 }
 
+// Codec-produced CloudEvents headers must win over a colliding caller header.
+// encodeMsg merges caller headers first, then the codec's (maps.Copy order is
+// load-bearing); this guards against an accidental swap of those two copies.
+func TestPublisher_encodeMsg_CEHeadersWinOverCallerHeaders(t *testing.T) {
+	p := &Publisher[codec.CloudEvent]{codec: codec.NewCloudEventsBinary()}
+	ev := newBinaryEvent(t)
+	callerHeaders := Headers{"cloudEvents:id": "caller-supplied"}
+
+	msg, _, err := p.encodeMsg(Message[codec.CloudEvent]{Body: &ev, Headers: callerHeaders})
+	require.NoError(t, err)
+
+	assert.Equal(t, "id-1", msg.Headers["cloudEvents:id"],
+		"codec CloudEvents headers must override a colliding caller header")
+}
+
 func TestPublisher_encodeMsg_PlainCodecUnchanged(t *testing.T) {
 	p := &Publisher[string]{codec: codec.NewJSON()}
 	s := "hello"
