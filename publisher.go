@@ -310,7 +310,7 @@ func (p *Publisher[M]) callOnReturn(r amqp091.Return) {
 			ContentType:     r.ContentType,
 			ContentEncoding: r.ContentEncoding,
 			Headers:         Headers(r.Headers),
-			DeliveryMode:    DeliveryMode(r.DeliveryMode), //nolint:gosec // G115: wire value
+			DeliveryMode:    deliveryModeFromWire(r.DeliveryMode), // SPEC §6.5: wire 2→Persistent, else Transient
 			Priority:        r.Priority,
 			CorrelationID:   r.CorrelationId,
 			ReplyTo:         r.ReplyTo,
@@ -953,7 +953,7 @@ func buildPublishing[M any](msg Message[M], body []byte) amqp091.Publishing {
 		ContentType:     msg.ContentType,
 		ContentEncoding: msg.ContentEncoding,
 		Headers:         amqp091.Table(msg.Headers),
-		DeliveryMode:    uint8(msg.DeliveryMode), //nolint:gosec // G115: wire values are spec-defined
+		DeliveryMode:    msg.DeliveryMode.wire(), // SPEC §6.5: Persistent(0)→2, Transient(1)→1
 		Priority:        msg.Priority,
 		MessageId:       msg.MessageID,
 		CorrelationId:   msg.CorrelationID,
