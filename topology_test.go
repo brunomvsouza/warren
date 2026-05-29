@@ -185,6 +185,23 @@ func TestTopology_validate_delayedExchangeWithNonStringXDelayedType(t *testing.T
 	assert.ErrorIs(t, err, ErrInvalidOptions)
 }
 
+// An empty-string x-delayed-type hits the dedicated non-empty branch (not the
+// generic "not a valid kind" backstop). Asserting the message locks that branch
+// against accidental removal.
+func TestTopology_validate_delayedExchangeWithEmptyXDelayedType(t *testing.T) {
+	topo := &Topology{
+		Exchanges: []Exchange{{
+			Name: "delay",
+			Kind: ExchangeDelayed,
+			Args: map[string]any{"x-delayed-type": ""},
+		}},
+	}
+	err := topo.validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+	assert.Contains(t, err.Error(), "non-empty")
+}
+
 func TestTopology_validate_duplicateQueueNames(t *testing.T) {
 	topo := &Topology{
 		Queues: []Queue{
@@ -499,6 +516,18 @@ func TestTopology_expand_noStrategyForClassicWithDLX(t *testing.T) {
 	src := findQueue(expanded, "orders")
 	require.NotNil(t, src)
 	assert.NotContains(t, src.Args, "x-dead-letter-strategy")
+}
+
+// The strategy is gated on quorum; a stream queue with a DLX must not get it.
+func TestTopology_expand_noStrategyForStreamWithDLX(t *testing.T) {
+	topo := &Topology{
+		Queues: []Queue{{
+			Name: "feed", Durable: true, Type: QueueTypeStream,
+			Args: map[string]any{"x-dead-letter-exchange": "my.dlx"},
+		}},
+	}
+	expanded := topo.expand()
+	assert.NotContains(t, expanded.Queues[0].Args, "x-dead-letter-strategy")
 }
 
 func TestTopology_expand_respectsUserDeadLetterStrategy(t *testing.T) {
