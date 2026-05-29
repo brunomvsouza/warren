@@ -70,6 +70,11 @@ type Binding struct {
 // it into the required x-dead-letter-* queue args, a DLX exchange, and a DLQ
 // during the in-memory pre-pass (Step 1), so the broker sees the args on the
 // source queue's first declare and never needs a re-declare.
+//
+// When the source queue is a quorum queue, Declare also injects
+// x-dead-letter-strategy=at-least-once so messages are preserved during
+// dead-lettering (SPEC §10 decision 52). Set x-dead-letter-strategy in the
+// source Queue.Args to override this default.
 type DeadLetter struct {
 	// Source is the name of the source queue that routes dead letters.
 	Source string
@@ -203,6 +208,8 @@ func (t *Topology) Declare(ctx context.Context, conn *Connection) error {
 //   - SingleActiveConsumer injects x-single-active-consumer.
 //   - Type != "" injects x-queue-type.
 //   - MaxPriority > 0 injects x-max-priority.
+//   - A quorum queue with a dead-letter exchange injects
+//     x-dead-letter-strategy=at-least-once (SPEC §10 decision 52).
 //
 // The caller's Topology value is never mutated.
 func (t *Topology) expand() *Topology {
@@ -316,6 +323,19 @@ func (t *Topology) expand() *Topology {
 			}
 			if q.MaxPriority > 0 {
 				q.Args["x-max-priority"] = int64(q.MaxPriority)
+			}
+		}
+
+		// SPEC §10 decision 52 (Rev 9): a quorum queue with a dead-letter
+		// exchange gets x-dead-letter-strategy=at-least-once so messages are
+		// preserved across dead-lettering (the project's at-least-once contract).
+		// The DLX may come from a DeadLetter pre-pass above or be set manually
+		// by the caller in Args. An explicit caller value is respected.
+		if q.Type == QueueTypeQuorum {
+			if _, hasDLX := q.Args["x-dead-letter-exchange"]; hasDLX {
+				if _, hasStrategy := q.Args["x-dead-letter-strategy"]; !hasStrategy {
+					q.Args["x-dead-letter-strategy"] = "at-least-once"
+				}
 			}
 		}
 	}
