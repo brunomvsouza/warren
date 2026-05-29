@@ -8,7 +8,7 @@
 
 Warren wraps [`github.com/rabbitmq/amqp091-go`](https://github.com/rabbitmq/amqp091-go) with a type-safe API and a **hardened operational layer** built for high-scale reliability. It embeds the "SRE batteries" every production team needs: supervised reconnect with publisher confirms, centralized topology declaration, pluggable codecs, channel pooling across role-split TCP connections, **intelligent error classification (transient vs. permanent)**, **safety guardrails (credential redaction, fail-fast validation, payload caps)**, and native observability (logging, Prometheus, OpenTelemetry).
 
-> **Current Status:** Active development toward [`v0.1.0`](SPEC.md). Implementation follows [`tasks/plan.md`](tasks/plan.md). **Connection**, **Publisher**, **Topology**, **Consumer** (with `MaxRedeliveries` + handler timeouts), **batch publish/consume**, and the **JSON / Protobuf / CloudEvents codecs** are usable today; RPC, delayed-message helpers, consumer-side OpenTelemetry, and the test tooling are in progress.
+> **Current Status:** Active development toward [`v0.1.0`](SPEC.md). Implementation follows [`tasks/plan.md`](tasks/plan.md). **Connection**, **Publisher**, **Topology**, **Consumer** (with `MaxRedeliveries` + handler timeouts), **batch publish/consume**, the **JSON / Protobuf / CloudEvents codecs**, and **end-to-end OpenTelemetry tracing** (publisher + consumer) are usable today; RPC, delayed-message helpers, and the test tooling are in progress.
 
 [![CI](https://github.com/brunomvsouza/warren/actions/workflows/ci.yml/badge.svg)](https://github.com/brunomvsouza/warren/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/brunomvsouza/warren)](https://goreportcard.com/report/github.com/brunomvsouza/warren)
@@ -175,12 +175,12 @@ Warren is built with "production-first" principles, embedding several reliabilit
 - **Batch** — `Publisher.PublishBatch` (always-all, single-channel, `[]PublishResult` + `ErrBatchTooLarge`) and `BatchConsumerFor[M]` with size- and timer-based flush triggers and `multiple=true` acking
 - **Codec** — lax JSON by default (Postel's Law — unknown fields are tolerated so producer-first deploys do not poison v1 DLQs); opt-in `codec.NewJSONStrict()`; `codec.NewProtobuf()`; CloudEvents in both `codec.NewCloudEventsStructured()` and `codec.NewCloudEventsBinary()` modes (AMQP protocol binding via the `HeaderCodec` interface)
 - **Errors** — AMQP reply-code sentinels, `AMQPCode`, transient/permanent classifiers
-- **Observability** — pluggable `log.Logger`, Prometheus metrics (default), OpenTelemetry tracer + W3C propagation helpers; **publisher** spans inject trace context into AMQP headers
+- **Observability** — pluggable `log.Logger`, Prometheus metrics (default), OpenTelemetry tracer + W3C propagation helpers; **publisher** spans inject trace context into AMQP headers and **consumer** spans extract it, so trace continuity survives DLX bounces; `BatchConsumer` spans carry one Link per message
 - **Examples** — [`examples/publish`](examples/publish/main.go), [`examples/consume`](examples/consume/main.go), [`examples/topology`](examples/topology/main.go), [`examples/deadletter`](examples/deadletter/main.go), [`examples/batch_publish`](examples/batch_publish/main.go), [`examples/batch_consume`](examples/batch_consume/main.go)
 
 ### On the roadmap (`v0.1.0`)
 
-- **Consumer observability** — consumer-side OpenTelemetry spans (extract context from headers + handler span, batch span Links), `OnCancel` metrics
+- **Consumer cancellation** — `OnCancel(func(reason))` callback + `consumer_cancelled_total` metric for broker `basic.cancel`
 - **Patterns** — RPC (`Caller`/`Replier` over direct reply-to), delayed-message exchange helpers
 - **Production hardening** — TLS / `amqps://`, multi-address cluster failover, SASL EXTERNAL (mTLS), remaining connection options, panic isolation for user callbacks, `AutoAck()` opt-in
 - **Tooling** — `amqpmock/`, `amqptest/` (testcontainers), conformance suite, chaos/reconnect benchmarks
