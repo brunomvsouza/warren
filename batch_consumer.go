@@ -162,6 +162,10 @@ type BatchConsumer[M any] struct {
 	tracer     otel.Tracer
 	propagator otel.Propagator
 
+	// msgType is the message_type metrics label value (Go type name of M),
+	// computed once at build time.
+	msgType string
+
 	mc *managedConn
 
 	// deliveryCh is a test-injection hook; when non-nil, openBatchDeliveryCh
@@ -179,6 +183,12 @@ type BatchConsumer[M any] struct {
 	closedCh  chan struct{}
 	closeOnce sync.Once
 	started   atomic.Bool
+}
+
+// recordHandler records a batch-handler outcome, supplying the message_type
+// metrics label value so an enabled consumer_handler_seconds histogram carries it.
+func (c *BatchConsumer[M]) recordHandler(outcome string, d time.Duration) {
+	c.cm.RecordHandler(c.queue, c.msgType, outcome, d)
 }
 
 // Consume starts accumulating messages from the configured queue and dispatching
@@ -305,7 +315,7 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 						if requeue {
 							outcome = "timeout_nack_requeue"
 						}
-						c.cm.RecordHandler(c.queue, outcome, elapsed)
+						c.recordHandler(outcome, elapsed)
 						// When the timeout verdict is requeue, apply counter B so that
 						// MaxRedeliveries is enforced even for timed-out batches.  A
 						// message whose handler consistently exceeds HandlerTimeout would
@@ -426,7 +436,7 @@ func (c *BatchConsumer[M]) applyBatchVerdict(span otel.Span, batch *Batch[M], ha
 	if batch.acked {
 		// Handler or a per-delivery ack already fired; record the metric and bail.
 		batch.mu.Unlock()
-		c.cm.RecordHandler(c.queue, handlerOutcome(handlerErr), elapsed)
+		c.recordHandler(handlerOutcome(handlerErr), elapsed)
 		finishConsumeSpan(span, consumeVerdictOutcome(handlerErr), handlerErr)
 		return
 	}
@@ -437,7 +447,7 @@ func (c *BatchConsumer[M]) applyBatchVerdict(span otel.Span, batch *Batch[M], ha
 	// May rewrite ErrRequeue → ErrMaxRedeliveries (→ Nack without requeue).
 	handlerErr = c.applyBatchCounterB(batch, handlerErr)
 
-	c.cm.RecordHandler(c.queue, handlerOutcome(handlerErr), elapsed)
+	c.recordHandler(handlerOutcome(handlerErr), elapsed)
 	finishConsumeSpan(span, consumeVerdictOutcome(handlerErr), handlerErr)
 
 	if handlerErr == nil {

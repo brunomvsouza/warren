@@ -239,6 +239,10 @@ type Consumer[M any] struct {
 	tracer     otel.Tracer
 	propagator otel.Propagator
 
+	// msgType is the message_type metrics label value (Go type name of M),
+	// computed once at build time.
+	msgType string
+
 	// mc is the consumer-role managed connection this consumer is pinned to.
 	mc *managedConn
 
@@ -294,6 +298,7 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 		cm:               b.cm,
 		tracer:           b.tracer,
 		propagator:       otel.NewPropagator(),
+		msgType:          metricsTypeName[M](),
 		mc:               mc,
 		closedCh:         make(chan struct{}),
 	}
@@ -301,6 +306,12 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 	// channel open so "channel close resets counter B" holds without explicit cleanup.
 	c.counterState.Store(&redeliveryCounter{})
 	return c
+}
+
+// recordHandler records a handler outcome, supplying the message_type metrics
+// label value so an enabled consumer_handler_seconds histogram carries it.
+func (c *Consumer[M]) recordHandler(outcome string, d time.Duration) {
+	c.cm.RecordHandler(c.queue, c.msgType, outcome, d)
 }
 
 // connIndexForTag returns a stable index in [0, n) for the given consumer tag (FNV-1a).
@@ -549,7 +560,7 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 	if err := safeDecodeConsumer(c.codec, raw.Body, raw.Headers, raw.ContentType, &body); err != nil {
 		// Record actual decode duration so the metric is meaningful even for
 		// large or slow-to-fail payloads (previously hardcoded to 0).
-		c.cm.RecordHandler(c.queue, "decode_error", time.Since(decodeStart))
+		c.recordHandler("decode_error", time.Since(decodeStart))
 		_ = raw.Nack(false, false)
 		return
 	}
@@ -635,18 +646,18 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		}
 		if channelClosed && handlerErr != nil {
 			c.cm.RecordHandlerAbortedChannelClosed(c.queue)
-			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
+			c.recordHandler("channel_closed", elapsed)
 			finishConsumeSpan(span, outcomeChannelClosed, ErrChannelClosed)
 			return // no ack — broker will redeliver
 		}
 		if autoAck {
 			processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
-			c.cm.RecordHandler(c.queue, handlerOutcome(processedErr), elapsed)
+			c.recordHandler(handlerOutcome(processedErr), elapsed)
 			finishConsumeSpan(span, consumeVerdictOutcome(processedErr), processedErr)
 			_ = d.AckIf(processedErr)
 		} else {
 			// ConsumeRaw: handler is responsible for ack/nack.
-			c.cm.RecordHandler(c.queue, "raw", elapsed)
+			c.recordHandler("raw", elapsed)
 			finishConsumeSpan(span, consumeVerdictOutcome(handlerErr), handlerErr)
 		}
 		return
@@ -671,17 +682,17 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		}
 		if channelClosed && handlerErr != nil {
 			c.cm.RecordHandlerAbortedChannelClosed(c.queue)
-			c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
+			c.recordHandler("channel_closed", elapsed)
 			finishConsumeSpan(span, outcomeChannelClosed, ErrChannelClosed)
 			return
 		}
 		if autoAck {
 			processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
-			c.cm.RecordHandler(c.queue, handlerOutcome(processedErr), elapsed)
+			c.recordHandler(handlerOutcome(processedErr), elapsed)
 			finishConsumeSpan(span, consumeVerdictOutcome(processedErr), processedErr)
 			_ = d.AckIf(processedErr)
 		} else {
-			c.cm.RecordHandler(c.queue, "raw", elapsed)
+			c.recordHandler("raw", elapsed)
 			finishConsumeSpan(span, consumeVerdictOutcome(handlerErr), handlerErr)
 		}
 
@@ -689,7 +700,7 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		elapsed := time.Since(start)
 		cancelCause(ErrChannelClosed) // cancel handler ctx before draining
 		c.cm.RecordHandlerAbortedChannelClosed(c.queue)
-		c.cm.RecordHandler(c.queue, "channel_closed", elapsed)
+		c.recordHandler("channel_closed", elapsed)
 		finishConsumeSpan(span, outcomeChannelClosed, ErrChannelClosed)
 		<-handlerDone
 
@@ -701,10 +712,10 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 			c.cm.RecordHandlerTimeout(c.queue)
 			switch c.timeoutVerdict {
 			case TimeoutNackRequeue:
-				c.cm.RecordHandler(c.queue, "timeout_nack_requeue", elapsed)
+				c.recordHandler("timeout_nack_requeue", elapsed)
 				_ = raw.Nack(false, true)
 			default:
-				c.cm.RecordHandler(c.queue, "timeout_nack_no_requeue", elapsed)
+				c.recordHandler("timeout_nack_no_requeue", elapsed)
 				_ = raw.Nack(false, false)
 			}
 			finishConsumeSpan(span, outcomeTimeout, context.DeadlineExceeded)

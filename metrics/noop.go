@@ -26,7 +26,7 @@ type NoOpPublisherMetrics struct{}
 func (NoOpPublisherMetrics) InFlightAdd(_ string, _ int64) {}
 
 // RecordPublish discards the publish observation.
-func (NoOpPublisherMetrics) RecordPublish(_, _ string, _ time.Duration) {}
+func (NoOpPublisherMetrics) RecordPublish(_, _, _, _ string, _ time.Duration) {}
 
 // RecordRetry discards the retry counter increment.
 func (NoOpPublisherMetrics) RecordRetry(_, _ string) {}
@@ -45,7 +45,7 @@ func (NoOpConsumerMetrics) RecordHandlerAbortedChannelClosed(_ string) {}
 func (NoOpConsumerMetrics) RecordHandlerTimeout(_ string) {}
 
 // RecordHandler discards the handler observation.
-func (NoOpConsumerMetrics) RecordHandler(_, _ string, _ time.Duration) {}
+func (NoOpConsumerMetrics) RecordHandler(_, _, _ string, _ time.Duration) {}
 
 // RecordCancelled discards the broker-initiated cancel counter increment.
 func (NoOpConsumerMetrics) RecordCancelled(_, _ string) {}

@@ -50,7 +50,7 @@ func TestNoOpPublisherMetrics_zeroAllocs(t *testing.T) {
 	m := metrics.NoOpPublisherMetrics{}
 	assert.Zero(t, testing.AllocsPerRun(100, func() {
 		m.InFlightAdd("events", 1)
-		m.RecordPublish("events", "ack", 5*time.Millisecond)
+		m.RecordPublish("events", "", "", "ack", 5*time.Millisecond)
 		m.RecordRetry("events", "nacked")
 		m.InFlightAdd("events", -1)
 	}))
@@ -62,7 +62,7 @@ func TestNoOpConsumerMetrics_zeroAllocs(t *testing.T) {
 		m.RecordResubscribed("orders")
 		m.RecordHandlerAbortedChannelClosed("orders")
 		m.RecordHandlerTimeout("orders")
-		m.RecordHandler("orders", "ack", 3*time.Millisecond)
+		m.RecordHandler("orders", "", "ack", 3*time.Millisecond)
 		m.RecordReplierDropNoDLX("orders")
 		m.RecordCancelled("orders", "broker_initiated")
 		m.RecordMaxRedeliveries("orders", "x-death")
@@ -141,7 +141,7 @@ func TestPrometheusPublisherMetrics_mandatoryMetrics(t *testing.T) {
 	require.NoError(t, err)
 
 	m.InFlightAdd("events", 3)
-	m.RecordPublish("events", "ack", 10*time.Millisecond)
+	m.RecordPublish("events", "", "", "ack", 10*time.Millisecond)
 	m.RecordRetry("events", "nacked")
 	m.InFlightAdd("events", -3)
 
@@ -172,6 +172,107 @@ func TestPrometheusPublisherMetrics_inFlightGauge(t *testing.T) {
 	assert.True(t, found, "publisher_in_flight metric not found")
 }
 
+// labelsForMetric returns the label name→value map of the first sample of the
+// named metric family, or nil if the family is absent.
+func labelsForMetric(t *testing.T, reg *prometheus.Registry, name string) map[string]string {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		require.NotEmpty(t, mf.GetMetric(), "%s has no samples", name)
+		out := make(map[string]string)
+		for _, lp := range mf.GetMetric()[0].GetLabel() {
+			out[lp.GetName()] = lp.GetValue()
+		}
+		return out
+	}
+	return nil
+}
+
+// — Prometheus: opt-in high-cardinality labels ——————————————————————————————
+
+func TestPrometheusPublisherMetrics_optionalLabelsEmittedWhenEnabled(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m, err := metrics.NewPrometheusPublisherMetrics(reg, nil,
+		metrics.MetricsLabelRoutingKey, metrics.MetricsLabelMessageType)
+	require.NoError(t, err)
+
+	m.RecordPublish("events", "orders.created", "OrderCreated", "ack", 10*time.Millisecond)
+
+	labels := labelsForMetric(t, reg, "publisher_publish_seconds")
+	assert.Equal(t, "events", labels["exchange"])
+	assert.Equal(t, "ack", labels["outcome"])
+	assert.Equal(t, "orders.created", labels["routing_key"])
+	assert.Equal(t, "OrderCreated", labels["message_type"])
+}
+
+func TestPrometheusPublisherMetrics_noOptionalLabelsByDefault(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m, err := metrics.NewPrometheusPublisherMetrics(reg, nil)
+	require.NoError(t, err)
+
+	m.RecordPublish("events", "orders.created", "OrderCreated", "ack", 10*time.Millisecond)
+
+	labels := labelsForMetric(t, reg, "publisher_publish_seconds")
+	assert.Equal(t, "events", labels["exchange"])
+	assert.Equal(t, "ack", labels["outcome"])
+	assert.NotContains(t, labels, "routing_key")
+	assert.NotContains(t, labels, "message_type")
+}
+
+func TestPrometheusPublisherMetrics_routingKeyOnly(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m, err := metrics.NewPrometheusPublisherMetrics(reg, nil, metrics.MetricsLabelRoutingKey)
+	require.NoError(t, err)
+
+	m.RecordPublish("events", "orders.created", "OrderCreated", "ack", time.Millisecond)
+
+	labels := labelsForMetric(t, reg, "publisher_publish_seconds")
+	assert.Equal(t, "orders.created", labels["routing_key"])
+	assert.NotContains(t, labels, "message_type")
+}
+
+func TestPrometheusConsumerMetrics_messageTypeLabelWhenEnabled(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m, err := metrics.NewPrometheusConsumerMetrics(reg, nil, metrics.MetricsLabelMessageType)
+	require.NoError(t, err)
+
+	m.RecordHandler("orders", "OrderCreated", "ack", 5*time.Millisecond)
+
+	labels := labelsForMetric(t, reg, "consumer_handler_seconds")
+	assert.Equal(t, "orders", labels["queue"])
+	assert.Equal(t, "ack", labels["outcome"])
+	assert.Equal(t, "OrderCreated", labels["message_type"])
+}
+
+func TestPrometheusConsumerMetrics_noMessageTypeByDefault(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m, err := metrics.NewPrometheusConsumerMetrics(reg, nil)
+	require.NoError(t, err)
+
+	m.RecordHandler("orders", "OrderCreated", "ack", 5*time.Millisecond)
+
+	labels := labelsForMetric(t, reg, "consumer_handler_seconds")
+	assert.NotContains(t, labels, "message_type")
+}
+
+func TestPrometheusConsumerMetrics_routingKeyIgnored(t *testing.T) {
+	// MetricsLabelRoutingKey is accepted but not applied to consumer metrics
+	// (a per-delivery routing key is not a stable consumer dimension).
+	reg := prometheus.NewRegistry()
+	m, err := metrics.NewPrometheusConsumerMetrics(reg, nil, metrics.MetricsLabelRoutingKey)
+	require.NoError(t, err)
+
+	m.RecordHandler("orders", "OrderCreated", "ack", 5*time.Millisecond)
+
+	labels := labelsForMetric(t, reg, "consumer_handler_seconds")
+	assert.NotContains(t, labels, "routing_key")
+	assert.NotContains(t, labels, "message_type")
+}
+
 // — Prometheus: ConsumerMetrics —————————————————————————————————————————
 
 func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
@@ -182,7 +283,7 @@ func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
 	m.RecordResubscribed("orders")
 	m.RecordHandlerAbortedChannelClosed("orders")
 	m.RecordHandlerTimeout("orders")
-	m.RecordHandler("orders", "ack", 5*time.Millisecond)
+	m.RecordHandler("orders", "", "ack", 5*time.Millisecond)
 	m.RecordReplierDropNoDLX("requests")
 	m.RecordCancelled("orders", "broker_initiated")
 	m.RecordMaxRedeliveries("orders", "x-death")
@@ -301,14 +402,14 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		cm.RecordDegraded("publisher", "topology_failed")
 
 		pm.InFlightAdd("events", 1)
-		pm.RecordPublish("events", "ack", time.Duration(i+1)*time.Millisecond)
+		pm.RecordPublish("events", "", "", "ack", time.Duration(i+1)*time.Millisecond)
 		pm.RecordRetry("events", "nacked")
 		pm.InFlightAdd("events", -1)
 
 		conm.RecordResubscribed("orders")
 		conm.RecordHandlerAbortedChannelClosed("orders")
 		conm.RecordHandlerTimeout("orders")
-		conm.RecordHandler("orders", "ack", time.Duration(i+1)*time.Millisecond)
+		conm.RecordHandler("orders", "", "ack", time.Duration(i+1)*time.Millisecond)
 		conm.RecordReplierDropNoDLX("requests")
 		conm.RecordCancelled("orders", "broker_initiated")
 		conm.RecordMaxRedeliveries("orders", "x-death")
@@ -354,7 +455,7 @@ func BenchmarkNoOpPublisherMetrics(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		m.InFlightAdd("events", 1)
-		m.RecordPublish("events", "ack", 5*time.Millisecond)
+		m.RecordPublish("events", "", "", "ack", 5*time.Millisecond)
 		m.RecordRetry("events", "nacked")
 		m.InFlightAdd("events", -1)
 	}
@@ -367,7 +468,7 @@ func BenchmarkNoOpConsumerMetrics(b *testing.B) {
 		m.RecordResubscribed("orders")
 		m.RecordHandlerAbortedChannelClosed("orders")
 		m.RecordHandlerTimeout("orders")
-		m.RecordHandler("orders", "ack", 3*time.Millisecond)
+		m.RecordHandler("orders", "", "ack", 3*time.Millisecond)
 		m.RecordReplierDropNoDLX("orders")
 		m.RecordCancelled("orders", "ctag-test")
 		m.RecordMaxRedeliveries("orders", "x-death")

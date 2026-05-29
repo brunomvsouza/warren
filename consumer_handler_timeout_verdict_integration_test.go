@@ -34,7 +34,7 @@ func (s *spyConsumerMetrics) RecordHandlerAbortedChannelClosed(_ string) {}
 func (s *spyConsumerMetrics) RecordHandlerTimeout(_ string) {
 	s.timeoutTotal.Add(1)
 }
-func (s *spyConsumerMetrics) RecordHandler(_ string, outcome string, _ time.Duration) {
+func (s *spyConsumerMetrics) RecordHandler(_ string, _ string, outcome string, _ time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.handlerOutcomes = append(s.handlerOutcomes, outcome)

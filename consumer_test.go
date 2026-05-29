@@ -1037,7 +1037,7 @@ type countingConsumerMetrics struct {
 	cancelledNotify chan struct{} // closed on first RecordCancelled call; may be nil
 }
 
-func (c *countingConsumerMetrics) RecordHandler(_, outcome string, _ time.Duration) {
+func (c *countingConsumerMetrics) RecordHandler(_, _, outcome string, _ time.Duration) {
 	if outcome == "decode_error" {
 		c.decodeErrors++
 	}

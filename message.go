@@ -155,3 +155,15 @@ func validateHeaderValue(key string, v any, depth int) error {
 		return fmt.Errorf("%w: header %q has unsupported type %s", ErrInvalidMessage, key, reflect.TypeOf(v))
 	}
 }
+
+// metricsTypeName returns a stable label value identifying the message type M,
+// used for the opt-in message_type metrics label. It prefers the bare type name
+// (e.g. "OrderPlaced") and falls back to the fully-qualified string for unnamed
+// types. Computed once per Publisher/Consumer at build time, never per message.
+func metricsTypeName[M any]() string {
+	t := reflect.TypeOf((*M)(nil)).Elem()
+	if name := t.Name(); name != "" {
+		return name
+	}
+	return t.String()
+}

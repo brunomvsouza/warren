@@ -10,13 +10,24 @@ func DefaultHistogramBuckets() []float64 {
 }
 
 // MetricsLabel identifies an optional high-cardinality label that can be
-// enabled via WithMetricsLabels on a connection or per-builder.
+// enabled when constructing a Prometheus metrics implementation, e.g.
+// NewPrometheusPublisherMetrics(reg, buckets, MetricsLabelRoutingKey).
+//
+// These labels are off by default because they explode time-series cardinality
+// on workloads with many routing patterns or message types. Because Prometheus
+// fixes a vector's label set at construction, the opt-in lives at construction
+// time rather than on a later builder option.
 type MetricsLabel uint8
 
 const (
-	// MetricsLabelRoutingKey enables routing_key as an additional label.
+	// MetricsLabelRoutingKey enables routing_key as an additional label on the
+	// publisher_publish_seconds histogram. It carries the publisher's configured
+	// routing key. Not applied to consumer metrics (a consumer's per-delivery
+	// routing key is not a stable dimension).
 	MetricsLabelRoutingKey MetricsLabel = iota + 1
-	// MetricsLabelMessageType enables message_type as an additional label.
+	// MetricsLabelMessageType enables message_type as an additional label on the
+	// publisher_publish_seconds and consumer_handler_seconds histograms. It
+	// carries the Go type name of the message type M.
 	MetricsLabelMessageType
 )
 
@@ -43,13 +54,18 @@ type ClientMetrics interface {
 //
 // Mandatory Prometheus metrics emitted by the built-in implementation:
 //   - publisher_in_flight{exchange}
-//   - publisher_publish_seconds{exchange,outcome}
+//   - publisher_publish_seconds{exchange,outcome[,routing_key][,message_type]}
 //   - publisher_retry_total{exchange,reason}
 type PublisherMetrics interface {
 	// InFlightAdd adjusts the in-flight publish gauge by delta (+1 on start, -1 on finish).
 	InFlightAdd(exchange string, delta int64)
 	// RecordPublish records a completed publish with its outcome and duration.
-	RecordPublish(exchange, outcome string, d time.Duration)
+	//
+	// routingKey and messageType carry the opt-in high-cardinality label values
+	// for the publisher_publish_seconds histogram; an implementation emits each
+	// only when the corresponding label was enabled at construction
+	// (MetricsLabelRoutingKey / MetricsLabelMessageType) and ignores it otherwise.
+	RecordPublish(exchange, routingKey, messageType, outcome string, d time.Duration)
 	// RecordRetry increments the retry counter for the given exchange and reason.
 	RecordRetry(exchange, reason string)
 }
@@ -60,7 +76,7 @@ type PublisherMetrics interface {
 //   - consumer_resubscribed_total{queue}
 //   - consumer_handler_aborted_channel_closed_total{queue}
 //   - consumer_handler_timeout_total{queue}
-//   - consumer_handler_seconds{queue,outcome}
+//   - consumer_handler_seconds{queue,outcome[,message_type]}
 //   - consumer_cancelled_total{queue,reason}
 //   - consumer_max_redeliveries_total{queue,cause}
 //   - replier_drop_no_dlx_total{queue}
@@ -73,7 +89,11 @@ type ConsumerMetrics interface {
 	// RecordHandlerTimeout increments the handler-timeout counter.
 	RecordHandlerTimeout(queue string)
 	// RecordHandler records a completed handler invocation with its outcome and duration.
-	RecordHandler(queue, outcome string, d time.Duration)
+	//
+	// messageType carries the opt-in high-cardinality label value for the
+	// consumer_handler_seconds histogram; an implementation emits it only when
+	// MetricsLabelMessageType was enabled at construction and ignores it otherwise.
+	RecordHandler(queue, messageType, outcome string, d time.Duration)
 	// RecordCancelled increments the broker-initiated cancel counter.
 	// reason is the consumer tag reported by basic.cancel; it identifies which
 	// consumer the broker cancelled (useful when multiple consumers share a queue).
