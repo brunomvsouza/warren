@@ -1008,29 +1008,12 @@ phase is tackled first.
 
 ---
 
-### LATER-59 — Publish span keeps `err.Error()` verbatim, so a custom third-party codec can leak payload-derived text (asymmetry with the redacted consume path)
-
-**Context:** `finishPublishSpan` (`publisher.go:472-481`) deliberately keeps the raw `err.Error()` as the span status
-description and calls `span.RecordError(err)` on the unwrapped error. The doc comment justifies this because publish
-errors are "framework/broker diagnostics, never handler- or payload-derived" — which holds for all three built-in
-codecs (`json.Marshal`, `proto.Marshal`, CloudEvents `event.Validate()` produce field-name-keyed structural/constraint
-errors, never field *values*). The consume path defends the symmetric case with `redactedSpanError` (`consumer.go:50-73`),
-which records only the closed-vocabulary label on the span while still unwrapping to the sentinel for `errors.Is`. The
-publish path has no such guard.
-
-**Impact:** a **caller-supplied custom `Codec`** whose `Encode` returns an error embedding the payload (e.g.
-`fmt.Errorf("bad value %v", body)`) would have that string flow unredacted into the publish span status + exception
-event, violating the SPEC §8 "never leak payload/credentials into observability output" guarantee. Caller-introduced,
-not present with any shipped codec.
-
-**Evidence:** Phase 6 `/ship` security audit, 2026-05-29 (security-auditor finding LOW-1).
-
-**Suggested solution:** when the publish error wraps `ErrInvalidMessage` (the codec-encode class — see `publishOutcome`
-`publisher.go:503-504`), record it via a `redactedSpanError`-style adapter or set the status description to the sentinel
-name rather than `err.Error()`. Keep the verbatim broker text only for the broker/framework sentinel classes enumerated
-in `publishOutcome`. This makes the §8 leakage guarantee uniform across both span paths and robust to third-party codecs.
-
-**Prerequisites:** none — localized to `finishPublishSpan` + the `publishOutcome` classification.
+<!-- LATER-59 resolved (Phase 6 validation): finishPublishSpan now redacts the codec-encode /
+     client-validation class (errors.Is(err, ErrInvalidMessage)) to the sentinel label on both the
+     span status description and the recorded error, via the shared redactedSpanError adapter, while
+     errors.Is backends still unwrap to the sentinel. Broker/framework diagnostics stay verbatim.
+     SPEC §8 leakage guarantee is now uniform across the publish and consume span paths. Pinned by
+     TestFinishPublishSpan_redactsCodecClassKeepsBrokerVerbatim. -->
 
 ---
 
