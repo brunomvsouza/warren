@@ -190,6 +190,34 @@ func TestTracker_OutOfOrderAcks_AllResolveCorrectly(t *testing.T) {
 	assert.NoError(t, <-ch3)
 }
 
+// — Out-of-order register ————————————————————————————————————————————————
+
+// TestTracker_OutOfOrderRegister_MultipleAckResolvesCorrectly registers delivery
+// tags out of ascending order. Real channels assign tags monotonically, but the
+// order index must stay sorted regardless (binary-insert path) so a multiple=true
+// frame resolves the correct subset.
+func TestTracker_OutOfOrderRegister_MultipleAckResolvesCorrectly(t *testing.T) {
+	tr := confirms.New()
+	for _, tag := range []uint64{3, 1, 5, 2, 4} {
+		require.NoError(t, tr.Register(tag))
+	}
+	chs := make(map[uint64]<-chan error, 5)
+	for tag := uint64(1); tag <= 5; tag++ {
+		chs[tag] = asyncWait(t, tr, tag)
+	}
+
+	tr.Ack(3, true) // must resolve 1, 2, 3 — not 4, 5
+
+	for tag := uint64(1); tag <= 3; tag++ {
+		assert.NoError(t, <-chs[tag], "tag %d should ack", tag)
+	}
+
+	tr.Nack(5, true) // resolves 4, 5
+	for tag := uint64(4); tag <= 5; tag++ {
+		assert.ErrorIs(t, <-chs[tag], confirms.ErrNacked, "tag %d should nack", tag)
+	}
+}
+
 // — Channel close —————————————————————————————————————————————————————————
 
 func TestTracker_CloseAll_ResolvesAllPendingWithErrClosed(t *testing.T) {
