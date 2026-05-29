@@ -949,6 +949,7 @@ subpackage so downstream applications can reuse the fixture.
     3. **Skip fallback:** neither set → `amqptest.RequireDelayedExchange(t)` calls `t.Skip("delayed-message plugin not available; set AMQPTEST_IMAGE or AMQPTEST_DELAYED_PLUGIN_FILE")`. Tests not gated on the delayed exchange run normally.
   - [ ] `amqptest.RabbitMQ` exposes `URI() string` (with credentials), `AMQPSURI() string`, `Cleanup(t)`, and `Container() testcontainers.Container` for advanced cases.
   - [ ] godoc and a README in `amqptest/` document downstream usage (`go test ./...` from another module) and the three plugin modes.
+  - [ ] **Lens-10 (TV-08):** the `rabbitmq_delayed_message_exchange` plugin is guaranteed present in ≥1 **required** CI lane (the pre-baked-image mode `AMQPTEST_IMAGE`), so the delayed-exchange conformance/example criteria do **not** silently `t.Skip` green; the three plugin-enablement modes stay, but the required lane uses the present-plugin mode and **fails (not skips)** if the plugin is expected but missing. dep VG-1.
 - **Verify:** Run `go list -deps ./... | grep go.uber.org/mock` and confirm only test files match. Downstream-usability test: a separate `examples/integration-test-fixture/` module imports `amqptest` and asserts the fixture spins up cleanly without root-package leakage.
 - **Files:** `amqpmock/codec.go`, `amqpmock/logger.go`, `amqpmock/metrics.go`, `amqpmock/tracer.go`, `amqpmock/delivery.go`, `amqpmock/batch.go`, `amqpmock/*_test.go`, plus `//go:generate` lines in source files. **New:** `amqptest/rabbitmq.go`, `amqptest/options.go`, `amqptest/plugins.go` (RequireDelayedExchange/RequireSSLAuth helpers), `amqptest/certs/{ca.pem,server.pem,server.key,client.pem,client.key}`, `amqptest/docker/Dockerfile.amqptest`, `amqptest/README.md`, `amqptest/*_test.go`.
 - **Deps:** T03, T04, T05, T09, T17, T23.
@@ -1024,6 +1025,7 @@ pattern from SPEC §6.3. Cited from the `Concurrency` godoc.
   - [ ] ≥ 80% line coverage per package.
   - [ ] ≥ 95% on `internal/reconnect`, `internal/confirms`, `channelpool`, **`internal/amqperror`**, **`internal/redact`** (Rev 7, per SPEC §9 line 2107–2109 — both packages are choke-points for AMQP correctness and credential safety; their coverage is load-bearing for the §9 reliability bar, not optional).
   - [ ] Coverage badge or coverage delta posted in CI.
+  - [ ] **Lens-10 (TV-03):** the floor is **enforced**, not reported — a hard fail-under (the same per-package / critical-path thresholds) **fails CI** below the floor, the `-coverprofile` is uploaded as an artifact, and the PR comment §7 (L2235/L2239) + §9 (L2491) promise ("enforced in CI") is posted; today `go test -race -cover` discards the number. dep VG-2.
 - **Verify:** `go test -cover ./...` per package.
 - **Files:** add test cases as needed; CI workflow assertion.
 - **Deps:** Phases 1–8.
@@ -1032,6 +1034,7 @@ pattern from SPEC §6.3. Cited from the `Concurrency` godoc.
 - **Acceptance:**
   - [ ] `.github/workflows/ci.yml` runs on push/PR: lint, unit, integration, conformance (matrix over Go 1.23 + 1.24).
   - [ ] Concurrency cancellation: PR push cancels in-flight run for the same ref.
+  - [ ] **Lens-10 (TV-03/07/13):** implement what the scope already names — (TV-07) `-race` on **both** Go 1.23 **and 1.24** (today CI runs 1.23 only); (TV-03) wire the coverage fail-under + `-coverprofile` artifact + PR comment (with T41); (TV-13) an **integration-broker-required guard** that **fails** the required integration job if **zero** integration tests actually ran (today they `t.Skip` green when `AMQP_TEST_URL` is unset). dep VG-1/VG-2/VG-3.
 - **Verify:** Workflow passes on the first push.
 - **Files:** `.github/workflows/ci.yml`.
 - **Deps:** Phases 1–8.
@@ -1049,6 +1052,7 @@ pattern from SPEC §6.3. Cited from the `Concurrency` godoc.
 - **Acceptance:**
   - [ ] `conformance/` package with `//go:build conformance` tagged tests.
   - [ ] Covers: confirm ordering, content header encoding, mandatory return path, **broker-nack path** (`x-overflow=reject-publish` + `x-max-length=0`), `basic.cancel` notifications, **`basic.qos.global=true`** for `ChannelQoS()`, exchange types (Direct, Fanout, Topic, Headers, x-delayed-message), Quorum + Classic queue semantics, **`x-delivery-limit` enforcement on quorum queues**, **mandatory return/ack correlation order (return → ack)**.
+  - [ ] **Lens-10 (TV-06/08/11):** (TV-06) add the **stub-vs-real-broker contract matrix** (brief §12) as a §7 artifact and **drop the "test AMQP server stub" language** for v0.1 — a stub cannot prove the real-broker-only contracts (R10-3 ordering, R10-2 quorum limit, `x-death` tokens/cycle-detection, broker-nack, `basic.cancel`, 406-on-`UserID`, `reject-publish-dlx`, direct-reply-to); conformance is **real-broker-only** for v0.1 (D5); (TV-08) the delayed-exchange criteria run against a plugin-enabled image in a required lane (coord T37) or are conditionally-verified and **fail, not skip**, when the plugin is expected but missing; (TV-11) assert the quorum poison-loop **bound** (`DeliveryLimit + 1`, not `==` — non-deterministic on cyclic topologies per §6.3) on a real **4.x** quorum queue via the version matrix (T151). dep VG-1/VG-5.
 - **Verify:** `go test -tags=conformance ./conformance/...` green against both RabbitMQ 3.13 and 4.x.
 - **Files:** `conformance/*.go`.
 - **Deps:** Phases 1–7.
@@ -1063,6 +1067,7 @@ on a reference runner. Bench gates block the `v0.1.0` tag.
   - [ ] `BenchmarkConsume`: ≥ 30k msg/s consume with `Concurrency(8) + Prefetch(256)`.
   - [ ] Bench results CI-recorded as a JSON artifact; nightly drift report compares against the previous tag.
   - [ ] **Lens-09 (PC-03/04/05/14):** the bench must report + pin **payload size** and **queue type**, stating both a classic and a quorum number (quorum's majority Raft commit raises confirm latency materially, so "100k" without the queue type is uninterpretable — D4); reframe `BenchmarkPublishBatch ≥ 5×` into an RTT-stated absolute (the `5×` is pegged to the local single-publish baseline where sync is already writer-bound and ~20× understates the remote benefit) with `PublishBatch` documented as the RTT-decoupled scale path; document the release-tag-only regression cadence (perf can rot between releases on a normal PR), optionally adding a lightweight CI microbench smoke; and source the "~50k msg/s per socket" figure (§6.1) with a measured single-socket ceiling + the `sendM`-writer knee (PG-4). dep PG-4, PG-6.
+  - [ ] **Lens-10 (TV-04):** add a **CI-gradeable relative regression gate** (fail if > X% slower than the last release baseline on the same runner class) as the *checked* §9 criterion, and reclassify the absolute `30k/100k/5×` numbers as **release-tag targets on stated reference hardware** — author-laptop numbers can never gate CI (HW/RTT/neighbour contention); the per-criterion §9 classification is the capstone T152, coordinated with Lens-09 T149. dep VG-1.
 - **Verify:** `go test -bench=. -benchmem -run=^$ ./...` reaches the gates locally and on the reference CI runner. Bench gate fails the build if a number drops > 20% versus the previous tag.
 - **Files:** `bench_publish_test.go`, `bench_publish_batch_test.go`, `bench_consume_test.go`, `bench_multiconn_test.go`, CI workflow `.github/workflows/bench.yml`.
 - **Deps:** Phases 1–5, T37.
@@ -1070,6 +1075,7 @@ on a reference runner. Bench gates block the `v0.1.0` tag.
 ### [ ] T45 — Reconnect chaos test (scaled up) · S
 - **Acceptance:** Integration test: **5-minute outage @ 10k msg/s** with confirms (was 60s @ 1k msg/s), zero loss, `goleak.VerifyNone`. **`WithPublisherConnections(4)` enabled** so the test also exercises the multi-conn fan-out under chaos. Re-subscribe metric (`consumer_resubscribed_total`) and handler-aborted metric (`consumer_handler_aborted_channel_closed_total`) asserted non-zero by the test, demonstrating Rev 5 invariants hold under chaos. Topology re-declared on reconnect; in-flight handlers cancel via ctx with cause `ErrChannelClosed`.
   - [ ] **Lens-08 (CR-10):** add an explicit **1000-cycle** connect/disconnect + confirm-churn `goleak.VerifyNone` sub-test (no such churn test exists today) and reconcile §7's "100x" (L2268) **up** to §9's "1000" so the two stress criteria agree; confirm every goroutine in the Phase-19 inventory is joined. *dep T143 (CG-4).*
+  - [ ] **Lens-10 (TV-09/10):** (TV-09 — the lens's highest-leverage finding; it guards the §1 no-loss headline) specify the chaos "zero message loss" counting method in §7 **and** the test: loss = **published-set − consumed-set deduplicated by `MessageID`** (UUIDv7), explicitly tolerating at-least-once **duplicates** (`PublishRetry`/the reconnect barrier produce them by design); add the **VG-6 injected-drop self-test** — the harness reports loss == 1 for one deliberate drop, proving it cannot pass while losing; (TV-10) reconcile the residual **§7 chaos prose** still reading "60s outage at 1k msg/s" (L2245) **up** to §9's "5-minute outage at 10k" (the §7 "100x"→"1000" memory-stress reconciliation is already this task's Lens-08 scope). dep VG-6.
 - **Verify:** Test runs in <7 minutes on CI; flaky-rate <1% over 50 runs.
 - **Files:** `chaos_reconnect_integration_test.go`.
 - **Deps:** Phase 1, T07d, T12, T18, T20.
@@ -1080,6 +1086,7 @@ SPEC §8 + §9 reliability bar: credential leakage is a defect.
   - [ ] Integration test runs a 60s end-to-end workload against a credentialed URI (`amqp://leak_user:s3cret-pass@host:5672/v`); captures every emitted log line, error string, span attribute snapshot, and Prometheus metric label value into a single buffer.
   - [ ] Test scans the buffer with `regexp.MustCompile("s3cret-pass|leak_user:")` and asserts **zero matches**. A control assertion in the same test verifies the buffer is non-empty (otherwise a no-op test would pass trivially).
   - [ ] Also asserts every captured AMQP URI matches the redacted shape (`amqp[s]?://\*\*\*@`).
+  - [ ] **Lens-10 (TV-14):** breadth of *exercise*, not just of scan — the 60s credentialed run must **force** a wrapped-`amqp091-go` error path (an auth failure / a broker error whose message embeds the dial URL; per Lens-07 the likeliest leak is a wrapped underlying error, not a warren-own string) so the wrapped-error surface is actually produced before the grep runs, since a grep only catches output that was exercised. coord Lens-07. dep VG-1.
 - **Verify:** Test fails if any redaction site bypasses `internal/redact.URI`. Acts as a runtime regression for the SPEC §8 invariant.
 - **Files:** `security_redaction_integration_test.go`.
 - **Deps:** T07c, T07d, T12, T18, T37.
@@ -1203,6 +1210,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
   - [ ] Test fails if the `basic.return` notify channel is made buffered, or if confirm/return demux is split across two goroutines.
   - [ ] Under concurrent mandatory-unroutable publishes, every publish resolves `ErrUnroutable` (zero false successes); asserts `MarkReturned` precedes the ack resolution.
   - [ ] **Lens-01 (RMQ-16):** a real-broker assertion (not just the mock tracker) covers the same path; `amqp091-go` is pinned in `go.mod`; a comment records the dependency on amqp091-go's single synchronous reader goroutine (a buffered/worker-pool dispatcher upstream would silently break the invariant).
+  - [ ] **Lens-10 (TV-02):** the real-broker assertion runs **many iterations** under **concurrent unroutable-mandatory publishes during confirm load** to actually trip the ~50%-under-load race against amqp091-go's two-channel notify dispatch (a mock tracker cannot reproduce the dispatch timing → a green mock proves nothing about the race it exists to lock); a §7 note records that this contract is **flaky-prone by design** and belongs on the nightly trigger (T151), not a single PR run. dep VG-4.
 - **Verify:** Run with `-race -count=100`; a deliberately-buffered return channel variant in the test makes it red. Real-broker variant on the integration lane.
 - **Files:** `internal/confirms/tracker_test.go`, `publisher_test.go`, `go.mod`.
 - **Deps:** T11, T13. **(R10-3, P0.3)**
@@ -1424,6 +1432,7 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 ### [ ] T81 — Version-divergence documentation (RMQ-17/19/21/23/30/31) [P2] · S
 - **Acceptance:**
   - [ ] Khepri caveat (declares are Raft-quorum ops); CloudEvents 0-9-1⇄1.0 bridge version note + a round-trip interop test (coord. lens 03); §9 verification pinned to the management HTTP API instead of `rabbitmqadmin` CLI (v2 rewrite in 4.0); mirrored-queue staleness fixed (§6.2); transient-queues-deprecated-feature note; mixed-version-cluster caveat.
+  - [ ] **Lens-10 (TV-05/11):** the version-divergence claims are **verified** by the new RabbitMQ 3.13 + 4.x integration matrix (T151) — assert the quorum default `x-delivery-limit` (R10-2, default 20) drops the 21st delivery on **4.x** and the classic-queue `x-delivery-limit`-ignore behaviour, with §9 verification pinned to the management HTTP API on the version where each binds; the poison-loop **bound** assertion (TV-11) rides the same 4.x quorum queue. dep VG-5.
 - **Verify:** Doc review; the CloudEvents interop round-trip test passes on both versions.
 - **Files:** SPEC §6.1/§6.2/§6.9/§9, a CloudEvents interop test.
 - **Deps:** T26. **(RMQ-17/19/21/23/30/31, P2)**
@@ -2332,6 +2341,92 @@ Per-task SPEC amendment lands in the same PR; a SPEC §10 "Rev 19" note records 
 - [ ] README synced if the external contract changed (none expected — internal hot-path + spec wording; no new public option in this phase).
 - [ ] SPEC §10 "Rev 19" note records the Lens-09 pass; nine findings extend their owning task in place (T10/T11/T17/T18/T22/T44b/T83/T116) + T113 confirmed, not re-filed; exactly **one** new `LATER.md` entry (LATER-45; the Phase-18 conditional LATER-44 reservation stands); T147–T149 contiguous, no duplicate IDs.
 
+## Phase 21 — Test-Strategy & Verifiability Re-review (Lens 10: every §9 success criterion classified falsifiable? / tested-at-what-level? / right-reason? / CI-gateable?, every load-bearing §6 contract matched to the weakest test level that can prove it, every "nightly"/"enforced in CI"/"suite passes" claim checked against the actual CI)
+
+Closes the Lens-10 adversarial spec validation
+(`spec-validation/10-test-strategy-verifiability.md`, findings `TV-01..TV-15`; brief
+`spec-validation/10-test-strategy-verifiability-plan.md`). Lens verdict: **GO-WITH-CHANGES**,
+**no Blocker**. The library's *behaviour* is well tested (631 unit tests, 6 fuzz targets, 212
+`goleak.VerifyNone` assertions, `-race` everywhere) and the highest-risk contracts already
+have **owned** tasks with **named tests** — so, like Lens-09, **this lens is heavily
+cross-lens and its headline is already owned**: every "untested contract" the prompt
+anticipated is already someone's task (R10-3 ordering → T59 + Lens-01 RMQ-16; polyglot
+CloudEvents / field-table / `time.Time`→`T` fidelity → T94 + T37; the Rev-10 failure modes
+R10-6/8/12 → T61/T63/T67, pulled into v0.1 with named tests; the version-divergent quorum
+limit → T81; the security credential grep → T45b; the concurrency-interleavings coverage%
+gap → T143/T146). The gap this lens exposes is **not in the code** — it is in the
+**verification infrastructure and the honesty of the criteria**: a CI that runs only `unit` +
+`integration` (single `rabbitmq:3-management`, Go 1.23, `-cover` with no fail-under, **no
+`schedule:` trigger**) leaves ~¼ of §9 **structurally unrun** (every "nightly" criterion —
+fuzz 10m-budget, 1000-cycle stress, chaos 5-min @ 10k × 50 runs — has no runner; the
+conformance lane + throughput bench don't exist in CI; the 4.x + Go-1.24 rows never run) and
+lets three reliability-relevant criteria **pass while broken** (chaos "zero message loss"
+with no loss-counting method; the unenforced coverage floor; the security grep that only
+catches *exercised* output). The net-new value is that **infrastructure + criteria-honesty
+layer no prior lens owns**: a scheduled/nightly workflow (TV-01), a RabbitMQ 3.13 + 4.x
+matrix (TV-05), an integration-broker-required guard (TV-13), the conformance
+stub-vs-real-broker §7 matrix with the stub language dropped for v0.1 (TV-06), and a
+§7/§9/§6.2.1 verifiability rewrite that classifies every criterion by *where it runs*
+(TV-10/12/15). Owner decisions (2026-05-29, recommended, overridable): **D1** throughput
+(TV-04) = keep `30k/100k/5×` as release-tag targets on reference HW + add a CI-gradeable
+relative regression gate; **D2** nightly (TV-01/13) = add a `schedule:` workflow (fuzz budget
++ 1000-cycle stress + chaos 50-run flaky < 1%) + the broker-required guard — the only honest
+way to claim "nightly"; **D3** version matrix (TV-05/11) = run **both** 3.13 LTS + 4.x on the
+integration lane; **D4** coverage (TV-03) = hard fail-under at 80%/95% + artifact + PR comment
+(§7 already promises it); **D5** conformance (TV-06) = real-broker-only for v0.1 + drop the
+"test AMQP server stub" language. **New lanes are in scope** (unlike Lenses 04–09): the
+`conformance` lane is already in §7/§3 but not CI (remediation, not invention); the
+scheduled/nightly is a new *trigger*, the version matrix a new *axis*. **Nine** findings
+**extend an existing task in place** (cross-lens; `Lens-10 (TV-xx)` bullet, not re-filed): T41
+(TV-03), T42 (TV-03/07/13), T44 (TV-06/08/11), T44b (TV-04), T45 (TV-09/10), T45b (TV-14),
+T59 (TV-02), T81 (TV-05/11), T37 (TV-08); **three groups confirmed** (do-not-regress, no
+task): T94 + T37 (polyglot interop), T61/T63/T67 (Rev-10 modes), T143/T146 (concurrency
+criteria). Exactly **one** new `LATER.md` entry (LATER-46). **Gate task T150 runs first**; no
+§7/§9/§6.2.1 wording change and no workflow edit lands before its gate returns. Per-task SPEC
+amendment lands in the same PR; a SPEC §10 "Rev 20" note records the pass.
+
+### [ ] T150 — Verification gates VG-1–VG-6 (unit + existing `integration` lane + a throwaway 4.x broker for VG-5; no behaviour change) [P0] · S
+- **Acceptance:**
+  - [ ] Ground truth captured (gate-first) for: **VG-1** the "green by not running" baseline — every §9 checkbox marked *executes-in-current-CI* (`unit`+`integration`, Go 1.23, `rabbitmq:3-management`) vs **structurally unrun** (the nightly criteria, the conformance suite, the throughput bench, the 4.x-only contracts, the Go-1.24 row, the delayed-exchange/TLS/SASL-EXTERNAL criteria), filling the brief §11 "CI-gateable?" column with *measured* facts → gates TV-01/04/05/06/07/08; **VG-2** the unenforced coverage floor — `go test -race -cover ./...` produces a number but **no step fails** below 80%/95% (no `-coverprofile` threshold, no artifact, no PR comment); compute current per-package coverage + confirm a hypothetical sub-floor drop still passes → gates TV-03; **VG-3** the green-by-skipping integration lane — `go test -race -tags=integration ./...` with `AMQP_TEST_URL` **unset** exits **0** having asserted nothing (count the `t.Skip`ped tests) → gates TV-13; **VG-4** R10-3 mock-vs-real — whether the mock-tracker test can *ever* fail when the demux is intentionally broken (split goroutines / buffered notify chan), + how many real-broker iterations under concurrent unroutable-mandatory load trip the race ≥1× → gates TV-02 (T59); **VG-5** version-divergent contracts on 4.x vs 3.13 — stand up both `rabbitmq:3.13` + `rabbitmq:4`; assert the quorum default `x-delivery-limit` (default 20) drops the 21st delivery on 4.x + the classic-queue `x-delivery-limit`-ignore behaviour; record divergence → gates TV-05 (T81); **VG-6** chaos loss-counting — verify "zero loss" = published-set − consumed-set deduped by `MessageID` (tolerating at-least-once duplicates) by **injecting one deliberate drop** and confirming the harness reports loss == 1 → gates TV-09 (T45).
+  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 20**; **no behaviour change** in this task.
+- **Verify:** unit + the existing `integration` lane (+ a throwaway 4.x broker for VG-5) green with the VG measurements captured; the brief §11 "CI-gateable?" column is filled from measured reality; the gate table is reviewable.
+- **Files:** `*_internal_test.go`, `internal/confirms/*_test.go`, `*_integration_test.go`, `.github/workflows/ci.yml` (read-only inspection), `docker-compose.integration.yml` (read-only), `spec-validation/` (results table).
+- **Deps:** T45, T59, T81 (gate targets). **(TV gates, P0)**
+
+### [ ] T151 — CI verification infrastructure: scheduled/nightly workflow + RabbitMQ 3.13/4.x matrix + integration-broker-required guard (TV-01 + TV-05 + TV-13) [P1] · M
+- **Acceptance:**
+  - [ ] **TV-01:** a `schedule:`-triggered workflow (nightly) runs the **fuzz 10m-budget per target**, the **1000-cycle connect/disconnect stress** (T45/CR-10), and the **chaos 5-min @ 10k × 50-run** flaky harness (T45), reporting the **flaky-rate** (< 1%) — `ci.yml` today triggers only on `push`/`pull_request`, so every "nightly" criterion has **no runner**; §9 names which criteria run on this cadence (coord T152).
+  - [ ] **TV-05:** a **RabbitMQ 3.13 + 4.x matrix** axis on the `integration` lane (+ the pinned images in `docker-compose.integration.yml`), so version-divergent contracts (R10-2 quorum default `x-delivery-limit`, classic `x-delivery-limit`-ignore, Khepri `queue.declare`) are verified on the version where they bind (today a single `rabbitmq:3-management`); the matrix *verifies* T81's version-divergence docs.
+  - [ ] **TV-13:** an **integration-broker-required guard** that **fails** the required integration job if **zero** integration tests actually ran (the lane `t.Skip`s green when `AMQP_TEST_URL` is unset).
+- **Verify:** the nightly workflow runs on its `schedule:` and reports the flaky-rate; the integration lane runs both 3.13 and 4.x green; a deliberately-unset `AMQP_TEST_URL` in the required job **fails** the guard; the existing `unit`/`integration` lanes stay green.
+- **Files:** `.github/workflows/*.yml`, `docker-compose.integration.yml`, `Makefile`, `README.md` (CI lane / `make` target description).
+- **Deps:** T150 (VG-1/VG-3/VG-5), T45, T45b, T41, T42, T37, T44, T81. **(TV-01/TV-05/TV-13, P1)** **(D2, D3)**
+
+### [ ] T152 — Verifiability honesty capstone: §9 per-criterion classification + §7 stub-vs-real matrix + §7/§9/§6.2.1 reconciliation (TV-06 + TV-10 + TV-12 + TV-15) [P2] · S
+- **Acceptance:**
+  - [ ] **Every** §9 success criterion is classified `CI-gate | nightly | release-only | operator-validated | polyglot-lane` so the spec never implies a check that does not exist; the §9 cross-language criteria are scoped to gate on the T94 polyglot lane.
+  - [ ] **TV-06:** the §7 **conformance stub-vs-real-broker contract matrix** (brief §12) is added and the **"test AMQP server stub" language is dropped** for v0.1 (real-broker-only; a stub cannot prove the §12 broker-bound contracts).
+  - [ ] **TV-10:** the residual §7 prose the per-task fixes do not catch is reconciled — §3/§7's "spins up RabbitMQ via testcontainers-go" / `amqptest.NewRabbitMQ(t)` claims vs the real docker-compose + `AMQP_TEST_URL` harness until T37 lands.
+  - [ ] **TV-12:** §7 Coverage states the line-coverage floor is **necessary-not-sufficient** for `internal/confirms`/`internal/reconnect` (the bugs are in interleavings, not lines) and **cross-links the §9 concurrency criteria** (T143/T146, confirmed do-not-regress).
+  - [ ] **TV-15:** §6.2.1's "15 minutes of MessageID retention is sufficient" is labelled an **operator-validated recommendation, not a library-tested guarantee** (no test can exercise an hours-later redelivery).
+  - [ ] Asserts the WS-1/WS-2 lanes (T150/T151 + T41/T42/T44) landed.
+- **Verify:** every §9 criterion carries a classification tag; the §7 stub-vs-real matrix is present and the stub language is gone; §7 prose matches the real harness; §6.2.1 is labelled operator-validated; `make lint` clean.
+- **Files:** SPEC §9/§7/§6.2.1, `README.md` (if the testing-strategy description changes).
+- **Deps:** T150, T151, T41, T42, T44, T44b, T45, T143, T146, T94. **(TV-06/TV-10/TV-12/TV-15, P2)** — lands last; asserts the controls B–D added.
+
+### Checkpoint — Phase 21 (Lens 10) closed
+- [ ] T150 gate results (VG-1..VG-6) captured on unit + the existing `integration` lane (+ a throwaway 4.x broker for VG-5); the brief §11 "CI-gateable?" column filled from measured reality; results table committed; downstream tasks cite their gate; first task records §10 **Rev 20**; **no behaviour change** in T150.
+- [ ] Nightly runner (TV-01/T151): a `schedule:` workflow runs the fuzz 10m-budget + 1000-cycle stress + chaos 5-min @ 10k × 50-run + flaky-rate report; §9 names which criteria run there.
+- [ ] Version matrix (TV-05/11/T151+T81+T44): the `integration` lane runs **both** `rabbitmq:3.13` + `rabbitmq:4`; the quorum default `x-delivery-limit` drop + the poison-loop **bound** (`DeliveryLimit + 1`, not `==`) are asserted on 4.x; T81's docs are verified by it.
+- [ ] Coverage / Go-matrix / skip-guard enforced (TV-03/07/13/T41+T42): CI **fails** below 80% per package / 95% on critical-path packages, uploads the coverage artifact + posts the PR comment; `-race` runs on Go **1.23 and 1.24**; the required integration job fails if zero integration tests ran.
+- [ ] Conformance honesty (TV-06/08/T44+T37): the §7 stub-vs-real matrix exists; the "test AMQP server stub" language is dropped; delayed-exchange criteria run against a plugin-enabled required lane or are conditionally-verified and **fail, not skip**.
+- [ ] Make-checkable numbers (TV-04/09/14): §9 has a CI-gradeable relative regression gate with the absolutes reclassified as release-tag targets (T44b, coord Lens-09 T149); §7 + T45 define chaos loss as published − consumed (deduped by `MessageID`, tolerating duplicates) + the VG-6 injected-drop self-test reports loss == 1; the 60s security run forces a wrapped-`amqp091-go` error path + scans logs/errors/spans/labels (T45b).
+- [ ] R10-3 honesty (TV-02/T59): the real-broker test runs many iterations under concurrent unroutable-mandatory load; §7 notes the contract is flaky-prone by design + nightly-only; the mock-tracker lock stays on the fast lane.
+- [ ] §7/§9/§6.2.1 reconciled (TV-10/12/15/T45+T152): §7 prose matches §9 (5-min @ 10k, 1000 cycles, the docker-compose/`AMQP_TEST_URL`/`amqptest` reality); §7 states the coverage floor is necessary-not-sufficient + cross-links T143/T146; §6.2.1 labels the dedupe window operator-validated; **every** §9 criterion is classified.
+- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` green; the new nightly / 3.13+4.x-matrix / conformance lanes green on their cadence.
+- [ ] README synced if the external contract changed (the `make` target list / CI lane description if a `make ci-nightly`/matrix target is added; the §9 numbers + classification are SPEC-side — checked per task).
+- [ ] SPEC §10 "Rev 20" note records the Lens-10 pass; nine findings extend their owning task in place (T37/T41/T42/T44/T44b/T45/T45b/T59/T81) + three groups confirmed (T94, T61/T63/T67, T143/T146), not re-filed; exactly **one** new `LATER.md` entry (LATER-46); T150–T152 contiguous, no duplicate IDs.
+
 ### Checkpoint — v0.1.0 shipped
 - [ ] Every SPEC §9 success criterion ticked.
 - [ ] `v0.1.0` tag on `main`.
@@ -2341,8 +2436,8 @@ Per-task SPEC amendment lands in the same PR; a SPEC §10 "Rev 19" note records 
 ---
 
 ## Quick stats
-- Total tasks: **158** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane); Phase 16 (2026-05-28): +T111-T118 Lens-05 SRE/production-operability re-review, pulls T67/T72 forward, extends T61/T62/T63/T65/T66/T70/T71 (cross-lens), no new build-tag lane, no new LATER; Phase 17 (2026-05-28): +T119-T129 Lens-06 Go-API/library-design re-review, fixes the GA-01 DeliveryMode silent-non-persistence Blocker, extends T37/T68/T69/T70/T71/T112 (cross-lens), adds LATER-41, no new build-tag lane; Phase 18 (2026-05-29): +T130-T142 Lens-07 security/threat-modeling re-review, fixes the ST-06 inbound-DoS Blocker (promotes/supersedes LATER-35), extends T65 (cross-lens), adds LATER-42, no new build-tag lane; Phase 19 (2026-05-29): +T143-T146 Lens-08 go-concurrency-runtime re-review, fixes the CR-02 counter-B lost-update Blocker, extends T07/T08/T13/T18/T20/T34c/T45/T60/T70 (cross-lens), adds LATER-43, no new build-tag lane; Phase 20 (2026-05-29): +T147-T149 Lens-09 performance-capacity re-review, no Blocker, extends T10/T11/T17/T18/T22/T44b/T83/T116 (cross-lens) + confirms T113, adds LATER-45, no new build-tag lane; net-new value is the per-message hot-path allocation cluster (PC-06/07/08/09), the multiple=true O(n) resolution (PC-11), and the §9-criteria/benchmark-methodology gaps — the capacity-honesty headline is already owned by T83/T116/T113).
-- Phases: **20**.
+- Total tasks: **161** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane); Phase 16 (2026-05-28): +T111-T118 Lens-05 SRE/production-operability re-review, pulls T67/T72 forward, extends T61/T62/T63/T65/T66/T70/T71 (cross-lens), no new build-tag lane, no new LATER; Phase 17 (2026-05-28): +T119-T129 Lens-06 Go-API/library-design re-review, fixes the GA-01 DeliveryMode silent-non-persistence Blocker, extends T37/T68/T69/T70/T71/T112 (cross-lens), adds LATER-41, no new build-tag lane; Phase 18 (2026-05-29): +T130-T142 Lens-07 security/threat-modeling re-review, fixes the ST-06 inbound-DoS Blocker (promotes/supersedes LATER-35), extends T65 (cross-lens), adds LATER-42, no new build-tag lane; Phase 19 (2026-05-29): +T143-T146 Lens-08 go-concurrency-runtime re-review, fixes the CR-02 counter-B lost-update Blocker, extends T07/T08/T13/T18/T20/T34c/T45/T60/T70 (cross-lens), adds LATER-43, no new build-tag lane; Phase 20 (2026-05-29): +T147-T149 Lens-09 performance-capacity re-review, no Blocker, extends T10/T11/T17/T18/T22/T44b/T83/T116 (cross-lens) + confirms T113, adds LATER-45, no new build-tag lane; net-new value is the per-message hot-path allocation cluster (PC-06/07/08/09), the multiple=true O(n) resolution (PC-11), and the §9-criteria/benchmark-methodology gaps — the capacity-honesty headline is already owned by T83/T116/T113; Phase 21 (2026-05-29): +T150-T152 Lens-10 test-strategy & verifiability re-review, no Blocker, extends T37/T41/T42/T44/T44b/T45/T45b/T59/T81 (cross-lens) + confirms T94/T61/T63/T67/T143/T146, adds LATER-46; **new lanes in scope** (a scheduled/nightly `schedule:` trigger + a RabbitMQ 3.13/4.x integration matrix + an integration-broker-required guard + conformance-lane wiring — the conformance lane is already in §7/§3 but not CI, so this is remediation not invention); net-new value is the **CI-infrastructure + criteria-honesty layer** (no nightly runner, no version matrix, an unenforced coverage floor, author-laptop throughput numbers, §7/§9 internal inconsistencies) — every load-bearing contract the lens targets is already owned (T59/T94/T61/T63/T67/T81/T45b)).
+- Phases: **21**.
 - Estimated sizing: 8× XS · 40× S · 23× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.
