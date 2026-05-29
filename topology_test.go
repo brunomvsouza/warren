@@ -530,6 +530,19 @@ func TestTopology_expand_noStrategyForStreamWithDLX(t *testing.T) {
 	assert.NotContains(t, expanded.Queues[0].Args, "x-dead-letter-strategy")
 }
 
+// The auto-created <source>.dlq is a classic queue and must not inherit the
+// quorum at-least-once strategy from its source.
+func TestTopology_expand_autoCreatedDLQHasNoStrategy(t *testing.T) {
+	topo := &Topology{
+		Queues:      []Queue{{Name: "orders", Durable: true, Type: QueueTypeQuorum}},
+		DeadLetters: []DeadLetter{{Source: "orders"}},
+	}
+	expanded := topo.expand()
+	dlq := findQueue(expanded, "orders.dlq")
+	require.NotNil(t, dlq, "DLX pre-pass must append the <source>.dlq queue")
+	assert.NotContains(t, dlq.Args, "x-dead-letter-strategy")
+}
+
 func TestTopology_expand_respectsUserDeadLetterStrategy(t *testing.T) {
 	topo := &Topology{
 		Queues: []Queue{{
