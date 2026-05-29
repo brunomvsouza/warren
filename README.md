@@ -175,7 +175,7 @@ Warren is built with "production-first" principles, embedding several reliabilit
 - **Batch** — `Publisher.PublishBatch` (always-all, single-channel, `[]PublishResult` + `ErrBatchTooLarge`) and `BatchConsumerFor[M]` with size- and timer-based flush triggers and `multiple=true` acking
 - **Codec** — lax JSON by default (Postel's Law — unknown fields are tolerated so producer-first deploys do not poison v1 DLQs); opt-in `codec.NewJSONStrict()`; `codec.NewProtobuf()`; CloudEvents in both `codec.NewCloudEventsStructured()` and `codec.NewCloudEventsBinary()` modes (AMQP protocol binding via the `HeaderCodec` interface)
 - **Errors** — AMQP reply-code sentinels, `AMQPCode`, transient/permanent classifiers
-- **Observability** — pluggable `log.Logger`, Prometheus metrics (default), OpenTelemetry tracer + W3C propagation helpers; **publisher** spans inject trace context into AMQP headers and **consumer** spans extract it, so trace continuity survives DLX bounces; `BatchConsumer` spans carry one Link per message
+- **Observability** — pluggable `log.Logger`, Prometheus metrics (default), OpenTelemetry tracer + W3C propagation helpers; **publisher** spans inject trace context into AMQP headers before the frame is written and **consumer** spans extract it on the other side, so continuity survives DLX bounces (the broker preserves headers verbatim); `BatchConsumer` spans carry one Link per message
 - **Examples** — [`examples/publish`](examples/publish/main.go), [`examples/consume`](examples/consume/main.go), [`examples/topology`](examples/topology/main.go), [`examples/deadletter`](examples/deadletter/main.go), [`examples/batch_publish`](examples/batch_publish/main.go), [`examples/batch_consume`](examples/batch_consume/main.go)
 
 ### On the roadmap (`v0.1.0`)
