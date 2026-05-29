@@ -439,26 +439,34 @@ func (p *Publisher[M]) publishSpanAttrs() []attribute.KeyValue {
 	return attrs
 }
 
-// injectTrace writes the W3C trace context from ctx into a copy-safe headers
-// map, preserving any caller-supplied traceparent/tracestate (last-wins per
-// SPEC §6.9). It allocates a headers map only when ctx carries a live span.
+// injectTrace returns a fresh headers map carrying the W3C trace context from
+// ctx merged onto the caller's headers, preserving any caller-supplied
+// traceparent/tracestate (last-wins per SPEC §6.9). It clones before injecting
+// and only when ctx carries a live span: on the plain-codec path encodeMsg
+// returns the caller's own Headers map, so mutating it in place would write the
+// injected traceparent back into the caller's map — a caller reusing one map
+// across publishes would then carry the first publish's traceparent into every
+// later publish (the last-wins restore treats the stale value as caller-supplied),
+// silently stitching unrelated publishes into one trace.
 func (p *Publisher[M]) injectTrace(ctx context.Context, headers Headers) Headers {
 	if !p.propagator.ActiveContext(ctx) {
 		return headers
 	}
-	if headers == nil {
-		headers = make(Headers, 2)
+	// maps.Clone(nil) returns nil, so allocate explicitly for the no-headers case.
+	out := maps.Clone(headers)
+	if out == nil {
+		out = make(Headers, 2)
 	}
-	callerTP, hasTP := headers[otel.HeaderTraceParent]
-	callerTS, hasTS := headers[otel.HeaderTraceState]
-	p.propagator.Inject(ctx, headers)
+	callerTP, hasTP := out[otel.HeaderTraceParent]
+	callerTS, hasTS := out[otel.HeaderTraceState]
+	p.propagator.Inject(ctx, out)
 	if hasTP {
-		headers[otel.HeaderTraceParent] = callerTP
+		out[otel.HeaderTraceParent] = callerTP
 	}
 	if hasTS {
-		headers[otel.HeaderTraceState] = callerTS
+		out[otel.HeaderTraceState] = callerTS
 	}
-	return headers
+	return out
 }
 
 // finishPublishSpan stamps the terminal outcome on the publish span: the

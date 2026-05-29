@@ -1006,3 +1006,88 @@ sequential dispatch). The behavioural concurrency guard only becomes load-bearin
 option is added. Aligns with the Phase 19 counter-B atomicity scope (T143/CG-1, T20 extension) — fold in there if that
 phase is tackled first.
 
+---
+
+### LATER-59 — Publish span keeps `err.Error()` verbatim, so a custom third-party codec can leak payload-derived text (asymmetry with the redacted consume path)
+
+**Context:** `finishPublishSpan` (`publisher.go:472-481`) deliberately keeps the raw `err.Error()` as the span status
+description and calls `span.RecordError(err)` on the unwrapped error. The doc comment justifies this because publish
+errors are "framework/broker diagnostics, never handler- or payload-derived" — which holds for all three built-in
+codecs (`json.Marshal`, `proto.Marshal`, CloudEvents `event.Validate()` produce field-name-keyed structural/constraint
+errors, never field *values*). The consume path defends the symmetric case with `redactedSpanError` (`consumer.go:50-73`),
+which records only the closed-vocabulary label on the span while still unwrapping to the sentinel for `errors.Is`. The
+publish path has no such guard.
+
+**Impact:** a **caller-supplied custom `Codec`** whose `Encode` returns an error embedding the payload (e.g.
+`fmt.Errorf("bad value %v", body)`) would have that string flow unredacted into the publish span status + exception
+event, violating the SPEC §8 "never leak payload/credentials into observability output" guarantee. Caller-introduced,
+not present with any shipped codec.
+
+**Evidence:** Phase 6 `/ship` security audit, 2026-05-29 (security-auditor finding LOW-1).
+
+**Suggested solution:** when the publish error wraps `ErrInvalidMessage` (the codec-encode class — see `publishOutcome`
+`publisher.go:503-504`), record it via a `redactedSpanError`-style adapter or set the status description to the sentinel
+name rather than `err.Error()`. Keep the verbatim broker text only for the broker/framework sentinel classes enumerated
+in `publishOutcome`. This makes the §8 leakage guarantee uniform across both span paths and robust to third-party codecs.
+
+**Prerequisites:** none — localized to `finishPublishSpan` + the `publishOutcome` classification.
+
+---
+
+### LATER-60 — CloudEvents binary decode has no upper bound on extension count / name length
+
+**Context:** `ceBinaryCodec.DecodeWithHeaders` (`codec/cloudevents.go:228-241`) turns every `cloudEvents:`-prefixed header
+into an extension via `ev.SetExtension(name, s)`. The official SDK's `validateExtensionName` enforces ASCII-alphanumeric
+but leaves length unbounded (`MaxExtensionNameLength = 0`), and the codec imposes no cap on the *number* of extensions.
+
+**Impact:** defense-in-depth only. In practice the input is bounded upstream — AMQP 0-9-1 header keys are shortstr
+(≤255 bytes) and the broker caps total frame/header size — so there is no realistic OOM/CPU path through a conforming
+RabbitMQ broker. Worth closing as hardening, not as a live vulnerability.
+
+**Evidence:** Phase 6 `/ship` security audit, 2026-05-29 (security-auditor finding LOW-2).
+
+**Suggested solution:** cap the number of `cloudEvents:` extensions processed per delivery, mirroring the
+`maxHeaderDepth`/`maxMsgIDKeyLen` bounding philosophy already used in `message.go`/`consumer.go`. Optionally bound the
+extension-name length explicitly rather than relying on the broker's shortstr limit.
+
+**Prerequisites:** none.
+
+---
+
+### LATER-61 — `ceStructuredCodec.Encode` `json.Marshal`-error branch is unreachable and untested
+
+**Context:** `ceStructuredCodec.Encode` (`codec/cloudevents.go:79-92`) validates the event with `ev.Validate()` before
+`json.Marshal(ev)`. Because a validated `cloudevents.Event` always marshals, the `json.Marshal` failure branch
+(lines 88-90) is unreachable in practice, leaving `cloudevents.go:79` at ~88.9% statement coverage.
+
+**Impact:** a defensive branch with no test and no behavioral risk; purely a coverage-completeness item. Mirrors the
+documented "defensive only" note already carried on `EncodeWithHeaders`' extension-format guard.
+
+**Evidence:** Phase 6 `/ship` test-coverage analysis, 2026-05-29 (test-engineer Gap-3).
+
+**Suggested solution:** either accept as documented defensive-only, or — if/when the per-package coverage floor (T41)
+must be hit exactly — inject a synthetic marshal failure through a seam. Low value; likely won't-fix.
+
+**Prerequisites:** T41 (coverage gate) — only relevant if the floor is enforced and this branch blocks it.
+
+---
+
+### LATER-62 — BatchConsumer span Links include deliveries with no valid producer trace context
+
+**Context:** `startBatchSpan` (`batch_consumer.go:478-482`) builds one `otel.Link` per delivery via
+`propagator.Extract(d.raw.Headers)`, including deliveries with no `traceparent` (Extract returns `context.Background()`,
+i.e. an invalid span context). The `otel.Link` godoc (`otel/tracer.go:50-52`) states "A Context with no valid span
+context contributes no Link," but enforcement is delegated entirely to the downstream (user-supplied) `LinkingTracer`
+adapter; the library hands it invalid-context Links.
+
+**Impact:** contract risk only, not exercisable today — no `LinkingTracer` SDK adapter ships in Phase 6, so nothing
+consumes the invalid Links yet. A naive adapter doing `trace.LinkFromContext` per Link could emit empty/no-op links.
+
+**Evidence:** Phase 6 `/ship` code review, 2026-05-29 (code-reviewer Suggestion).
+
+**Suggested solution:** filter with `if c.propagator.ActiveContext(linkCtx)` before appending, so only deliveries with a
+valid producer context contribute a Link.
+
+**Prerequisites:** T38 (the `otel/` release example wires a real `LinkingTracer` SDK adapter) — closing this matters
+once a concrete adapter actually consumes the Links.
+
