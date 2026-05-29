@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,35 +23,43 @@ import (
 )
 
 // queueArgsViaManagement reads a queue's declared arguments from the RabbitMQ
-// management HTTP API (port 15672), deriving host and credentials from amqpURL.
-// It skips the test when the management API is unreachable so environments
-// without the management plugin/port do not hard-fail.
+// management HTTP API. The API base (scheme, host, port, credentials) must be
+// supplied explicitly via the AMQP_MANAGEMENT_URL env var, e.g.
+// http://guest:guest@localhost:15672 (or https://…:15671). The test fails — it
+// does not skip — when the var is unset, so a misconfigured environment is loud
+// rather than silently un-asserted. The vhost is taken from amqpURL.
 func queueArgsViaManagement(t *testing.T, amqpURL, queue string) map[string]any {
 	t.Helper()
 
-	u, err := url.Parse(amqpURL)
+	mgmt := os.Getenv("AMQP_MANAGEMENT_URL")
+	if mgmt == "" {
+		t.Fatal("AMQP_MANAGEMENT_URL must be set to read broker-side queue arguments " +
+			"(e.g. http://guest:guest@localhost:15672)")
+	}
+	base, err := url.Parse(mgmt)
+	require.NoError(t, err, "AMQP_MANAGEMENT_URL must be a valid URL")
+	require.NotEmpty(t, base.Host, "AMQP_MANAGEMENT_URL must include host:port (e.g. http://guest:guest@localhost:15672)")
+
+	// vhost comes from the AMQP connection URL; the default vhost is "/".
+	av, err := url.Parse(amqpURL)
 	require.NoError(t, err)
-	user, pass := "guest", "guest"
-	if u.User != nil {
-		user = u.User.Username()
-		if p, ok := u.User.Password(); ok {
-			pass = p
-		}
-	}
-	host := u.Hostname()
-	if host == "" {
-		host = "localhost"
-	}
-	vhost := strings.TrimPrefix(u.Path, "/")
+	vhost := strings.TrimPrefix(av.Path, "/")
 	if vhost == "" {
 		vhost = "/"
 	}
-	apiURL := fmt.Sprintf("http://%s:15672/api/queues/%s/%s",
-		host, url.PathEscape(vhost), url.PathEscape(queue))
+
+	apiURL := fmt.Sprintf("%s://%s/api/queues/%s/%s",
+		base.Scheme, base.Host, url.PathEscape(vhost), url.PathEscape(queue))
 
 	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	require.NoError(t, err)
-	req.SetBasicAuth(user, pass)
+	// Credentials come from the management URL userinfo and ride the
+	// Authorization header — never the request URL (so they cannot leak via an
+	// error or log line).
+	if base.User != nil {
+		pass, _ := base.User.Password()
+		req.SetBasicAuth(base.User.Username(), pass)
+	}
 
 	// DisableKeepAlives so no pooled connection goroutine survives into goleak.
 	client := &http.Client{
@@ -60,9 +69,7 @@ func queueArgsViaManagement(t *testing.T, amqpURL, queue string) map[string]any 
 	defer client.CloseIdleConnections()
 
 	resp, err := client.Do(req)
-	if err != nil {
-		t.Skipf("management API unreachable at %s:15672: %v", host, err)
-	}
+	require.NoErrorf(t, err, "management API GET %s://%s failed", base.Scheme, base.Host)
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

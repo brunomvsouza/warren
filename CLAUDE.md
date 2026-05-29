@@ -38,6 +38,18 @@ make integration-down                                         # stop and remove 
 
 `AMQP_TEST_URL` must be exported or prefixed on the command; without it the integration tests skip via `t.Skip`.
 
+Tests that read broker-side queue arguments back via the RabbitMQ management
+HTTP API also require **`AMQP_MANAGEMENT_URL`** (e.g.
+`http://guest:guest@localhost:15672`, or `https://…:15671` for TLS). Unlike
+`AMQP_TEST_URL`, a missing `AMQP_MANAGEMENT_URL` **fails** the test rather than
+skipping it — broker-side assertions are configured explicitly, not silently
+dropped. Provide it whenever `AMQP_TEST_URL` is set:
+
+```
+AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ \
+AMQP_MANAGEMENT_URL=http://guest:guest@localhost:15672 make test-integration
+```
+
 `examples-build` and `examples-smoke` enforce SPEC §7 "Executable
 examples at checkpoints" + §10 Rev decision 49: every checkpoint
 example under `examples/<feature>/` must build on every PR and
