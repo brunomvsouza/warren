@@ -257,3 +257,20 @@ func TestMetricsTypeName(t *testing.T) {
 	assert.Equal(t, "[]uint8", metricsTypeName[[]byte](), "unnamed slice → String() fallback")
 	assert.Equal(t, "map[string]int", metricsTypeName[map[string]int](), "unnamed map → String() fallback")
 }
+
+// TestMessageID_UUIDv7_NoPerCallEntropyAlloc is the Lens-09 (PC-09) allocation
+// guard. The package init must call uuid.EnableRandPool() so the per-publish
+// crypto/rand read is batched into a process-global pool. Without it, every
+// uuid.NewV7() — and thus every applyDefaults on a Message with an empty
+// MessageID — allocates one entropy buffer (measured at 1.00 alloc/op). With the
+// pool active, the per-call entropy buffer is gone (0 alloc/op). This guard fails
+// if the EnableRandPool call is ever removed. It is the T10-local guard
+// coordinated with T148's combined hot-path AllocsPerRun guard.
+func TestMessageID_UUIDv7_NoPerCallEntropyAlloc(t *testing.T) {
+	allocs := testing.AllocsPerRun(1000, func() {
+		_, _ = uuid.NewV7()
+	})
+	assert.Zero(t, allocs,
+		"uuid.NewV7 must not allocate a per-call entropy buffer; "+
+			"package init must call uuid.EnableRandPool() (Lens-09 PC-09)")
+}

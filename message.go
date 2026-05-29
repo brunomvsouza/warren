@@ -10,6 +10,24 @@ import (
 	"github.com/brunomvsouza/warren/codec"
 )
 
+// init enables the google/uuid process-global random pool (Lens-09 PC-09).
+//
+// MessageID defaults to a UUID v7 (see applyDefaults), generated on every publish
+// whose Message leaves MessageID empty. Without the pool, each uuid.NewV7 reads
+// entropy from crypto/rand and allocates a per-call buffer (1 alloc/op). The pool
+// batches those reads into a single process-global buffer refilled in bulk,
+// eliminating the per-publish entropy allocation on the hot path.
+//
+// Note the cost this does NOT remove: google/uuid takes a process-global timeMu
+// lock inside every NewV7 to keep the embedded timestamp monotonic. At the
+// billions/day bar that lock is a process-wide serialization point shared by
+// every publisher goroutine. MessageID is load-bearing for the at-least-once
+// dedupe contract (consumers dedupe by MessageID — see SPEC §6.2.1), so this
+// per-publish UUID generation cannot be skipped to avoid the lock.
+func init() {
+	uuid.EnableRandPool()
+}
+
 // Message is a typed AMQP message. M is the payload type; Body holds a pointer
 // to the decoded or to-be-encoded value.
 //
@@ -22,6 +40,12 @@ type Message[M any] struct {
 	Body *M
 
 	// basic.properties — one-to-one mapping with AMQP 0-9-1.
+
+	// MessageID identifies the message for at-least-once dedupe. Left empty, it
+	// defaults to a UUID v7 (RFC 9562) generated at publish time. It is
+	// load-bearing: PublishRetry, the reconnect barrier, and confirm timeouts can
+	// all redeliver, so consumers MUST dedupe by MessageID (SPEC §6.2.1). Do not
+	// disable it to save the per-publish UUID generation.
 	MessageID     string
 	CorrelationID string
 	ReplyTo       string
