@@ -178,6 +178,7 @@ T07 keeps the per-socket lifecycle focused.
   - [ ] Default `WithConnectionName` is `<binary>-<hostname>-<pid>`; verified via `rabbitmqctl list_connections name`.
   - [ ] Default tracer is NoOp (no nil-checks in code paths).
   - [ ] `connection_reconnects_total{role=single}` increments exactly once per reconnect (not in a loop); regression test forces 3 reconnects and asserts the counter reads exactly 3.
+  - [ ] **Lens-08 (CR-03/CR-11):** §6.1 describes the *actual* ctx-cancellable barrier mechanism (a `sync.Cond` woken by a per-Wait `ctx`-watcher goroutine, or a channel-broadcast barrier), not the impossible-as-worded "condition variable cancellable via `ctx`" (`connection.go:43/597-604`); the per-Wait-iteration watcher is bounded/pooled (a reconnect storm with K blocked publishers must not spawn K×iterations goroutines); `ForceReconnect` is documented idempotent/coalesced (cap-1 channel) and safe during an in-progress reconnect; a test asserts a ctx-cancel during the barrier returns `ErrReconnecting` with no goroutine leak.
 - **Verify:** Integration test (testcontainers RabbitMQ): Dial succeeds, Health passes, Close completes cleanly. `goleak.VerifyNone` at test exit. A second test sets `WithChannelPoolSize` higher than `WithChannelMax` and asserts `ErrInvalidOptions`.
 - **Files:** `connection.go`, `options_connection.go`, `connection_test.go`, `connection_integration_test.go`.
 - **Deps:** T03, T04, T05, T06, **T07c**.
@@ -241,6 +242,7 @@ TCP connection** (not a global pool across all publisher conns).
   - [x] Channels are discarded and replaced when broker signals channel close.
   - [x] **`ErrChannelPoolExhausted`** returned from `Acquire(ctx)` when `ctx` is cancelled while waiting on a saturated pool. Classified `IsTransient`.
   - [x] Race-free: `go test -race` clean under concurrent Acquire/release.
+  - [ ] **Lens-08 (CR-08):** §6.2 documents pool `Acquire` is best-effort, **not FIFO** (Go channel receive has no waiter ordering, `channelpool.go:57`), so a waiter can starve under *permanent* exhaustion; recommend sizing the pool to peak concurrency (a FIFO wait queue is deferred). The dead-channel liveness guard (`channelpool.go:80,122`) stays do-not-regress. *dep T143 (CG-6).*
 - **Verify:** Unit + integration tests; `goleak.VerifyNone`. Saturation test: pool size 1, two concurrent `Acquire` calls, second with a 50ms ctx — asserts `ErrChannelPoolExhausted`.
 - **Files:** `channelpool.go`, `channelpool_test.go`.
 - **Deps:** T07, T07d.
@@ -351,6 +353,7 @@ mandatory metric `publisher_retry_total{exchange, reason}`.
   - [ ] **Client-side `UserID` validation** in `Publish`: if `Message[M].UserID != "" && != conn.AuthenticatedUser()`, return `ErrInvalidMessage` locally **without writing the publish frame** (prevents the 406-channel-close footgun). Cross-references SASL EXTERNAL flow.
   - [ ] While the connection is broker-blocked, `Publish` waits until unblock or `ctx.Done()`; on ctx cancel, returns `ErrConnectionBlocked`. While in reconnect barrier, returns `ErrReconnecting` on ctx cancel.
   - [ ] **Functional-options last-wins on `PublisherBuilder`** (Rev 7, per SPEC §6.1 line 515). Unit-test matrix: (a) `PublisherFor[M](conn).Metrics(a).Metrics(b).Build()` retains only `b` (assert by observing emitted metrics under a canned publish); (b) `.Metrics(b).WithoutMetrics().Build()` produces a publisher whose metric calls land on the no-op recorder, not on `b`; (c) builder-level option overrides the connection-level one — `Dial(WithMetrics(connLevel))` then `PublisherFor[M](conn).Metrics(builderLevel)` retains `builderLevel` on the publisher (the connection's own metrics remain `connLevel`). Same matrix applies to `.Codec(…)` chains and `.Tracer(…)` chains.
+  - [ ] **Lens-08 (CR-01):** the `OnReturn` timing wording (the `OnReturn` acceptance above) also **names the goroutine it runs on** — today it fires inline on the single unbuffered-return demux (`publisher.go:226`), a connection-reader path; the cross-cutting callback-invocation-goroutine contract + the dispatch-vs-doc decision live in **T144** (cited here).
 - **Verify:**
   - Integration test against a routing-key that has no binding asserts `errors.Is(err, ErrUnroutable)` AND that `OnReturn` fired exactly once with a populated `Return.Properties.MessageID` matching what was published.
   - Unit test forces a confirm-window timeout via a mock channel that withholds the `basic.ack` frame; asserts `errors.Is(err, ErrConfirmTimeout)` and the publish goroutine releases (`goleak.VerifyNone`).
@@ -517,6 +520,7 @@ documented Concurrency-vs-ordering trade-off.
   - [ ] Broker-originated errors during consume (channel close 404, 405, etc.) are translated via `internal/amqperror` and surface as wraps of the right sentinel.
   - [ ] Codec calls are wrapped in `defer recover` → `ErrInvalidMessage` (per T09 contract).
   - [ ] **Functional-options last-wins on `ConsumerBuilder`** (Rev 7, per SPEC §6.1 line 515). Unit-test matrix: (a) `.Concurrency(2).Concurrency(8).Build()` produces a consumer running 8 handlers in parallel (assert via in-flight gauge under load); (b) `.HandlerTimeout(50*time.Millisecond).HandlerTimeout(0).Build()` disables the timeout (no `consumer_handler_timeout_total` increment under a slow handler); (c) `.Codec(jsonStrict).Codec(jsonLax).Build()` decodes a payload with an unknown field successfully (lax wins); (d) `.HandlerTimeoutVerdict(TimeoutNackRequeue).HandlerTimeoutVerdict(TimeoutNackNoRequeue).Build()` plus `.HandlerTimeout(50ms)` lands the timed-out message in the DLX, not the source.
+  - [ ] **Lens-08 (CR-06):** §6.3 states the non-blocking dispatcher's **sole** bound is `prefetch` (the `out` channel is prefetch-sized, `consumer.go:487`); there is **no second queue**; the reader blocks when the buffer is full (that *is* the backpressure); `basic.cancel`/channel-close stay observable via the closed deliveries channel even when all `n` handler slots are busy; a test asserts the dispatch buffer == prefetch and `basic.cancel` is observed with all slots busy.
 - **Verify:** Integration test sending good + bad payloads + handlers that return each of the three result classes. **`ChannelQoS()` is verified at the wire level** via a channel recorder that captures the `basic.qos` frame and asserts the `global` bit is `true` when `ChannelQoS()` is set and `false` otherwise. A second, longer-running integration test reuses the recorded channel via package-private accessors to attach a second raw `Consume` and asserts that the prefetch budget is shared rather than doubled — flagged as a conformance probe, not part of the public-API surface.
 
   **Re-subscribe regression test:** start a consumer, kill its underlying TCP connection via the testcontainer driver, wait for reconnect, assert `consumer_resubscribed_total{queue}` == 1 and a fresh publish lands in the handler. `goleak.VerifyNone` clean.
@@ -574,6 +578,7 @@ the consumer-side counter B is auto-disabled.
   - [ ] **Quorum carve-out.** When the source queue at `Build()`-time has `Queue.Type == QueueTypeQuorum && Queue.DeliveryLimit > 0` (introspected via the topology hint or the queue's args), counter B is **auto-disabled** (broker is authoritative). Counter A still runs as a safety net. Godoc and a debug log line document the disable.
   - [ ] Metric/log field `cause` distinguishes the three paths: `cause=delivery-limit` (broker, quorum), `cause=x-death` (counter A), `cause=in-process` (counter B).
   - [ ] Consumer godoc documents that counter B is **process-local**: a restart resets it. Users wanting cross-process bounding must use a quorum queue with `DeliveryLimit > 0` (preferred) or configure a DLX-back-to-source binding (counter A then takes over via `x-death`).
+  - [ ] **Lens-08 (CR-02, Blocker):** counter B's `load`→`Store` (`consumer.go:767→782`) is a **non-atomic read-modify-write** with no lock between — under `Concurrency(n>1)` two handler goroutines processing redeliveries of the same key both read then both write, losing an increment, so `MaxRedeliveries` undercounts and a poison message loops past its limit. Because `sync.Map` is memory-safe, `go test -race` **cannot** catch this logical lost-update, so the "must be race-free; verified with `go test -race`" acceptance above is a **false guarantee**. Make the RMW atomic (per-channel mutex held across load-increment-store, or a lock-striped map keyed by `counterBKey`); amend §6.3/decision 12 to "**atomic** read-modify-write" and note `-race` proves memory-safety, not lost-update freedom; **replace** the `-race`-only check with a **behavioural** N-goroutine-same-key test asserting the final count == N and `MaxRedeliveries` enforced exactly. *dep T143 (CG-1).*
 - **Verify:**
   - Poison-loop integration test (in-process counter B, classic queue): handler always returns wrapped `ErrRequeue`; assert at most `n+1` deliveries within a single consumer run, and that the `(n+1)`-th nack is `requeue=false`. Asserts `cause=in-process` in the metric label.
   - **Quorum-queue test (broker-enforced):** declare a quorum queue with `DeliveryLimit=5`, set `MaxRedeliveries(10)`; handler always returns wrapped `ErrRequeue`; assert exactly 6 deliveries before the broker dead-letters; metric label is `cause=delivery-limit`; counter B map size is 0 throughout (auto-disabled).
@@ -890,6 +895,7 @@ run in a goroutine to avoid blocking the event-loop that dispatches them.
     - `Handler`: panic → nack without requeue emitted; consumer continues processing subsequent messages.
     - `BatchHandler`: panic → nackAll without requeue; consumer continues.
   - [ ] `goleak.VerifyNone` clean in all tests above.
+  - [ ] **Lens-08 (CR-05):** the five sites above cover user *callbacks* but not the **infra-goroutine boundaries** nor `OnReturn`. Add a `recover` (a) in `reconnect.Loop.run` around the user `connect` fn (`internal/reconnect/loop.go:72`; today a panic crashes the whole process — `defer close(l.done)` runs but there is no recover) and (b) on the supervisor / `runBarrier` around the resubscribe hook (`consumer.go:357` / `batch_consumer.go:190`; today a panic kills the supervisor → reconnect silently disabled for that socket); plus the missing `OnReturn` recover (CR-01, owned by T144). A panic must **degrade the socket** (`WithOnTopologyDegraded` + a metric), never crash the process or silently disable reconnect. *dep T143 (CG-5).*
 - **Verify:** `go test -race ./...` green; `go test -race -tags=integration ./...` green (when broker available).
 - **Files:** edits to `connection.go` (WithOnBlocked goroutine, WithOnReconnect + WithOnTopologyDegraded recover), `consumer.go` (safeCallHandler), `batch_consumer.go` (safeCallBatchHandler); tests in `connection_panic_test.go`, `consumer_panic_test.go`, `batch_consumer_panic_test.go`.
 - **Deps:** T07, T18, T23.
@@ -1057,6 +1063,7 @@ on a reference runner. Bench gates block the `v0.1.0` tag.
 
 ### [ ] T45 — Reconnect chaos test (scaled up) · S
 - **Acceptance:** Integration test: **5-minute outage @ 10k msg/s** with confirms (was 60s @ 1k msg/s), zero loss, `goleak.VerifyNone`. **`WithPublisherConnections(4)` enabled** so the test also exercises the multi-conn fan-out under chaos. Re-subscribe metric (`consumer_resubscribed_total`) and handler-aborted metric (`consumer_handler_aborted_channel_closed_total`) asserted non-zero by the test, demonstrating Rev 5 invariants hold under chaos. Topology re-declared on reconnect; in-flight handlers cancel via ctx with cause `ErrChannelClosed`.
+  - [ ] **Lens-08 (CR-10):** add an explicit **1000-cycle** connect/disconnect + confirm-churn `goleak.VerifyNone` sub-test (no such churn test exists today) and reconcile §7's "100x" (L2268) **up** to §9's "1000" so the two stress criteria agree; confirm every goroutine in the Phase-19 inventory is joined. *dep T143 (CG-4).*
 - **Verify:** Test runs in <7 minutes on CI; flaky-rate <1% over 50 runs.
 - **Files:** `chaos_reconnect_integration_test.go`.
 - **Deps:** Phase 1, T07d, T12, T18, T20.
@@ -1199,6 +1206,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
   - [ ] `Delivery[M]` has a resolved-once guard (mirrors `Batch[M]`): the second of any `Ack`/`Nack`/`AckIf`, or a handler-timeout verdict followed by a late handler verdict, is a no-op returning a sentinel (e.g. `ErrAlreadyClosed`-class), never a wire frame.
   - [ ] Channel stays open after the double call.
   - [ ] **Lens-02 (DS-04):** SPEC §6.3 documents the double verdict (incl. a late verdict after `HandlerTimeout`, esp. via `ConsumeRaw`) as a no-op, and states that **pre-fix** it channel-closes (406/`PRECONDITION_FAILED`), taking out *every* in-flight handler on that channel — collateral loss, not just a duplicate.
+  - [ ] **Lens-08 (CR-04, High):** the resolved-once guard on `Delivery[M]` is a **single atomic CAS** (only the winner emits a frame; the loser is a no-op), explicitly **not** a check-then-act — today `Delivery.Ack/Nack` only test `d.done` (`delivery.go:79-115`), a window in which a timeout-verdict goroutine and a handler-`Ack` goroutine both emit → `PRECONDITION_FAILED` → channel close → every in-flight handler on that channel dies; unify with the `Batch[M]` guard and add a **race + behavioural** test (timeout vs handler-`Ack`) asserting exactly one frame and the late call a no-op. *dep T143 (CG-3).*
 - **Verify:** Integration test: `HandlerTimeout` fires, handler later returns `nil`; assert no second frame, channel not closed, no `PRECONDITION_FAILED`. Unit test: double `Delivery.Ack` via `ConsumeRaw` is a no-op.
 - **Files:** `delivery.go`, `consumer.go`, `delivery_test.go`, `consumer_test.go`, SPEC §6.3.
 - **Deps:** T18, T19. **(R10-5, P0.4)** — *pulled into Phase 12; Lens-02 adds the §6.3 wording.*
@@ -1293,6 +1301,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
   - [ ] **Lens-02 (DS-03):** the choice is resolved to **nack-requeue (`requeue=true`)** the undispatched buffer before channel close (never drop → no silent loss); `consumer_shutdown_requeued_total` increments; the forced-close (ctx-deadline) abandoned-in-flight duplicate window is named in SPEC (see DS-16/T85).
   - [ ] **Lens-05 (SRE-07):** every rolling deploy is a low-grade incident — the deploy-time duplicate rate must be **boundable and observable** via `consumer_shutdown_requeued_total`.
   - [ ] **Lens-06 (GA-06):** the new `consumer_shutdown_requeued_total` metric adds a method to the user-implementable `metrics.*` interfaces — it lands behind the embeddable `metrics.NoOp` base (T125) so external implementers don't break-compile, before rc1.
+  - [ ] **Lens-08 (CR-09):** on a **forced** (ctx-deadline) close, *detach* a non-cooperative handler that ignores its cancelled `ctx` (bounded by the cascade ctx), increment a `consumer_handler_leaked_total`-style metric, and do **not** hang the cascade on it (today the timeout-drain `<-handlerDone` waits unboundedly, `consumer.go:650`); the §7/§9 goleak **carve-out** for the ctx-ignoring handler (a caller defect — Go cannot force-kill a goroutine) lands in the capstone T146.
 - **Verify:** Integration: prefetch N, dispatch < N, `Close`; assert undispatched are nack-requeued (redelivered), not silently dropped. Batch partial flush asserted with `goleak` clean. Gated by G2 (capture the current v0.1 behaviour first).
 - **Files:** `connection.go`, `consumer.go`, `batch_consumer.go`, `metrics/`, SPEC §6.1/§6.4.
 - **Deps:** T18, T22, T84 (G2). **(R10-15, P2.5)** — *pulled into Phase 13 (v0.1).*
@@ -2021,7 +2030,7 @@ config → LATER-42); **D5** reconnect on permanent auth = **stop + surface
 — TG-1..TG-5 ride the existing unit + `integration` lanes (3.13 + 4.x); the T135
 codec build-tag is a *compilation* tag, not a CI lane. **One** finding is already
 owned by a prior-lens task and is **not** re-filed (ST-08→**T65**, gains a `Lens-07
-(ST-08)` bullet). Exactly **one** new `LATER.md` entry (LATER-42; LATER-43 only if D3
+(ST-08)` bullet). Exactly **one** new `LATER.md` entry (LATER-42; LATER-44 only if D3
 is overridden to defer); the ST-06 fix **promotes/supersedes the pre-existing
 LATER-35**. **Gate task T130 runs first**; no SPEC edit to an affected section, and no
 fix, lands before its gate returns. Per-task SPEC amendment lands in the same PR; a
@@ -2071,10 +2080,10 @@ SPEC §10 "Rev 17" note records the pass.
 ### [ ] T135 — Build-tag the CloudEvents codec to keep the core dependency-light (ST-10, Med; owner decision D3 build-tag) [P1] · M
 - **Acceptance:**
   - [ ] The CloudEvents codec is behind a `//go:build` tag so a core (non-cloudevents) import does **not** pull `cloudevents/sdk-go/v2`'s transitive closure (Protobuf assessed the same way); §2 (deps) + §6.9 amend to state the core stays dependency-light and how to opt into the heavy codecs.
-  - [ ] If the owner overrides D3 to a **sub-module** split (breaking, import-path change → §8 Ask-first) or to accept+document, **LATER-43** is filed for the full split and T135 ships as doc-only.
+  - [ ] If the owner overrides D3 to a **sub-module** split (breaking, import-path change → §8 Ask-first) or to accept+document, **LATER-44** is filed for the full split and T135 ships as doc-only.
 - **Verify:** A build/import test proves a core import excludes `cloudevents/sdk-go/v2` (TG-5 surface quantified); `make build` + `make examples-build` green with and without the codec tag.
 - **Files:** `codec/cloudevents.go` (+ build tags), `go.mod`, SPEC §2/§6.9, a build/import test, possibly `Makefile`/CI, `README.md`.
-- **Deps:** T130 (TG-5), T25, T26. **(ST-10, P1)** — may file LATER-43 only if D3 overridden.
+- **Deps:** T130 (TG-5), T25, T26. **(ST-10, P1)** — may file LATER-44 only if D3 overridden.
 
 ### [ ] T136 — Document EXTERNAL CN principal extraction + `ssl_cert_login_from` divergence (ST-04, Med; owner decision D4 doc-only) [P2] · XS
 - **Acceptance:**
@@ -2138,7 +2147,7 @@ SPEC §10 "Rev 17" note records the pass.
 - [ ] Cleartext-auth warning (ST-01/T132): a `Dial` with PLAIN over `amqp://` warns; EXTERNAL-over-`amqp://` stays a fail-closed `ErrInvalidOptions`.
 - [ ] Egress credential-safe end-to-end (ST-02/T133): an e2e test proves `secret` leaks into no returned error, no `log` line, and no `amqp091` `Logger` output; the `amqp091` `Logger` is pinned/redacted/documented.
 - [ ] Egress payload-safe (ST-03/ST-14/T134): §8 *Never* lists "log message payloads"; §6.9 says the panic-recover wraps the recovered value's **type only**; the grep/AST + panic-with-payload tests pass.
-- [ ] Supply-chain surface shrunk (ST-10/T135): a build/import test proves a core import excludes `cloudevents/sdk-go/v2` (build-tag) — or the split is deferred to LATER-43 with the surface documented in §2.
+- [ ] Supply-chain surface shrunk (ST-10/T135): a build/import test proves a core import excludes `cloudevents/sdk-go/v2` (build-tag) — or the split is deferred to LATER-44 with the surface documented in §2.
 - [ ] EXTERNAL principal documented (ST-04/T136): §6.5/decision 35 document the CN extraction + `ssl_cert_login_from` divergence and recommend empty `UserID` under non-CN mappings; LATER-42 filed.
 - [ ] `InsecureSkipVerify` warning (ST-11/T137): a `Dial` with `InsecureSkipVerify=true` on `amqps://` warns; §6.1 states the Go-default min-TLS floor + verbatim-config policy.
 - [ ] Reconnect on permanent auth (ST-09/T138): a chaos/integration test asserts the supervisor surfaces `ErrAccessRefused` + bounded backoff/stop + the degraded signal, not an unbounded 403 loop; cites T61/T63/T66/T79.
@@ -2147,7 +2156,89 @@ SPEC §10 "Rev 17" note records the pass.
 - [ ] Cross-lens (ST-08): T65 carries a `Lens-07 (ST-08)` bullet and a test that the default DLQ bound holds under an adversarial poison flood; not re-filed.
 - [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 **and** 4.x) green; `goleak.VerifyNone` clean.
 - [ ] README synced (the inbound size cap, the cleartext-auth warning, the codec build-tag, the `InsecureSkipVerify` warning, the EXTERNAL CN caveat).
-- [ ] SPEC §10 "Rev 17" note records the Lens-07 pass; no finding re-filed that a prior task owns (ST-08→T65); the ST-06 fix promotes/supersedes LATER-35; exactly **one** new `LATER.md` entry (LATER-42; LATER-43 only if D3 is overridden); T130–T142 contiguous, no duplicate IDs.
+- [ ] SPEC §10 "Rev 17" note records the Lens-07 pass; no finding re-filed that a prior task owns (ST-08→T65); the ST-06 fix promotes/supersedes LATER-35; exactly **one** new `LATER.md` entry (LATER-42; LATER-44 only if D3 is overridden); T130–T142 contiguous, no duplicate IDs.
+
+## Phase 19 — Go Concurrency & Runtime-Correctness Re-review (Lens 08: goroutine lifecycles, reader-fed/supervisor-critical callbacks, race/deadlock/leak-freedom, every "race-free"/"idempotent" claim a real primitive)
+
+Closes the Lens-08 adversarial spec validation
+(`spec-validation/08-go-concurrency-runtime.md`, findings `CR-01..CR-13`; brief
+`spec-validation/08-go-concurrency-runtime-plan.md`). Lens verdict: **GO-WITH-CHANGES**
+— the architecture is sound (the return/confirm demux is a single goroutine over an
+*intentionally* unbuffered return channel per R10-3; every message-data buffer is bounded
+— dispatch by prefetch, confirm by batch size, pool by capacity; the confirm tracker
+resolves waiters via a one-shot send with no leak; `started`/`Close` use `atomic.Bool`
+CAS / `sync.Once`; the `Batch[M]` guard is correct; the barrier's AB/BA lock order is
+handled) — but the review found **one must-fix Blocker, a logical lost-update**: counter
+B of the two-counter `MaxRedeliveries` map (`consumer.go:767→782`) is a **non-atomic
+read-modify-write**, so under `Concurrency(n>1)` concurrent redeliveries of the same key
+undercount and a poison message loops **past** its limit — and because `sync.Map` is
+memory-safe, `go test -race` **cannot** catch it, so decision 12 / T20's "race-free,
+verified with `-race`" is a **false guarantee**; plus **one High** liveness footgun
+(CR-01: a user `OnReturn` runs **inline on the unbuffered-return demux goroutine**
+(`publisher.go:226`), so a blocking callback stalls `amqp091`'s per-connection reader →
+heartbeats stop → the broker drops the socket). Owner decisions (2026-05-29, recommended,
+overridable): **D1** `OnReturn` = keep `MarkReturned` synchronous + add the missing
+recover + **dispatch the user callback to a bounded (1-deep) per-publisher worker**
+(documents the timing change); **D2** counter-B = **per-channel mutex** across
+load-increment-store + a **behavioural** test (not `-race`-only); **D3** `Delivery` guard
+= **single `atomic.Bool` CAS** (consider unifying `Batch[M]`); **D4** confirm-tracker =
+**document the per-call boundary + defer the aggregate window to LATER-43**; **D5**
+non-cooperative handler = **detach + metric + goleak carve-out** (caller defect). **No new
+build-tag lane** — CG-1..CG-6 ride the existing unit / `-race` / `integration` lanes
+(3.13 + 4.x) or `amqpmock`/`amqptest`. **Nine** findings **extend an existing task in
+place** (cross-lens; `Lens-08 (CR-xx)` bullet, not re-filed): T20 (CR-02), T07
+(CR-03/CR-11), T60 (CR-04), T34c (CR-05), T18 (CR-06), T08 (CR-08), T70 (CR-09), T45
+(CR-10), T13 (CR-01 coordination). Exactly **one** new `LATER.md` entry (LATER-43).
+**Gate task T143 runs first**; no SPEC edit to an affected section, and no fix, lands
+before its gate returns. Per-task SPEC amendment lands in the same PR; a SPEC §10 "Rev 18"
+note records the pass.
+
+### [ ] T143 — Verification gates CG-1–CG-6 (unit + `-race` + existing `integration` lane, 3.13 + 4.x; no new build-tag lane) [P0] · S
+- **Acceptance:**
+  - [ ] Ground truth captured (unit + `-race` + the **existing** `integration` lane where broker-bound, or `amqpmock`/`amqptest` — **no new build-tag lane**) for: **CG-1** the counter-B lost update reproduces (N goroutines, `Concurrency(n>1)`, same `(channel-instance-id, MessageID)` key on one channel → stored count **below** the true increment count; `go test -race` **passes** while the count is wrong; quantify how far past `MaxRedeliveries` a poison loops); **CG-2** a blocking `OnReturn` on a mandatory-unroutable publish stalls confirms for other in-flight publishes on the same channel **and** backs up `amqp091`'s reader/heartbeats (broker drops the socket) — capture timing; **CG-3** a handler that times out then late-`Ack`s on another goroutine emits a **second frame** today → `PRECONDITION_FAILED` → channel close → sibling in-flight handlers die, and the atomic-CAS guard makes the late call a no-op; **CG-4** a **1000**-cycle connect/disconnect + confirm-churn loop under `goleak.VerifyNone` (leaked count; every §11-inventory goroutine joined); **CG-5** a panic in (a) the reconnect-loop `connect` fn and (b) the resubscribe hook on the supervisor (current blast radius: process crash / silent reconnect-disable; recover degrades instead); **CG-6** under sustained pool exhaustion Acquire is **not** FIFO (max wait / starvation).
+  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 18**.
+- **Verify:** Unit + `-race` + integration lane (3.13 + 4.x where broker-bound) green with the CG assertions; the gate table is reviewable.
+- **Files:** `consumer_internal_test.go`, `publisher_internal_test.go`, `connection_internal_test.go`, `internal/reconnect/*_test.go`, `channelpool_internal_test.go`, `*_integration_test.go`, `spec-validation/` (results table).
+- **Deps:** T07, T08, T13, T18, T20, T34c, T45, T60, T70. **(CR gates, P0)**
+
+### [ ] T144 — Callback invocation-goroutine contract + `OnReturn` dispatch decision (CR-01, High; owner decision D1) [P1] · M
+- **Acceptance:**
+  - [ ] §6.1/§6.2/§6.3 **name the invocation goroutine for every `On*` callback** (brief §12 inventory: `OnReturn` on the unbuffered-return demux; `OnReconnect`/`OnBlocked`/resubscribe on the supervisor, *inside* the open barrier; `OnTopologyDegraded` safe-dispatched) and state the **must-not-block / no-I/O contract** for the reader-fed and supervisor-critical ones (a blocking callback stalls the connection reader / holds the barrier).
+  - [ ] Per **D1**: `MarkReturned` stays synchronous (R10-3 load-bearing); the user `OnReturn` gains a **panic-recover** (coordinate T34c) and is **dispatched to a bounded (1-deep) per-publisher worker** — documenting the timing change from "synchronously before `Publish` unblocks" to "concurrently with / shortly after"; the alternative (synchronous + loud doc + watchdog) is recorded. Extends **T13** (the `OnReturn` timing wording now names the goroutine).
+- **Verify:** A test (CG-2 harness) asserts a blocking `OnReturn` no longer stalls confirms on its channel and the connection reader / heartbeats stay live; `goleak` clean.
+- **Files:** `publisher.go`, `connection.go`, SPEC §6.1/§6.2/§6.3, `metrics/`, `publisher_internal_test.go`, `*_integration_test.go`, `README.md`.
+- **Deps:** T143 (CG-2), T13, T34c. **(CR-01, P1)**
+
+### [ ] T145 — Confirm-tracker aggregate-memory boundary + LATER-43 (CR-07, Med; owner decision D4 document+defer) [P2] · S
+- **Acceptance:**
+  - [ ] §6.2 documents the confirm-tracker memory bound is **per-call** (`PublishBatchMaxSize`), **not** aggregate — N concurrent `PublishBatch`/`Publish` calls hold N independent windows, an unbounded growth surface under publisher fan-out (already admitted §6.2 L930), owned by the *publisher*; recommend caller-side fan-out limiting.
+  - [ ] **LATER-43** is filed for an optional aggregate in-flight window (`WithMaxInFlightConfirms`, default off). The one-shot per-waiter resolve (`tracker.go:211-214`) + `Wait`-deletes-own-entry + `CloseAll` stay do-not-regress.
+- **Verify:** The §6.2 per-call-boundary wording is present and references the fan-out recommendation; `LATER.md` has a well-formed LATER-43; no code change required (boundary doc).
+- **Files:** SPEC §6.2, `LATER.md`, `README.md`.
+- **Deps:** T13. **(CR-07, P2)** — files LATER-43.
+
+### [ ] T146 — Concurrency capstone: goroutine-inventory appendix + §9 criteria + close-idempotency pin (CR-13 + CR-12) [P2] · S
+- **Acceptance:**
+  - [ ] §7/§9 gain a **goroutine-inventory appendix** (every long-lived goroutine + its start owner + stop signal — the brief §11 table) and concurrency success criteria/tests for: counter-B atomicity (CR-02/T20), the double-verdict CAS (CR-04/T60), the `OnReturn`-must-not-block contract (CR-01/T144), the supervisor/loop panic-degrade (CR-05/T34c), the non-cooperative-handler goleak **carve-out** (CR-09/T70), pool starvation (CR-08/T08), and the 1000-cycle churn (CR-10/T45).
+  - [ ] §6.1 pins that close-idempotency is enforced **atomically** (CR-12 — code already correct: `connection.go:237-242` mutex/bool, `consumer.go` `sync.Once`/`atomic.Bool`); a concurrent double-`Close` `-race` test is added.
+- **Verify:** The §7/§9 inventory appendix + the new criteria are present and each maps to a green test; the double-`Close` `-race` test passes; `go test -race ./...` covers them.
+- **Files:** SPEC §6.1/§7/§9, `connection_internal_test.go`, `*_test.go` (cross-cutting), `README.md`.
+- **Deps:** T143, T20, T144, T34c, T07, T60, T18, T08, T145, T70, T45. **(CR-12/CR-13, P2)** — lands last; asserts the controls A–E added.
+
+### Checkpoint — Phase 19 (Lens 08) closed
+- [ ] T143 gate results (CG-1..CG-6) captured on unit + `-race` + the **existing** `integration` lane (3.13 + 4.x where broker-bound) / `amqpmock`; results table committed; downstream tasks cite their gate; **no new build-tag lane** introduced; first task records §10 **Rev 18**.
+- [ ] Counter-B lost-update closed (CR-02/T20, Blocker): the load-increment-store is **atomic**; a **behavioural** N-goroutine-same-key test asserts the final count == N and `MaxRedeliveries` is enforced exactly; §6.3/decision 12 say "atomic read-modify-write" + note `-race` proves memory-safety only.
+- [ ] Callback liveness contract (CR-01/T144): §6.1/§6.2/§6.3 name every `On*` callback's invocation goroutine + the must-not-block contract; `OnReturn` has a panic-recover; a test asserts a blocking `OnReturn` no longer stalls confirms (D1: dispatched to a bounded worker, timing change documented).
+- [ ] Double-verdict atomicity (CR-04/T60): the `Delivery[M]` guard is a single atomic CAS; a race test (timeout vs handler-`Ack`) asserts exactly one frame + the late call a no-op (no `PRECONDITION_FAILED`, no cascade).
+- [ ] Barrier & ForceReconnect (CR-03/CR-11/T07): §6.1 describes the real ctx-cancellable mechanism (no contradiction), the per-Wait watcher churn is bounded, `ForceReconnect` is documented idempotent/coalesced; a test asserts a ctx-cancel during the barrier returns `ErrReconnecting` with no leak.
+- [ ] Panic-safety (CR-05/T34c): a chaos test asserts a panic in the reconnect `connect` fn or the resubscribe hook degrades the socket (`WithOnTopologyDegraded` + metric), not a process crash or a silent reconnect-disable.
+- [ ] Dispatcher & pool (CR-06/T18, CR-08/T08): §6.3 states prefetch is the sole dispatch bound (no second queue) + a test asserts the buffer == prefetch and `basic.cancel` observed with all slots busy; §6.2 documents Acquire is best-effort with a starvation caveat.
+- [ ] Boundaries & leaks (CR-07/T145, CR-09/T70): §6.2 documents the per-call (not aggregate) tracker bound (+ LATER-43); a forced close detaches a non-cooperative handler + increments the leaked-handler metric + does not hang the cascade; §7/§9 carve the ctx-ignoring handler out of the goleak guarantee.
+- [ ] Stress reconciled (CR-10/T45): §7 and §9 agree on **1000** cycles; a 1000-cycle connect/disconnect + confirm-churn `goleak.VerifyNone` test is green.
+- [ ] Capstone (CR-12/CR-13/T146): §6.1 pins atomic close-idempotency (+ double-`Close` `-race` test); §7/§9 carry the goroutine-inventory appendix + the new concurrency criteria, each backed by a test.
+- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 + 4.x) green; `goleak.VerifyNone` clean.
+- [ ] README synced if the external contract changed (the `OnReturn` callback invocation contract; a `WithMaxInFlightConfirms` option only if D4 ships it).
+- [ ] SPEC §10 "Rev 18" note records the Lens-08 pass; nine findings extend their owning task in place (T07/T08/T13/T18/T20/T34c/T45/T60/T70), not re-filed; exactly **one** new `LATER.md` entry (LATER-43); T143–T146 contiguous, no duplicate IDs.
 
 ### Checkpoint — v0.1.0 shipped
 - [ ] Every SPEC §9 success criterion ticked.
@@ -2158,8 +2249,8 @@ SPEC §10 "Rev 17" note records the pass.
 ---
 
 ## Quick stats
-- Total tasks: **151** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane); Phase 16 (2026-05-28): +T111-T118 Lens-05 SRE/production-operability re-review, pulls T67/T72 forward, extends T61/T62/T63/T65/T66/T70/T71 (cross-lens), no new build-tag lane, no new LATER; Phase 17 (2026-05-28): +T119-T129 Lens-06 Go-API/library-design re-review, fixes the GA-01 DeliveryMode silent-non-persistence Blocker, extends T37/T68/T69/T70/T71/T112 (cross-lens), adds LATER-41, no new build-tag lane; Phase 18 (2026-05-29): +T130-T142 Lens-07 security/threat-modeling re-review, fixes the ST-06 inbound-DoS Blocker (promotes/supersedes LATER-35), extends T65 (cross-lens), adds LATER-42, no new build-tag lane).
-- Phases: **18**.
+- Total tasks: **155** (Rev 5: +T07c redaction, +T07d multi-conn, +T34b SASL EXTERNAL, +T44b bench, +T45b security scan; Rev 6: +T18b HandlerTimeoutVerdict matrix, +T38b idempotent_consume example, +T38c ordered_consume example; 2026-05-24: +T34c panic isolation for user-provided callbacks; Phase 10: +T47-T56 SRE Resilience; Phase 11: +T57-T72 Rev 10 AMQP/SRE re-review; 2026-05-28: +T73 codec-call panic-safety recover; Phase 12 (2026-05-28): +T74-T83 Lens-01 protocol-correctness re-review; Phase 13 (2026-05-28): +T84-T93 Lens-02 distributed-systems re-review, pulls T62/T63/T70/T71 forward, adds the `chaos` lane; Phase 14 (2026-05-28): +T94-T100 Lens-03 interoperability/wire-format re-review, adds the `interop` lane + LATER-39; Phase 15 (2026-05-28): +T101-T110 Lens-04 event-driven-architecture re-review, pulls T68/T69 forward, extends T85, adds LATER-40, brings `x-consistent-hash` into scope (no new build-tag lane); Phase 16 (2026-05-28): +T111-T118 Lens-05 SRE/production-operability re-review, pulls T67/T72 forward, extends T61/T62/T63/T65/T66/T70/T71 (cross-lens), no new build-tag lane, no new LATER; Phase 17 (2026-05-28): +T119-T129 Lens-06 Go-API/library-design re-review, fixes the GA-01 DeliveryMode silent-non-persistence Blocker, extends T37/T68/T69/T70/T71/T112 (cross-lens), adds LATER-41, no new build-tag lane; Phase 18 (2026-05-29): +T130-T142 Lens-07 security/threat-modeling re-review, fixes the ST-06 inbound-DoS Blocker (promotes/supersedes LATER-35), extends T65 (cross-lens), adds LATER-42, no new build-tag lane; Phase 19 (2026-05-29): +T143-T146 Lens-08 go-concurrency-runtime re-review, fixes the CR-02 counter-B lost-update Blocker, extends T07/T08/T13/T18/T20/T34c/T45/T60/T70 (cross-lens), adds LATER-43, no new build-tag lane).
+- Phases: **19**.
 - Estimated sizing: 8× XS · 40× S · 23× M · 0× L (none too big).
 - Sequential pinch-points: T07c (`internal/redact`) before T03/T04/T07/T07d; T07 (single-TCP Connection with reconnect barrier + degraded state) and T07b/T07c before T07d (multi-conn pool); T07d before everything in §6 of the spec; T15 (Declare) before T31 (delayed); T18 (Consumer + re-subscribe + handler-ctx cancel + HandlerTimeoutVerdict + UUID-tag default) before T18b (verdict matrix test) and T28 (OTel consume); T45 chaos + T45b security gate T46 release; T38b/T38c examples gate T46 release.
 - Fuzz targets in v0.1.0: `FuzzCodecJSON` (T09), `FuzzCodecProtobuf` (T24), `FuzzCodecCloudEventsBinary` (T26), `FuzzXDeathParser` (T17), **`FuzzRedactURI` (T07c)**. Others added later as bugs surface.

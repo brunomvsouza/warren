@@ -618,3 +618,37 @@ EXTERNAL auth path in `connection.go` (`computeAuthUser`).
 
 ---
 
+### LATER-43 — Optional aggregate in-flight confirm window (`WithMaxInFlightConfirms`)
+
+**Context:** The publisher confirm tracker (`internal/confirms`) bounds outstanding delivery-tags
+**per call** — a single `PublishBatch` holds at most `PublishBatchMaxSize` waiters, and a single
+`Publish` holds one. There is **no aggregate cap across concurrent calls**: N goroutines each issuing
+`PublishBatch`/`Publish` on the same `Connection` hold N independent windows, so the total in-flight
+confirm memory is `N × PublishBatchMaxSize`, bounded only by how much the caller fans out. SPEC §6.2
+already admits the per-call scope ("does not currently throttle multiple concurrent `PublishBatch`").
+
+**Impact:** Under an unbounded publisher fan-out (e.g. one goroutine per request at the billions/day
+bar) the confirm-tracker memory grows with concurrency rather than with a fixed window — a slow or
+degraded broker that stalls confirms lets the in-flight set balloon. Low severity: the common case
+(bounded worker pools, a handful of publishers) is already bounded by the per-call cap, the growth is
+publisher-driven (the caller controls fan-out), and there is no message loss — only memory pressure.
+T145 (Phase 19, Lens-08 CR-07) ships the **doc-only** mitigation (document the per-call boundary +
+recommend caller-side fan-out limiting) but adds no aggregate cap.
+
+**Evidence:** Lens-08 Go concurrency & runtime-correctness spec validation, 2026-05-29 (finding CR-07;
+`spec-validation/08-go-concurrency-runtime-plan.md`). Owner decision D4: document the per-call boundary
+for v0.1; the aggregate window deferred.
+
+**Suggested solution:** Add a `WithMaxInFlightConfirms(n int)` connection (or publisher) option that
+bounds the **aggregate** count of outstanding confirm waiters across all concurrent
+`Publish`/`PublishBatch` calls on the `Connection` — a semaphore acquired before a publish admits its
+waiter(s) and released as confirms resolve, so a stalled broker applies backpressure to publishers
+instead of growing memory. `0` (default) keeps today's per-call-only behaviour (no aggregate cap, no
+behaviour change). Surface waiting on the semaphore as ctx-cancellable (mirrors pool-acquire ergonomics)
+and add a saturation metric. A unit test asserts the aggregate cap holds under N concurrent publishers.
+
+**Prerequisites:** T145 (ships the §6.2 per-call-boundary documentation this builds on); the confirm
+tracker in `internal/confirms` and the publisher confirm path.
+
+---
+
