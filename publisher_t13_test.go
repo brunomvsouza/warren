@@ -553,6 +553,60 @@ func TestPublisher_callOnReturn_ignoresInvalidExpiration(t *testing.T) {
 	assert.Equal(t, time.Duration(0), captured.Properties.Expiration)
 }
 
+// TestPublisher_callOnReturn_mapsAllProperties asserts the full ReturnedProperties
+// struct (T13 #3: 12 basic.properties fields + Headers = 13 total, not a flat map)
+// plus the four top-level Return fields. Every field gets a distinct value so a
+// swapped or dropped mapping is caught.
+func TestPublisher_callOnReturn_mapsAllProperties(t *testing.T) {
+	var captured Return
+	pub := &Publisher[testPayload]{
+		onReturn: func(r Return) { captured = r },
+	}
+
+	ts := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	pub.callOnReturn(amqp091.Return{
+		ReplyCode:       313,
+		ReplyText:       "NO_CONSUMERS",
+		Exchange:        "orders.exchange",
+		RoutingKey:      "order.created",
+		ContentType:     "application/json",
+		ContentEncoding: "gzip",
+		Headers:         amqp091.Table{"x-trace": "abc123"},
+		DeliveryMode:    2, // persistent
+		Priority:        7,
+		CorrelationId:   "corr-42",
+		ReplyTo:         "reply.queue",
+		Expiration:      "5000",
+		MessageId:       "msg-7",
+		Timestamp:       ts,
+		Type:            "OrderPlaced",
+		UserId:          "alice",
+		AppId:           "checkout-svc",
+	})
+
+	// Top-level Return fields.
+	assert.Equal(t, uint16(313), captured.ReplyCode)
+	assert.Equal(t, "NO_CONSUMERS", captured.ReplyText)
+	assert.Equal(t, "orders.exchange", captured.Exchange)
+	assert.Equal(t, "order.created", captured.RoutingKey)
+
+	// All 13 ReturnedProperties fields.
+	p := captured.Properties
+	assert.Equal(t, "application/json", p.ContentType)
+	assert.Equal(t, "gzip", p.ContentEncoding)
+	assert.Equal(t, Headers{"x-trace": "abc123"}, p.Headers)
+	assert.Equal(t, DeliveryModePersistent, p.DeliveryMode)
+	assert.Equal(t, uint8(7), p.Priority)
+	assert.Equal(t, "corr-42", p.CorrelationID)
+	assert.Equal(t, "reply.queue", p.ReplyTo)
+	assert.Equal(t, 5*time.Second, p.Expiration)
+	assert.Equal(t, "msg-7", p.MessageID)
+	assert.Equal(t, ts, p.Timestamp)
+	assert.Equal(t, "OrderPlaced", p.Type)
+	assert.Equal(t, "alice", p.UserID)
+	assert.Equal(t, "checkout-svc", p.AppID)
+}
+
 // — buildPublishing Expiration field ———————————————————————————————————————
 
 func TestBuildPublishing_setsExpirationField(t *testing.T) {
@@ -565,6 +619,33 @@ func TestBuildPublishing_zeroExpirationOmitted(t *testing.T) {
 	msg := Message[testPayload]{Expiration: 0}
 	pub := buildPublishing(msg, []byte("body"))
 	assert.Equal(t, "", pub.Expiration)
+}
+
+// TestBuildPublishing_mapsDeliveryModeToWire pins the SPEC §6.5 wire mapping:
+// DeliveryModePersistent (library zero value) → wire 2, DeliveryModeTransient
+// (1) → wire 1. A raw uint8() cast would emit wire 0 for the persistent default,
+// which RabbitMQ treats as non-persistent — silently breaking durable-by-default.
+func TestBuildPublishing_mapsDeliveryModeToWire(t *testing.T) {
+	// Zero-valued Message defaults to persistent → wire 2.
+	def := buildPublishing(Message[testPayload]{}, []byte("body"))
+	assert.Equal(t, uint8(2), def.DeliveryMode, "default (persistent) must map to wire 2")
+
+	persistent := buildPublishing(Message[testPayload]{DeliveryMode: DeliveryModePersistent}, []byte("body"))
+	assert.Equal(t, uint8(2), persistent.DeliveryMode, "DeliveryModePersistent → wire 2")
+
+	transient := buildPublishing(Message[testPayload]{DeliveryMode: DeliveryModeTransient}, []byte("body"))
+	assert.Equal(t, uint8(1), transient.DeliveryMode, "DeliveryModeTransient → wire 1")
+}
+
+// TestDeliveryMode_wireRoundTrip asserts the encode/decode mapping is a faithful
+// round trip for both library values (SPEC §6.5), and that an unset wire value
+// (0) decodes to transient — RabbitMQ treats only wire 2 as persistent.
+func TestDeliveryMode_wireRoundTrip(t *testing.T) {
+	assert.Equal(t, uint8(2), DeliveryModePersistent.wire())
+	assert.Equal(t, uint8(1), DeliveryModeTransient.wire())
+	assert.Equal(t, DeliveryModePersistent, deliveryModeFromWire(2))
+	assert.Equal(t, DeliveryModeTransient, deliveryModeFromWire(1))
+	assert.Equal(t, DeliveryModeTransient, deliveryModeFromWire(0), "unset wire value is non-persistent")
 }
 
 // — retryReason label coverage —————————————————————————————————————————————

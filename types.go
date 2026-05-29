@@ -20,6 +20,29 @@ const (
 	DeliveryModeTransient
 )
 
+// wire converts the library DeliveryMode to its AMQP basic.properties wire value
+// (SPEC §6.5): DeliveryModePersistent (the zero value) maps to 2, and
+// DeliveryModeTransient (1) maps to 1. Only an explicit DeliveryModeTransient
+// yields a non-persistent message; any other value defaults to durable, so a
+// zero-valued Message[M] is published persistently as documented.
+func (d DeliveryMode) wire() uint8 {
+	if d == DeliveryModeTransient {
+		return 1
+	}
+	return 2
+}
+
+// deliveryModeFromWire converts an AMQP basic.properties wire delivery-mode back
+// to the library DeliveryMode (SPEC §6.5): 2 maps to DeliveryModePersistent, and
+// every other value — including the unset 0 — maps to DeliveryModeTransient,
+// matching RabbitMQ, which treats only wire value 2 as persistent.
+func deliveryModeFromWire(w uint8) DeliveryMode {
+	if w == 2 {
+		return DeliveryModePersistent
+	}
+	return DeliveryModeTransient
+}
+
 // ExchangeKind is the AMQP exchange type string passed to exchange.declare.
 type ExchangeKind string
 
