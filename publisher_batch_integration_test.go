@@ -213,6 +213,11 @@ func TestPublishBatch_OrderPreservation_integration(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 			continue
 		}
+		// Messages left DeliveryMode at its zero value, so they must arrive
+		// persistent on the wire (delivery-mode 2) per SPEC §6.5 — proving the
+		// durable-by-default guarantee end-to-end against a real broker.
+		assert.Equal(t, uint8(2), d.DeliveryMode,
+			"default message must be persistent (wire delivery-mode 2)")
 		var p orderPayload
 		require.NoError(t, json.Unmarshal(d.Body, &p))
 		got = append(got, p.Seq)
