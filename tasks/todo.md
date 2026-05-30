@@ -896,28 +896,30 @@ client cert).
 - **Files:** edits to `options_connection.go`, `connection.go`, `connection_sasl_external_integration_test.go`.
 - **Deps:** T07, T32 (TLS), T37 (`amqptest` for the SSL-auth-enabled testcontainer fixture).
 
-### [ ] T34c — Panic isolation for user-provided callbacks · S
+### [x] T34c — Panic isolation for user-provided callbacks · S
 Every callback registered by the caller must be wrapped in `recover()` so a panicking
 handler cannot crash internal library goroutines. Pure-notification callbacks must also
 run in a goroutine to avoid blocking the event-loop that dispatches them.
 - **Acceptance:**
-  - [ ] **`WithOnBlocked`** — call moved to a dedicated goroutine (`go func() { defer recover; fn(reason) }()`); panic is logged with a stack trace via `logger.Errorf`; the `supervisor` `select` loop is never blocked while the callback executes.
-  - [ ] **`WithOnReconnect`** — wrapped in `recover()` at the inline call site in `runBarrier`; on panic, log the stack trace and ensure `barrierCond.Broadcast()` is still emitted (no permanent Publisher deadlock).
-  - [ ] **`WithOnTopologyDegraded`** — `recover()` added inside the already-spawned goroutine (`mc.wg.Add(1)` in `runBarrier`); panic is logged; `wg.Done()` is always executed via `defer`.
-  - [ ] **`Handler[M]` / `RawHandler[M]`** — invocation extracted into a `safeCallHandler` helper with `recover()`; panic results in `nack(requeue=false)` (prevents infinite poison-message loop) and log of the stack trace; applies to both the inline path (no timeout) and the goroutine path (with timeout).
-  - [ ] **`BatchHandler[M]`** — same pattern via `safeCallBatchHandler`; panic results in `nackAll(requeue=false)` + log.
-  - [ ] No public API change (no new exported error; recover is transparent to the caller).
-  - [ ] Unit tests for each site:
+  - [x] **`WithOnBlocked`** — call moved to a dedicated goroutine (`go func() { defer recover; fn(reason) }()`); panic is logged with a stack trace via `logger.Errorf`; the `supervisor` `select` loop is never blocked while the callback executes.
+  - [x] **`WithOnReconnect`** — wrapped in `recover()` at the inline call site in `runBarrier`; on panic, log the stack trace and ensure `barrierCond.Broadcast()` is still emitted (no permanent Publisher deadlock).
+  - [x] **`WithOnTopologyDegraded`** — `recover()` added inside the already-spawned goroutine (`mc.wg.Add(1)` in `runBarrier`); panic is logged; `wg.Done()` is always executed via `defer`.
+  - [x] **`Handler[M]` / `RawHandler[M]`** — invocation extracted into a `safeCallHandler` helper with `recover()`; panic results in `nack(requeue=false)` (prevents infinite poison-message loop) and log of the stack trace; applies to both the inline path (no timeout) and the goroutine path (with timeout). *(Already shipped in Phase 6 / T73; T34c adds the `..._ThenContinues` characterization test proving the consumer keeps processing after a panic.)*
+  - [x] **`BatchHandler[M]`** — same pattern via `safeCallBatchHandler`; panic results in `nackAll(requeue=false)` + log. *(Already shipped; T34c adds the batch `..._ThenContinues` characterization test.)*
+  - [x] No public API change (no new exported error; recover is transparent to the caller).
+  - [x] Unit tests for each site:
     - `WithOnBlocked`: a panicking callback does not kill the `supervisor` goroutine (verified via goleak + mock conn).
     - `WithOnReconnect`: panicking callback → barrier released, Publishers not deadlocked.
     - `WithOnTopologyDegraded`: panicking callback → `wg.Done()` called, process does not crash.
     - `Handler`: panic → nack without requeue emitted; consumer continues processing subsequent messages.
     - `BatchHandler`: panic → nackAll without requeue; consumer continues.
-  - [ ] `goleak.VerifyNone` clean in all tests above.
+  - [x] `goleak.VerifyNone` clean in all tests above.
   - [ ] **Lens-08 (CR-05):** the five sites above cover user *callbacks* but not the **infra-goroutine boundaries** nor `OnReturn`. Add a `recover` (a) in `reconnect.Loop.run` around the user `connect` fn (`internal/reconnect/loop.go:72`; today a panic crashes the whole process — `defer close(l.done)` runs but there is no recover) and (b) on the supervisor / `runBarrier` around the resubscribe hook (`consumer.go:357` / `batch_consumer.go:190`; today a panic kills the supervisor → reconnect silently disabled for that socket); plus the missing `OnReturn` recover (CR-01, owned by T144). A panic must **degrade the socket** (`WithOnTopologyDegraded` + a metric), never crash the process or silently disable reconnect. *dep T143 (CG-5).*
 - **Verify:** `go test -race ./...` green; `go test -race -tags=integration ./...` green (when broker available).
 - **Files:** edits to `connection.go` (WithOnBlocked goroutine, WithOnReconnect + WithOnTopologyDegraded recover), `consumer.go` (safeCallHandler), `batch_consumer.go` (safeCallBatchHandler); tests in `connection_panic_test.go`, `consumer_panic_test.go`, `batch_consumer_panic_test.go`.
 - **Deps:** T07, T18, T23.
+- **Done (Phase-8 core, the five user-callback sites):** Added a shared `(*managedConn).recoverCallback(name)` seam (deferred recover → `logger.Errorf` with `debug.Stack()`), wired into all three connection callbacks in `connection.go`: (1) **WithOnBlocked** now runs in a `mc.wg`-tracked, recover-guarded goroutine via the new `safeOnBlocked(reason)` so the supervisor `select` loop never blocks on a slow/panicking callback (and `Close` drains it); (2) **WithOnReconnect** is recover-guarded inline in `runBarrier` so a panic can no longer skip `barrierCond.Broadcast()` and deadlock every Publisher; (3) **WithOnTopologyDegraded** gained a `recover` inside its existing `mc.wg` goroutine (ordered before `wg.Done` via LIFO defers so the log lands before `Close`'s `wg.Wait` returns). Sites (4)/(5) — `safeCallHandler`/`safeCallBatchHandler` — were already implemented in Phase 6 (T73 panic-safety contract); T34c adds the `_ThenContinues` characterization tests proving a panicking handler nacks-no-requeue **and** the consumer keeps processing the next delivery/batch. New tests in `connection_panic_test.go` (+ `errorfRecorder` logger), `consumer_panic_test.go`, `batch_consumer_panic_test.go`. **Verified:** unit `-race` green (root cov 79.5%), integration lane `-race` green (30.5s), examples smoke `-race` green, lint 0 issues, build green.
+- **Deferred (Lens-08 / CR-05, gated by T143):** the infra-goroutine boundaries (reconnect-loop `connect` fn, the resubscribe hook) + the missing `OnReturn` recover are **not** done here. They require the **"degrade the socket" mechanism (a new metric)** and are explicitly **gate-first**: T143/CG-5 must first capture the current blast radius (process crash / silent reconnect-disable) before the fix lands. The plan sequences this in Phase 11 sub-phase (C) (`CG-5→T34c`); doing it now would violate the gate-first discipline. `OnReturn`'s recover is owned by T144, not T34c.
 
 ### [ ] T35 — `AutoAck()` opt-in + warning · S
 - **Acceptance:**
