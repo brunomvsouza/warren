@@ -76,8 +76,9 @@ type ceStructuredCodec struct {
 	// by NewCloudEventsStructured — so a test can inject a failure and cover the
 	// otherwise-unreachable json.Marshal error branch in Encode (a validated
 	// cloudevents.Event always marshals in practice). Injecting per-instance avoids
-	// a mutable package global; construct via NewCloudEventsStructured (the zero
-	// value carries no marshaler).
+	// a mutable package global. When nil (a zero-value codec built without the
+	// constructor) Encode falls back to json.Marshal, so the field is never a
+	// nil-call footgun.
 	marshal func(any) ([]byte, error)
 }
 
@@ -99,7 +100,11 @@ func (c *ceStructuredCodec) Encode(v any) ([]byte, error) {
 	if err := ev.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
-	out, err := c.marshal(ev)
+	marshal := c.marshal
+	if marshal == nil {
+		marshal = json.Marshal
+	}
+	out, err := marshal(ev)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
