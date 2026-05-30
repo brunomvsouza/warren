@@ -199,3 +199,31 @@ func TestRunBarrier_onTopoDegradedPanics_callsWgDoneAndLogs(t *testing.T) {
 	}
 	assert.True(t, found, "the panic in onTopoDegraded must be logged")
 }
+
+// — WithOnResubscribe: recover-guarded seam (T34c parity, review I-1) ——————
+//
+// notifyResubscribed runs inside the reconnect barrier on the supervisor
+// goroutine (via the consumer re-subscribe hook), so an unrecovered panic there
+// would crash the process — the same failure mode T34c eliminated for the other
+// five user callbacks. The replacement subscription is already installed before
+// this fires, so a panicking callback must degrade to a logged error while the
+// metric stays recorded and delivery still resumes.
+func TestNotifyResubscribed_panickingCallback_recoversAndLogs_metricStillRecorded(t *testing.T) {
+	mc := newBareManaged(t)
+	rec := &errorfRecorder{Logger: log.NewNoOp()}
+	mc.opts.logger = rec
+	mc.opts.onResubscribe = func(string) { panic("resubscribe boom") }
+
+	cm := &recordingResubMetrics{}
+	require.NotPanics(t, func() {
+		notifyResubscribed(mc, cm, "orders")
+	})
+
+	assert.Equal(t, []string{"orders"}, cm.queues,
+		"metric must be recorded before the callback panics")
+
+	calls := rec.calls()
+	require.Len(t, calls, 1)
+	assert.Contains(t, calls[0], "WithOnResubscribe")
+	assert.Contains(t, calls[0], "panicked")
+}

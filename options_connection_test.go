@@ -50,20 +50,23 @@ func (r *recordingResubMetrics) RecordResubscribed(queue string) {
 }
 
 func TestNotifyResubscribed_firesMetricAndCallback(t *testing.T) {
-	rec := &recordingResubMetrics{}
+	mc := newBareManaged(t)
 	var cbQueue string
+	mc.opts.onResubscribe = func(q string) { cbQueue = q }
+	rec := &recordingResubMetrics{}
 
-	notifyResubscribed(rec, func(q string) { cbQueue = q }, "orders")
+	notifyResubscribed(mc, rec, "orders")
 
 	assert.Equal(t, []string{"orders"}, rec.queues, "metric must be recorded")
 	assert.Equal(t, "orders", cbQueue, "callback must fire with the queue name")
 }
 
 func TestNotifyResubscribed_nilCallback_onlyRecordsMetric(t *testing.T) {
+	mc := newBareManaged(t)
 	rec := &recordingResubMetrics{}
 
 	assert.NotPanics(t, func() {
-		notifyResubscribed(rec, nil, "orders")
+		notifyResubscribed(mc, rec, "orders")
 	})
 	assert.Equal(t, []string{"orders"}, rec.queues)
 }
