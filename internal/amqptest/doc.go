@@ -1,7 +1,8 @@
-// Package amqptest is a public testcontainers-go helper that spins up a
-// RabbitMQ broker for warren's (and downstream applications') integration
-// suites. It is exported so the same fixture can be reused outside this module;
-// the root warren package does not import it at runtime.
+// Package amqptest is an internal testcontainers-go helper that spins up a
+// RabbitMQ broker for warren's own integration suites (the root and example
+// *_integration_test.go files). It lives under internal/ so it is not part of
+// warren's public API surface; the production packages never import it, so its
+// testcontainers/docker dependencies stay out of consumers' builds.
 //
 // # Usage
 //

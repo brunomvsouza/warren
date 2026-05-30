@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/brunomvsouza/warren/amqptest"
+	"github.com/brunomvsouza/warren/internal/amqptest"
 )
 
 const delayedExchange = "warren-amqptest-delayed"

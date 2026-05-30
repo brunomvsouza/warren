@@ -113,7 +113,7 @@ Go developers building message-driven systems against RabbitMQ.
 | Repo            | `github.com/brunomvsouza/warren` (working dir)      |
 | AMQP transport  | `github.com/rabbitmq/amqp091-go` (BSD-2-Clause)    |
 | Broker          | RabbitMQ 3.13 LTS and 4.x                          |
-| Mocks           | `go.uber.org/mock` (gomock) — in `amqpmock/`       |
+| Test fixtures   | `warren.NewDeliveryFixture`/`NewBatchFixture` (no mock library shipped) |
 | Metrics default | `github.com/prometheus/client_golang`              |
 | Tracing         | `go.opentelemetry.io/otel` (opt-in)                |
 | UUID            | `github.com/google/uuid`                           |
@@ -122,8 +122,10 @@ Go developers building message-driven systems against RabbitMQ.
 | License         | MIT                                                |
 
 Dependency policy: minimal. Anything beyond the table above requires
-explicit approval. The root package imports zero test-only code at
-runtime; gomock is a build/test dependency.
+explicit approval. No mock library is shipped — downstream code generates
+its own interface mocks with whatever tool it prefers. The testcontainers
+broker fixture lives in `internal/amqptest`, so its docker dependencies
+never reach a consumer's build.
 
 ---
 
@@ -153,9 +155,6 @@ go test -bench=. -benchmem -run=^$ ./...
 
 # Lint
 golangci-lint run ./...
-
-# Generate gomock mocks into amqpmock/
-go generate ./...
 
 # Tidy
 go mod tidy
@@ -226,14 +225,11 @@ A `Makefile` will expose these as `make build`, `make test`,
 │   ├── tracer.go                 # Tracer wrapper (OTel semantic conventions)
 │   └── propagation.go            # AMQP-header context propagation
 │
-├── amqpmock/                     # gomock-generated; refreshed by `go generate`
-│   ├── connection.go
-│   ├── publisher.go
-│   ├── consumer.go
-│   └── codec.go
+├── fixture.go                    # NewDeliveryFixture / NewBatchFixture (public test fixtures)
 │
-├── amqptest/                     # public testcontainers helper (exported for downstream users)
+├── internal/amqptest/            # internal testcontainers helper (warren's own integration suite)
 │   ├── rabbitmq.go               # spins up RabbitMQ with delayed-message plugin
+│   ├── docker/Dockerfile.amqptest
 │   └── certs/                    # pre-generated TLS test certs
 │
 ├── examples/
@@ -286,8 +282,10 @@ A `Makefile` will expose these as `make build`, `make test`,
   loop.
 - **No globals, no `init()`-side-effects.** Everything constructible
   and injectable.
-- **Mocks** are generated into `amqpmock/`; root package has no
-  runtime dependency on gomock.
+- **No mock library is shipped.** Downstream generates its own
+  interface mocks; warren provides only the `Delivery[M]`/`Batch[M]`
+  fixtures it alone can build (`NewDeliveryFixture`/`NewBatchFixture`).
+  The testcontainers broker fixture is `internal/amqptest`.
 
 ### Example: publish
 
@@ -405,7 +403,7 @@ err = con.ConsumeRaw(ctx, func(ctx context.Context, d *warren.Delivery[OrderPlac
 ### Naming
 
 - **Package names**: lowercase, short, no underscores (`codec`, `log`,
-  `metrics`, `otel`, `amqpmock`).
+  `metrics`, `otel`).
 - **Exported types**: `PascalCase`. Constructors `NewX` or `XFor[M]`
   for generic builders.
 - **Connection options**: `With*` (positive), `Without*` (negation).
@@ -1113,13 +1111,12 @@ func (d *Delivery[M]) AckIf(err error) error // nil→Ack; err→Nack(requeue=er
 ```
 
 `Delivery[M]` is a **concrete struct**, not an interface — methods can be
-added in minor releases without breaking implementers. Tests fabricate a
-fake delivery with `warren.NewDeliveryFixture[M](warren.DeliveryFixture[M]{…})`
-— the **gomock-free** fixture path in the root package, so consumer/raw/batch
-unit tests never pull in `go.uber.org/mock` (GA-09) — or the equivalent
-`amqpmock.NewDelivery[M](amqpmock.DeliveryFixture{…})` re-export in the
-`amqpmock/` subpackage. Both `DeliveryFixture`/`BatchFixture` are keyed-literal
-only (an unexported guard field rejects positional literals), so new fields are
+added in minor releases without breaking implementers. Because the fields are
+unexported, only the library can build one: tests fabricate a fake delivery
+with `warren.NewDeliveryFixture[M](warren.DeliveryFixture[M]{…})` (and a batch
+with `NewBatchFixture`), which need no live broker and no third-party mock
+library (GA-09). Both `DeliveryFixture`/`BatchFixture` are keyed-literal only
+(an unexported guard field rejects positional literals), so new fields are
 non-breaking.
 
 `Ack`, `Nack`, and `AckIf` may return:
@@ -2217,26 +2214,27 @@ value.
     only the messages that hit the DLX in the last hour", which is
     the most common debug query during incidents.
 
-- **`amqpmock`** — generated gomock mocks for the public interfaces
-  (`codec.Codec`/`HeaderCodec`, `log.Logger`, the three metrics interfaces,
-  `otel.Tracer`/`Span`/`LinkingTracer`) plus `NewDelivery[M]` / `NewBatch[M]`
-  constructors that re-export the gomock-free `warren.NewDeliveryFixture[M]` /
-  `warren.NewBatchFixture[M]` (GA-09) to fabricate concrete `Delivery[M]`/
-  `Batch[M]` values in tests. Importing `amqpmock` pulls in `go.uber.org/mock`;
-  fixture-only tests call the root constructors directly to stay gomock-free.
+- **Test fixtures** — the root package exports `NewDeliveryFixture[M]` /
+  `NewBatchFixture[M]` (keyed-literal `DeliveryFixture`/`BatchFixture` inputs)
+  to fabricate concrete `Delivery[M]`/`Batch[M]` values in tests without a live
+  broker (GA-09). The library ships **no mock package** — `Delivery`/`Batch`
+  are the only doubles a consumer cannot build itself (unexported fields), so
+  they are the only ones warren provides; interface mocks are the consumer's to
+  generate with whatever tool they prefer.
 
-- **`amqptest`** — public testcontainers-go helper (`NewRabbitMQ(t, opts…)`
+- **`internal/amqptest`** — internal testcontainers-go helper (`NewRabbitMQ(t, opts…)`
   → `URI()`/`AMQPSURI()`/`Container()`/`Cleanup(t)`) that spins up a
   RabbitMQ node with the `rabbitmq_delayed_message_exchange` plugin
   and `rabbitmq_auth_mechanism_ssl` plugin enabled, plus
-  pre-generated TLS server/client certificates under `amqptest/certs/`
-  for `amqps://` integration tests. TLS is opt-in via `WithTLS()`
-  because the underlying RabbitMQ module configures TLS as
-  `listeners.tcp = none` (TLS-only), which would otherwise break the
-  common plain-AMQP fixture; options are `WithRabbitMQVersion`,
-  `WithEnabledPlugins`, `WithExtraConfig`, `WithTLS`. Exported so
-  downstream applications can use the same fixture in their own
-  integration suites; not imported by the root package at runtime.
+  pre-generated TLS server/client certificates under
+  `internal/amqptest/certs/` for `amqps://` integration tests. TLS is
+  opt-in via `WithTLS()` because the underlying RabbitMQ module
+  configures TLS as `listeners.tcp = none` (TLS-only), which would
+  otherwise break the common plain-AMQP fixture; options are
+  `WithRabbitMQVersion`, `WithEnabledPlugins`, `WithExtraConfig`,
+  `WithTLS`. It lives under `internal/` — warren's own integration
+  suite uses it; it is not part of the public API and never reaches a
+  consumer's build.
 
   **Plugin enablement strategy.** Because
   `rabbitmq_delayed_message_exchange` is a community plugin that
@@ -2283,9 +2281,9 @@ value.
 
 - stdlib `testing` for execution.
 - `github.com/stretchr/testify` for `assert`/`require`.
-- `go.uber.org/mock` (mocks in `amqpmock/`).
 - `github.com/testcontainers/testcontainers-go` + the official
-  RabbitMQ module; pinned image tags for 3.13 LTS and 4.x.
+  RabbitMQ module (in `internal/amqptest`); pinned image tags for
+  3.13 LTS and 4.x.
 - `go.uber.org/goleak` to assert no goroutine leaks at test exit.
 
 ### Coverage
@@ -2406,8 +2404,9 @@ how to exercise what is already merged.
 - Propagate `context.Context` on every blocking operation.
 - Run `goleak.VerifyNone` at the end of every test that starts
   goroutines.
-- Keep mocks in `amqpmock/` only; root package must have zero gomock
-  runtime imports.
+- Ship no mock library; the testcontainers broker fixture stays in
+  `internal/amqptest`, so no test infrastructure reaches a consumer's
+  build.
 - **Redact credentials.** Every log line, error message, span
   attribute, and metric label that includes an AMQP URI replaces the
   `userinfo` component with `***`. The redaction helper lives in
@@ -2666,14 +2665,13 @@ the next reader so the rationale survives the conversation:
 
 9. **`Delivery[M]` and `Batch[M]` are concrete structs**, not
    interfaces. Methods can be added in minor releases without
-   breaking implementers. The canonical fixture path is the
-   **gomock-free** `warren.NewDeliveryFixture[M]` /
-   `warren.NewBatchFixture[M]` (keyed-literal `DeliveryFixture`/
-   `BatchFixture` inputs with an unexported guard field) so
-   consumer/raw/batch unit tests fabricate deliveries without pulling
-   in `go.uber.org/mock` (GA-09); `amqpmock.NewDelivery[M]` /
-   `amqpmock.NewBatch[M]` re-export them for tests already using the
-   gomock subpackage.
+   breaking implementers. Because their fields are unexported, only
+   the library can fabricate one, so warren exports the fixture path
+   `warren.NewDeliveryFixture[M]` / `warren.NewBatchFixture[M]`
+   (keyed-literal `DeliveryFixture`/`BatchFixture` inputs with an
+   unexported guard field) — no live broker, no third-party mock
+   library (GA-09). No mock package is shipped: interface doubles a
+   consumer can build itself are the consumer's to generate.
 
 52. **Quorum Queue `x-dead-letter-strategy: at-least-once` (Rev 9)** —
     Implicitly injected by `Topology.Declare` for Quorum queues with DLXs

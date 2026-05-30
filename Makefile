@@ -18,7 +18,7 @@ GOTOOLCHAIN     ?= go$(GO_MOD_VERSION)
 # so membership stays next to the code and a rename breaks the build instead of going stale.
 STRESS_COUNT ?= 200
 
-.PHONY: help build test test-stress test-integration test-conformance test-all lint vuln mocks tidy doc hooks clean examples-build examples-smoke integration-up integration-down
+.PHONY: help build test test-stress test-integration test-conformance test-all lint vuln tidy doc hooks clean examples-build examples-smoke integration-up integration-down
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -55,9 +55,6 @@ lint: ## Run golangci-lint.
 
 vuln: ## Scan dependencies for known vulnerabilities (govulncheck; fails only on a vuln warren actually calls).
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) $(PKG)
-
-mocks: ## Regenerate gomock mocks.
-	$(GO) generate $(PKG)
 
 doc: ## Serve godoc locally on :6060.
 	$(GO) run golang.org/x/tools/cmd/godoc@latest -http=:6060

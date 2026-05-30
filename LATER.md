@@ -1127,15 +1127,15 @@ dependency for the doc reconciliation itself.
 
 ---
 
-### LATER-68 — `amqptest` downstream-usability proof is structural, not an explicit separate-module smoke test
+### LATER-69 — `internal/amqptest` testcontainers tests contend with the compose-broker lane on small CI runners
 
-**Context:** T37's "Verify" step asks for a separate `examples/integration-test-fixture/` Go *module* (its own `go.mod`) that imports `amqptest` and asserts the fixture spins up cleanly "without root-package leakage" — proving a real downstream consumer in a different module can use the helper. T37 instead proved the two load-bearing properties directly: (1) no leakage — `go list -deps github.com/brunomvsouza/warren` is free of testcontainers/gomock/docker, and no non-test root `.go` imports `amqptest`/testcontainers; (2) the fixture spins up — `amqptest`'s own `//go:build integration` tests (`TestNewRabbitMQ_DelayedExchange_integration` + `TestNewRabbitMQ_TLS_integration`) pass live against `AMQPTEST_IMAGE=warren-rabbitmq-delayed:3.13`. A nested second module was not added.
+**Context:** `internal/amqptest.NewRabbitMQ` spins a fresh RabbitMQ container per test. Running those `//go:build integration` tests in the same `go test ./...` invocation as the root/example integration tests (which hammer the docker-compose broker) means two broker workloads share one host. T37 made the helper robust to slow boots — `brokerStartupTimeout` is 180s (the module default is a hard 60s cap, applied at both the `WithWaitStrategy` deadline and the inner `ForLog` startup timeout) and termination is registered before `require.NoError` so a failed start never leaks a container — but the underlying contention remains.
 
-**Impact:** A cross-module import regression (e.g. an `internal/`-only type accidentally surfacing in `amqptest`'s public signatures, or a `replace`-directive-only build that works in-repo but not for an external consumer) would not be caught automatically. Low likelihood — the leak-free `go list -deps` check covers the most plausible failure — but the exact "another module imports it cleanly" contract is asserted by reasoning, not by a build.
+**Impact:** On an undersized/loaded CI runner the broker boot can still exceed 180s and fail the testcontainers tests; co-locating both broker styles also inflates wall-clock. Verified locally only because the author's 3.9 GB Docker VM, degraded by repeated runs, pushed broker startup to ~140s (the 180s headroom absorbed it).
 
-**Evidence:** T37 implementation — the acceptance checkboxes (mocks, fixtures, three plugin modes, URI/AMQPSURI/Cleanup/Container, README, TV-08) are all satisfied and verified; only the optional separate-module smoke from the "Verify" prose was not built, to avoid introducing multi-module complexity into the repo.
+**Evidence:** T37 refactor — the full `-race` integration lane failed only on `internal/amqptest` (broker startup > 60s) under memory pressure; root/example lanes were green. Root cause was the 60s wait cap + leaked containers (Ryuk disabled), both fixed; the resource co-location is the residual.
 
-**Suggested solution:** Add a tiny nested module under `examples/integration-test-fixture/` (own `go.mod` with a `require github.com/brunomvsouza/warren` + a `replace` to the repo root) whose single `//go:build integration` test calls `amqptest.NewRabbitMQ(t)` and dials it, run on the integration CI lane. Coordinate with T42/T151 (CI wiring) so it does not add a per-PR multi-module `go test` burden unless the lane is configured for it.
+**Suggested solution:** In T42/T151 (CI wiring) run the testcontainers-based tests in a **separate job** from the compose-broker integration lane (or size the runner accordingly), and keep Ryuk **enabled** in CI so failed containers are reaped. Consider an env-tunable `brokerStartupTimeout` if a real runner ever needs more than 180s.
 
-**Prerequisites:** T42/T151 (CI lane wiring) so the nested-module test runs where Docker + `AMQPTEST_IMAGE` are available.
+**Prerequisites:** T42 / T151 (CI lane wiring).
 

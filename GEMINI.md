@@ -39,7 +39,6 @@ make test-integration   # Run integration tests (requires AMQP_TEST_URL + AMQP_T
 make test-conformance   # Run conformance tests (requires Docker)
 make test-all           # Run all tests (unit + integration + conformance)
 make lint               # Run golangci-lint
-make mocks              # Generate mocks via gomock
 make examples-build     # Build all example applications
 make examples-smoke     # Smoke-run examples end-to-end (requires Docker)
 ```
@@ -83,7 +82,8 @@ make integration-down
 - `/internal/redact`: Credential redaction logic.
 - `/log`, `/metrics`, `/otel`: Observability interfaces and implementations.
 - `/examples`: Checkpoint examples that are verified in CI.
-- `/amqpmock`, `/amqptest`: Testing and mock helpers for downstream users.
+- `fixture.go`: Public `Delivery[M]`/`Batch[M]` test fixtures (`NewDeliveryFixture`/`NewBatchFixture`). No mock package is shipped.
+- `/internal/amqptest`: Internal testcontainers RabbitMQ helper for warren's own integration suite.
 
 ## Language
 

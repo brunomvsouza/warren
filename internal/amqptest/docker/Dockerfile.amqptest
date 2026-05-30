@@ -4,7 +4,7 @@
 # with AMQPTEST_IMAGE so amqptest.NewRabbitMQ uses it as-is and the
 # delayed-exchange criteria run for real instead of skipping (Lens-10 TV-08).
 #
-#   docker build -f amqptest/docker/Dockerfile.amqptest -t <registry>/warren-amqptest:3.13 .
+#   docker build -f internal/amqptest/docker/Dockerfile.amqptest -t <registry>/warren-amqptest:3.13 .
 #   AMQPTEST_IMAGE=<registry>/warren-amqptest:3.13 go test -tags=integration ./...
 #
 # It bakes in the two plugins amqptest provisions:

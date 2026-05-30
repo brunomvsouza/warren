@@ -43,8 +43,7 @@ type BatchHandler[M any] func(ctx context.Context, batch *Batch[M]) error
 // If the handler calls Batch.Ack, Batch.Nack, or Delivery.Ack/Nack from Deliveries(),
 // the auto-verdict is suppressed (idempotent guard).
 //
-// Tests fabricate a fake batch with [NewBatchFixture] (gomock-free, in this
-// package) or the equivalent amqpmock.NewBatch re-export.
+// Tests fabricate a fake batch with [NewBatchFixture].
 type Batch[M any] struct {
 	deliveries []*Delivery[M]
 	mu         sync.Mutex

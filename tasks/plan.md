@@ -411,7 +411,7 @@ rationale lives in SPEC §10; this is the quick-reference.
 5. Handler signature is `func(ctx, M) error`; raw escape hatch.
 6. `Message[M]` is a struct literal, not a builder.
 7. `PublishBatch` always-all + `[]PublishResult`.
-8. Mocks live in `amqpmock/`; testcontainers helper in `amqptest/`.
+8. No mock package is shipped; `Delivery`/`Batch` fixtures are public root constructors; the testcontainers helper is `internal/amqptest`.
 9. `Delivery[M]` / `Batch[M]` are concrete structs.
 10. `Connection` fans out across multiple TCP connections, role-split
     (`WithPublisherConnections`, `WithConsumerConnections`).
@@ -763,7 +763,8 @@ Goal: request/reply via `direct reply-to`; delayed publish via
 ### Phase 8 — Production hardening
 
 Goal: TLS/mTLS + SASL EXTERNAL, cluster failover, full Connection
-options surface, and `amqpmock/` ready for downstream tests.
+options surface, and the `Delivery`/`Batch` test fixtures +
+`internal/amqptest` broker helper ready.
 
 - **T32** TLS: `WithTLSConfig` + amqps:// integration test (testcontainer with self-signed cert from `amqptest/certs`)
 - **T33** Cluster failover: `WithAddrs` + round-robin reconnect ordering
@@ -772,7 +773,7 @@ options surface, and `amqpmock/` ready for downstream tests.
 - **T34c** **Panic isolation for user-provided callbacks**: every user callback must be wrapped in `recover()` and every pure-notification callback must run in a goroutine so a slow or panicking handler cannot block internal event loops. Five sites identified: (1) `WithOnBlocked` — move to a goroutine + recover (currently inline in the `supervisor` event-select; a slow/panicking callback delays broker unblock detection); (2) `WithOnReconnect` — add recover around the inline call (currently before `barrierCond.Broadcast()`; a panic permanently deadlocks all Publishers); (3) `WithOnTopologyDegraded` — add recover inside the existing goroutine (panic crashes the process); (4) `Handler[M]` / `RawHandler[M]` dispatch — add recover in both inline and goroutine paths (panic should nack without requeue, not crash the consumer goroutine); (5) `BatchHandler[M]` — same recovery wrapper as (4). **Lens-08 (CR-05):** the five sites cover user *callbacks* but not the **infra-goroutine boundaries** nor `OnReturn`. Add a `recover` (a) in `reconnect.Loop.run` around the user `connect` fn (`internal/reconnect/loop.go:72`; today a panic crashes the whole process — `defer close(l.done)` runs but there is no recover) and (b) on the supervisor / `runBarrier` around the resubscribe hook (`consumer.go:357` / `batch_consumer.go:190`; today a panic kills the supervisor → reconnect silently disabled for that socket); plus the missing `OnReturn` recover (CR-01, owned by T144). A panic must **degrade the socket** (`WithOnTopologyDegraded` + a metric), never crash the process or silently disable reconnect. *dep CG-5.*
 - **T35** `AutoAck()` opt-in + verbose godoc warning + integration test that documents the trade-off
 - **T36** Remaining consumer options: `Exclusive`, `Args`, `OnCancel(func(reason string))` for `basic.cancel` (consumer goroutine returns `ErrConsumerCancelled`; mandatory metric `consumer_cancelled_total{queue, reason}`), `Tag` (note: no `NoLocal()` — RabbitMQ silently ignores it; explicitly omitted per SPEC §6 and §10.10; defaulted tags use `ctag-<uuidv7>` per T18)
-- **T37** `amqpmock/` subpackage: `go generate` for interface mocks + hand-written `NewDelivery[M]` / `NewBatch[M]`. Also **`amqptest/`** subpackage exported: testcontainers helper supporting **three plugin-enablement modes** ((1) pre-baked image via `AMQPTEST_IMAGE`; (2) mounted `.ez` file via `AMQPTEST_DELAYED_PLUGIN_FILE`; (3) `t.Skip` fallback via `amqptest.RequireDelayedExchange(t)`); ships `rabbitmq_auth_mechanism_ssl` + pre-generated TLS certs in `amqptest/certs/`; ships `Dockerfile.amqptest` under `amqptest/docker/` for downstream consumers. **Lens-06 (GA-09):** ship a **lightweight `Delivery[M]`/`Batch[M]` fixture path with no `go.uber.org/mock` dependency** (e.g. `DeliveryFixture`/`BatchFixture` constructors guarded against unkeyed struct literals) so consumer/raw/batch unit tests can fabricate deliveries without importing the gomock-heavy mock subpackage. **Lens-10 (TV-08):** guarantee the `rabbitmq_delayed_message_exchange` plugin is present in ≥1 **required** lane (the pre-baked-image mode `AMQPTEST_IMAGE`), so the delayed-exchange conformance/example criteria do not silently `t.Skip` green — the three plugin-enablement modes stay, but the required lane must use the present-plugin mode and **fail (not skip)** if the plugin is expected but missing. *dep VG-1.*
+- **T37** **(SHIPPED, amended by maintainer review 2026-05-30 — see `tasks/todo.md` T37 note):** the public `amqpmock` gomock subpackage was **dropped** (unused in-repo; exporting it forced `go.uber.org/mock` on consumers — they generate their own mocks) and `amqptest` was **moved to `internal/amqptest`** (warren's own test infra, not a public commitment). The one fixture only the library can build stays **public in the root**: `warren.NewDeliveryFixture` / `NewBatchFixture`. The original plan text below is kept for provenance. ~~`amqpmock/` subpackage: `go generate` for interface mocks + hand-written `NewDelivery[M]` / `NewBatch[M]`. Also **`amqptest/`** subpackage exported:~~ testcontainers helper supporting **three plugin-enablement modes** ((1) pre-baked image via `AMQPTEST_IMAGE`; (2) mounted `.ez` file via `AMQPTEST_DELAYED_PLUGIN_FILE`; (3) `t.Skip` fallback via `amqptest.RequireDelayedExchange(t)`); ships `rabbitmq_auth_mechanism_ssl` + pre-generated TLS certs in `amqptest/certs/`; ships `Dockerfile.amqptest` under `amqptest/docker/` for downstream consumers. **Lens-06 (GA-09):** ship a **lightweight `Delivery[M]`/`Batch[M]` fixture path with no `go.uber.org/mock` dependency** (e.g. `DeliveryFixture`/`BatchFixture` constructors guarded against unkeyed struct literals) so consumer/raw/batch unit tests can fabricate deliveries without importing the gomock-heavy mock subpackage. **Lens-10 (TV-08):** guarantee the `rabbitmq_delayed_message_exchange` plugin is present in ≥1 **required** lane (the pre-baked-image mode `AMQPTEST_IMAGE`), so the delayed-exchange conformance/example criteria do not silently `t.Skip` green — the three plugin-enablement modes stay, but the required lane must use the present-plugin mode and **fail (not skip)** if the plugin is expected but missing. *dep VG-1.*
 
 **Checkpoint Phase 8:**
 - [ ] mTLS handshake passes against a testcontainer with server +
@@ -786,8 +787,9 @@ options surface, and `amqpmock/` ready for downstream tests.
       `rabbitmqctl list_connections name`.
 - [ ] `AutoAck` integration test logs the "you lose messages on
       crash" warning and demonstrates a deliberate drop.
-- [ ] `amqpmock.NewDelivery[Order](Fixture{…})` constructs a usable
-      `*Delivery[Order]` for unit tests.
+- [x] `warren.NewDeliveryFixture[Order](DeliveryFixture[Order]{…})`
+      constructs a usable `*Delivery[Order]` for unit tests (public root
+      fixture; no mock package — maintainer review 2026-05-30).
 - [ ] `amqptest.NewRabbitMQ(t)` spins up a broker with the delayed
       and SSL-auth plugins enabled; downstream tests in another module
       import it cleanly.

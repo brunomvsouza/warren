@@ -20,7 +20,6 @@ make test-integration   # build tag 'integration' (requires AMQP_TEST_URL + AMQP
 make test-conformance   # build tag 'conformance' (requires Docker)
 make test-all           # unit + integration + conformance
 make lint               # golangci-lint run ./...
-make mocks              # go generate ./... (gomock)
 make examples-build     # go build ./examples/... (unit lane; no broker required)
 make examples-smoke     # go test -race -tags=integration ./examples/... (requires Docker)
 ```
@@ -107,7 +106,8 @@ connection.go, channelpool.go                ← multi-TCP pool, role-split
 topology.go                                  ← Topology.Declare / AttachTo
 publisher.go, consumer.go, batch_consumer.go ← Publisher/Consumer/BatchConsumer + XFor[M] builders
 rpc.go, delay.go     (planned)               ← request/reply + delayed publish
-amqpmock/, amqptest/ (planned T37)           ← test doubles + testcontainers helper
+fixture.go                                   ← NewDeliveryFixture/NewBatchFixture (public Delivery/Batch test fixtures)
+internal/amqptest/                           ← testcontainers RabbitMQ helper (internal; no public mock package)
 ```
 
 Three architectural invariants that span multiple files:
