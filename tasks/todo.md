@@ -807,12 +807,13 @@ adds the at-least-once reply ordering contract.
 - **Files:** `rpc_replier.go`, `rpc_replier_builder.go`, `rpc_replier_integration_test.go`, `rpc_replier_reply_failure_integration_test.go`, `rpc_replier_dlx_validation_test.go`.
 - **Deps:** T29.
 
-### [ ] T31 — Delayed messages · S
+### [x] T31 — Delayed messages · S
 - **Acceptance:**
-  - [ ] `Message[M].Delay` field honored at publish time (sets `x-delay` header).
-  - [ ] `Topology` declares `x-delayed-message` exchanges when `Kind = ExchangeDelayed`; `Args` carries `x-delayed-type` to specify the underlying type.
-  - [ ] Helper `warren.DelayedTopic(name string)` constructs the right `Exchange{}` literal.
-- **Verify:** Integration test: testcontainer with `rabbitmq_delayed_message_exchange` plugin enabled; publish with 2s delay; assert delivery happens between 2s and 2.5s.
+  - [x] `Message[M].Delay` field honored at publish time (sets `x-delay` header). `buildPublishing` emits `x-delay` as a signed 32-bit millisecond count only when `Delay > 0`, cloning the header table so a reused `Message.Headers` map is never mutated.
+  - [x] `Topology` declares `x-delayed-message` exchanges when `Kind = ExchangeDelayed`; `Args` carries `x-delayed-type` to specify the underlying type. (Already modelled + validated in `topology.go`/`types.go`; covered by existing `topology_test.go`/`types_test.go`.)
+  - [x] Helper `warren.DelayedTopic(name string)` constructs the right `Exchange{}` literal (Kind=ExchangeDelayed, Durable, Args["x-delayed-type"]="topic").
+- **Verify:** Integration test (`delay_integration_test.go`) publishes a 2s-delayed message through a `DelayedTopic` exchange and asserts delivery between 2s and 2.5s. It **skip-guards** via a `requireDelayedExchange` probe (declares a throwaway `x-delayed-message` exchange; a 406/`command-invalid` answer → `t.Skip`), so it skips cleanly on the default `rabbitmq:3-management` image (no plugin) and activates once a plugin-enabled broker exists. Per-plan allowance ("if T31 lands before T37, keep delayed tests behind skip/minimal wiring"); the 2s–2.5s assertion runs under T37's `amqptest.RequireDelayedExchange(t)`. The `x-delay` emission itself is fully covered by deterministic unit tests in `delay_test.go`. Verified: unit `-race` green, full integration lane `-race` green (28.7s, delay test skips cleanly), examples smoke `-race` green, lint 0 issues, build green.
+- **README:** deferred to **T31b** — the roadmap bundles "RPC + delayed-message helpers" as one item (README L184); moving it to "Available now" with the examples-table entries lands cohesively when both `examples/rpc/` and `examples/delayed/` ship in T31b.
 - **Files:** `delay.go`, edits to `topology.go`, `message.go`, `delay_integration_test.go`.
 - **Integration fixture:** **`amqptest/`** (T37) — three plugin modes and `amqptest.RequireDelayedExchange(t)` per SPEC §6.9; do not add a parallel `testing/` package. If T31 lands before T37, keep delayed tests behind skip/minimal container wiring until the shared `amqptest` helper exists.
 - **Deps:** T15, T12. (Strong pairing with **T37** for the canonical broker image/plugins.)

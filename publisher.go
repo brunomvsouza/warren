@@ -987,5 +987,17 @@ func buildPublishing[M any](msg Message[M], body []byte) amqp091.Publishing {
 	if msg.Expiration > 0 {
 		pub.Expiration = fmt.Sprintf("%d", msg.Expiration.Milliseconds())
 	}
+	if msg.Delay > 0 {
+		// Route through the rabbitmq_delayed_message_exchange plugin. x-delay is a
+		// signed 32-bit millisecond count (the plugin's ceiling is ~24.8 days). Clone
+		// the header table first so a caller reusing Message.Headers across publishes
+		// never sees x-delay smuggled into their own map.
+		h := make(amqp091.Table, len(pub.Headers)+1)
+		for k, v := range pub.Headers {
+			h[k] = v
+		}
+		h["x-delay"] = int32(msg.Delay.Milliseconds())
+		pub.Headers = h
+	}
 	return pub
 }
