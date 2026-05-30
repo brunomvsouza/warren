@@ -256,12 +256,16 @@ Warren is built with "production-first" principles, embedding several reliabilit
 - **Testing** — `warren.NewDeliveryFixture` / `NewBatchFixture` fabricate `Delivery[M]` / `Batch[M]` values (keyed-literal `DeliveryFixture`/`BatchFixture`, no live broker) so you can unit-test `ConsumeRaw` handlers — the one fixture only the library can provide. No mock package is shipped: generate your own interface mocks with whatever tool you prefer. Warren's own integration suite uses an internal testcontainers RabbitMQ fixture (`internal/amqptest`), so no test dependency leaks into your build
 - **Examples** — [`examples/publish`](examples/publish/main.go), [`examples/consume`](examples/consume/main.go), [`examples/topology`](examples/topology/main.go), [`examples/deadletter`](examples/deadletter/main.go), [`examples/batch_publish`](examples/batch_publish/main.go), [`examples/batch_consume`](examples/batch_consume/main.go), [`examples/rpc`](examples/rpc/main.go), [`examples/delayed`](examples/delayed/main.go), [`examples/idempotent_consume`](examples/idempotent_consume/main.go), [`examples/ordered_consume`](examples/ordered_consume/main.go), [`examples/otel`](examples/otel/main.go)
 
-### On the roadmap (`v0.1.0`)
+### On the roadmap
 
-- **Production hardening** — TLS / `amqps://`, SASL EXTERNAL (mTLS), remaining connection options, panic isolation for user callbacks
-- **Tooling** — conformance suite, chaos/reconnect benchmarks
+The `v0.1.0` surface is feature-complete — connection/reliability (TLS / `amqps://`,
+SASL EXTERNAL, multi-node failover, supervised reconnect), publishing, topology,
+consuming, codecs, RPC, delayed publish, full observability, and the test/release
+tooling (real-broker conformance suite, reconnect chaos test, throughput
+benchmarks, coverage gate, CI + release automation) have all landed. Cutting the
+tag is the last step.
 
-See [`tasks/todo.md`](tasks/todo.md) for the live checklist.
+See [`tasks/todo.md`](tasks/todo.md) for the live checklist and post-v0.1 ideas.
 
 ---
 

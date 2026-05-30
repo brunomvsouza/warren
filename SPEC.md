@@ -2324,10 +2324,16 @@ Integration test that pushes a message that always errors:
 ### Conformance
 
 Conformance tests assert wire-protocol behaviour against the AMQP
-0-9-1 spec (frame types, content header encoding, confirm ordering,
-exchange semantics, mandatory return path, basic.cancel
-notifications). Some run against the live broker; protocol-level
-checks use a test AMQP server stub.
+0-9-1 spec (confirm ordering, broker-nack on
+`x-overflow=reject-publish`, the quorum `x-delivery-limit` poison
+bound, `basic.cancel` notifications, and the mandatory return/ack
+correlation). For v0.1 they are **real-broker-only** (Lens-10 TV-06):
+a test AMQP server stub cannot prove these contracts — they are
+emergent broker behaviours (R10-3 ordering, R10-2 quorum limit,
+`x-death` tokens, broker-nack, `basic.cancel`, 406-on-`UserID`,
+direct-reply-to), not frame-encoding details. They live in the
+`conformance/` package behind the `conformance` build tag and run via
+`make test-conformance` against `AMQP_TEST_URL` (Docker required).
 
 ### Memory and concurrency
 

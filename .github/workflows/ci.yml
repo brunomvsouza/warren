@@ -144,6 +144,21 @@ jobs:
             exit 1
           fi
 
+      # Real-broker-only conformance lane (T44 / TV-06): runs against the same
+      # broker, with a zero-run guard mirroring the integration one — the
+      # conformance tests t.Fatal when AMQP_TEST_URL is unset, so a zero count
+      # means they silently stopped executing, which must fail rather than pass.
+      - name: Conformance tests (race) + zero-run guard
+        run: |
+          set -o pipefail
+          go test -race -v -tags=conformance ./conformance/... 2>&1 | tee conformance.log
+          ran=$(grep -cE '^[[:space:]]*--- (PASS|FAIL): TestConformance' conformance.log) || true
+          echo "conformance tests executed: ${ran}"
+          if [ "${ran:-0}" -eq 0 ]; then
+            echo "::error::zero conformance tests executed against the broker."
+            exit 1
+          fi
+
       - name: Examples smoke-run (race)
         run: make examples-smoke
 
