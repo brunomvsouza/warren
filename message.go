@@ -88,7 +88,18 @@ type Message[M any] struct {
 	DeliveryMode DeliveryMode
 
 	// RabbitMQ extensions.
-	// Delay requires the rabbitmq_delayed_message_exchange plugin.
+	//
+	// Delay schedules the message for future delivery via the
+	// rabbitmq_delayed_message_exchange plugin: a non-zero value is emitted as the
+	// x-delay header (milliseconds, signed 32-bit) and is honored only when the
+	// message is published to an ExchangeDelayed exchange (see DelayedTopic).
+	// Sub-millisecond values round down; the plugin's ceiling is ~24.8 days.
+	//
+	// Durability caveat (load-bearing): the plugin stores scheduled messages in a
+	// node-local, non-replicated table, so a confirmed delayed publish can still be
+	// lost if the owning node fails before the delay elapses — even with durable
+	// topology and confirms on. For delays that must survive node failure, prefer a
+	// durable (ideally quorum) queue with x-message-ttl plus a DLX. See DelayedTopic.
 	Delay time.Duration
 }
 
