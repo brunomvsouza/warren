@@ -2,13 +2,13 @@
 #
 # Why this image exists: rabbitmq_delayed_message_exchange is a community plugin
 # shipped as a standalone .ez archive -- it is NOT bundled in any official rabbitmq
-# image. Without it the delayed-delivery timing assertions
-# (TestDelay_DelayedDelivery_integration and examples/delayed's
-# TestDelayedExample_integration) skip on every run, so the one behaviour unique to
-# the delayed path -- that the broker actually holds a message for its x-delay -- has
-# zero executed coverage. Baking the plugin in lets that 2s-2.5s window assertion run
-# on every integration lane (CI and local `make integration-up`), not only on a
-# developer's hand-built broker.
+# image. The delayed-delivery timing assertions (TestDelay_DelayedDelivery_integration
+# and examples/delayed's TestDelayedExample_integration) require it and now fail fast
+# on a plugin-less broker -- a broker without the plugin on the integration lane is a
+# misconfiguration, not a reason to silently skip. Baking the plugin in is what lets
+# that 2s-2.5s window assertion -- the one behaviour unique to the delayed path, that
+# the broker actually holds a message for its x-delay -- run green on every integration
+# lane (CI and local `make integration-up`), not only on a developer's hand-built broker.
 #
 # Pinned for reproducibility and plugin/broker ABI compatibility:
 #   - rabbitmq 3.13 (management) <-> delayed-message-exchange v3.13.0 (matching minor;
