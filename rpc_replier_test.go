@@ -248,6 +248,78 @@ func TestReplier_RawHandler_ReplyPublishFails_NacksAndIncrementsMetric(t *testin
 	assert.Equal(t, []string{"rpc.requests"}, spy.dropped())
 }
 
+// badResp is a response payload that cannot be JSON-encoded (channels are
+// unsupported by encoding/json), used to drive the un-encodable-reply branch.
+type badResp struct {
+	Ch chan int `json:"ch"`
+}
+
+func TestReplier_RawHandler_EmptyReplyTo_DropsAndSignalsOnError(t *testing.T) {
+	pub := &fakeReplyPublisher{}
+	rec := &verdictRecorder{}
+	spy := &replierDropSpy{}
+	var onErrCalls int
+	var gotErr error
+	r := newTestReplier(spy, pub, false /* no DLX */, func(_ context.Context, _ echoPayload, err error) {
+		onErrCalls++
+		gotErr = err
+	})
+
+	// The handler succeeds, but the request carries no ReplyTo address, so the
+	// reply has nowhere to go.
+	h := func(_ context.Context, req echoPayload) (echoPayload, error) {
+		return echoPayload{N: req.N}, nil
+	}
+	d := fabricateRequest(t, echoPayload{N: 3}, "" /* no replyTo */, "corr-empty", rec.acknowledger())
+
+	require.NoError(t, r.makeRawHandler(h)(context.Background(), d))
+
+	bodies, _, _ := pub.snapshot()
+	assert.Empty(t, bodies, "no reply can be published without a reply address")
+	acks, nacks, _ := rec.snapshot()
+	assert.Equal(t, []bool{false}, nacks, "an unanswerable request is nacked without requeue")
+	assert.Equal(t, 0, acks, "an unanswerable request must not be acked")
+	assert.Equal(t, 1, onErrCalls, "a missing reply address must signal OnError")
+	assert.ErrorIs(t, gotErr, ErrInvalidMessage, "the missing-ReplyTo signal wraps ErrInvalidMessage")
+	assert.Equal(t, []string{"rpc.requests"}, spy.dropped(), "a drop with no DLX increments the metric")
+}
+
+func TestReplier_RawHandler_UnencodableResponse_DropsAndSignalsOnError(t *testing.T) {
+	pub := &fakeReplyPublisher{}
+	rec := &verdictRecorder{}
+	spy := &replierDropSpy{}
+	var onErrCalls int
+	var gotErr error
+	r := &Replier[echoPayload, badResp]{
+		queue:       "rpc.requests",
+		codec:       codec.NewJSON(),
+		cm:          spy,
+		replyPub:    pub,
+		knownHasDLX: false,
+		onError: func(_ context.Context, _ echoPayload, err error) {
+			onErrCalls++
+			gotErr = err
+		},
+	}
+
+	// The handler succeeds but returns a value the codec cannot encode.
+	h := func(_ context.Context, _ echoPayload) (badResp, error) {
+		return badResp{Ch: make(chan int)}, nil
+	}
+	d := fabricateRequest(t, echoPayload{N: 1}, "reply.addr", "corr-enc", rec.acknowledger())
+
+	require.NoError(t, r.makeRawHandler(h)(context.Background(), d))
+
+	bodies, _, _ := pub.snapshot()
+	assert.Empty(t, bodies, "an un-encodable response must not be published")
+	acks, nacks, _ := rec.snapshot()
+	assert.Equal(t, []bool{false}, nacks, "an un-encodable response nacks the request without requeue")
+	assert.Equal(t, 0, acks, "the request must not be acked when no reply was sent")
+	assert.Equal(t, 1, onErrCalls, "an encode failure is reported via OnError")
+	assert.ErrorIs(t, gotErr, ErrInvalidMessage, "the encode failure wraps ErrInvalidMessage")
+	assert.Equal(t, []string{"rpc.requests"}, spy.dropped())
+}
+
 func TestReplierBuilder_Build_DLXValidation(t *testing.T) {
 	conn := &Connection{
 		conConns: []*managedConn{{}},
