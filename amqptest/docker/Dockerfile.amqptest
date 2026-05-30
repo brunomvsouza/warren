@@ -1,0 +1,33 @@
+# Plugin-enabled RabbitMQ broker for the amqptest "pre-baked image" mode.
+#
+# Build and publish this image, then point downstream integration suites at it
+# with AMQPTEST_IMAGE so amqptest.NewRabbitMQ uses it as-is and the
+# delayed-exchange criteria run for real instead of skipping (Lens-10 TV-08).
+#
+#   docker build -f amqptest/docker/Dockerfile.amqptest -t <registry>/warren-amqptest:3.13 .
+#   AMQPTEST_IMAGE=<registry>/warren-amqptest:3.13 go test -tags=integration ./...
+#
+# It bakes in the two plugins amqptest provisions:
+#   - rabbitmq_delayed_message_exchange — a community plugin shipped as a
+#     standalone .ez, NOT bundled in any official rabbitmq image. Fetched by
+#     exact release URL and verified by SHA-256 (supply-chain hardening).
+#   - rabbitmq_auth_mechanism_ssl — bundled with the distribution; enabled here
+#     so SASL EXTERNAL (amqptest.RequireSSLAuth) is available out of the box.
+#
+# Pinned for reproducibility and plugin/broker ABI compatibility: rabbitmq 3.13
+# (management) <-> delayed-message-exchange v3.13.0 (matching minor; the plugin
+# is ABI-compatible across 3.13.x patch releases). To target a different minor,
+# bump the FROM tag and the plugin release URL/checksum together.
+FROM rabbitmq:3.13-management
+
+ADD --chmod=644 \
+    --checksum=sha256:3479180df03fa830fd59ccf638a60eee8f0e8261524a8616685522d7b8d9a9ee \
+    https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases/download/v3.13.0/rabbitmq_delayed_message_exchange-3.13.0.ez \
+    /opt/rabbitmq/plugins/
+
+# --offline appends to the existing enabled_plugins set (rabbitmq_management,
+# rabbitmq_prometheus) rather than replacing it, so the management HTTP API stays
+# enabled alongside the two plugins amqptest expects.
+RUN rabbitmq-plugins enable --offline \
+    rabbitmq_delayed_message_exchange \
+    rabbitmq_auth_mechanism_ssl

@@ -2225,13 +2225,18 @@ value.
   `Batch[M]` values in tests. Importing `amqpmock` pulls in `go.uber.org/mock`;
   fixture-only tests call the root constructors directly to stay gomock-free.
 
-- **`amqptest`** — public testcontainers-go helper that spins up a
+- **`amqptest`** — public testcontainers-go helper (`NewRabbitMQ(t, opts…)`
+  → `URI()`/`AMQPSURI()`/`Container()`/`Cleanup(t)`) that spins up a
   RabbitMQ node with the `rabbitmq_delayed_message_exchange` plugin
   and `rabbitmq_auth_mechanism_ssl` plugin enabled, plus
   pre-generated TLS server/client certificates under `amqptest/certs/`
-  for `amqps://` integration tests. Exported so downstream
-  applications can use the same fixture in their own integration
-  suites; not imported by the root package at runtime.
+  for `amqps://` integration tests. TLS is opt-in via `WithTLS()`
+  because the underlying RabbitMQ module configures TLS as
+  `listeners.tcp = none` (TLS-only), which would otherwise break the
+  common plain-AMQP fixture; options are `WithRabbitMQVersion`,
+  `WithEnabledPlugins`, `WithExtraConfig`, `WithTLS`. Exported so
+  downstream applications can use the same fixture in their own
+  integration suites; not imported by the root package at runtime.
 
   **Plugin enablement strategy.** Because
   `rabbitmq_delayed_message_exchange` is a community plugin that

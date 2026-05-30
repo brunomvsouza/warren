@@ -1125,3 +1125,17 @@ dependency for the doc reconciliation itself.
 
 **Prerequisites:** None. Independent of T37; act on the first observed flake.
 
+---
+
+### LATER-68 — `amqptest` downstream-usability proof is structural, not an explicit separate-module smoke test
+
+**Context:** T37's "Verify" step asks for a separate `examples/integration-test-fixture/` Go *module* (its own `go.mod`) that imports `amqptest` and asserts the fixture spins up cleanly "without root-package leakage" — proving a real downstream consumer in a different module can use the helper. T37 instead proved the two load-bearing properties directly: (1) no leakage — `go list -deps github.com/brunomvsouza/warren` is free of testcontainers/gomock/docker, and no non-test root `.go` imports `amqptest`/testcontainers; (2) the fixture spins up — `amqptest`'s own `//go:build integration` tests (`TestNewRabbitMQ_DelayedExchange_integration` + `TestNewRabbitMQ_TLS_integration`) pass live against `AMQPTEST_IMAGE=warren-rabbitmq-delayed:3.13`. A nested second module was not added.
+
+**Impact:** A cross-module import regression (e.g. an `internal/`-only type accidentally surfacing in `amqptest`'s public signatures, or a `replace`-directive-only build that works in-repo but not for an external consumer) would not be caught automatically. Low likelihood — the leak-free `go list -deps` check covers the most plausible failure — but the exact "another module imports it cleanly" contract is asserted by reasoning, not by a build.
+
+**Evidence:** T37 implementation — the acceptance checkboxes (mocks, fixtures, three plugin modes, URI/AMQPSURI/Cleanup/Container, README, TV-08) are all satisfied and verified; only the optional separate-module smoke from the "Verify" prose was not built, to avoid introducing multi-module complexity into the repo.
+
+**Suggested solution:** Add a tiny nested module under `examples/integration-test-fixture/` (own `go.mod` with a `require github.com/brunomvsouza/warren` + a `replace` to the repo root) whose single `//go:build integration` test calls `amqptest.NewRabbitMQ(t)` and dials it, run on the integration CI lane. Coordinate with T42/T151 (CI wiring) so it does not add a per-PR multi-module `go test` burden unless the lane is configured for it.
+
+**Prerequisites:** T42/T151 (CI lane wiring) so the nested-module test runs where Docker + `AMQPTEST_IMAGE` are available.
+

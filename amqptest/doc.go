@@ -1,0 +1,40 @@
+// Package amqptest is a public testcontainers-go helper that spins up a
+// RabbitMQ broker for warren's (and downstream applications') integration
+// suites. It is exported so the same fixture can be reused outside this module;
+// the root warren package does not import it at runtime.
+//
+// # Usage
+//
+//	func TestThing_integration(t *testing.T) {
+//		rmq := amqptest.NewRabbitMQ(t)        // auto-terminated via t.Cleanup
+//		conn, err := warren.Dial(t.Context(), rmq.URI())
+//		// ...
+//	}
+//
+// [NewRabbitMQ] enables rabbitmq_auth_mechanism_ssl and — depending on the
+// plugin mode below — the rabbitmq_delayed_message_exchange plugin. Pass
+// [WithTLS] to also provision a TLS listener from the embedded test
+// certificates so [RabbitMQ.AMQPSURI] is usable; TLS is opt-in because the
+// underlying module configures it as TLS-only (listeners.tcp=none).
+//
+// # Delayed-message plugin: three modes
+//
+// rabbitmq_delayed_message_exchange is a community plugin not bundled in the
+// official rabbitmq:*-management images. The helper evaluates three modes in
+// order (see [EnvImage], [EnvDelayedPluginFile]):
+//
+//  1. Pre-baked image — AMQPTEST_IMAGE is used as-is; CI publishes an image with
+//     the .ez baked in (see docker/Dockerfile.amqptest). This is the mode a
+//     required CI lane must use so the delayed-exchange criteria cannot silently
+//     skip (Lens-10 TV-08).
+//  2. Mounted .ez — AMQPTEST_DELAYED_PLUGIN_FILE points at a local .ez; the
+//     helper mounts it and enables it after start. README.md lists tested plugin
+//     versions per RabbitMQ minor with download URLs.
+//  3. Skip fallback — neither is set; [RequireDelayedExchange] skips the test.
+//
+// # TLS fixtures
+//
+// certs/ holds long-lived test CA/server/client certificates (regenerate with
+// `go run gen.go`). [CACertPEM], [ClientCertPEM] and [ClientKeyPEM] build an
+// amqps:// client tls.Config; the server cert is mounted into the broker.
+package amqptest
