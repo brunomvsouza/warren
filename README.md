@@ -146,7 +146,7 @@ flowchart TB
   R -->|redeclare topology + resubscribe| B
 ```
 
-On reconnect, Warren runs a **synchronous barrier** before resuming traffic on that socket: reopen channels → redeclare attached topology → re-issue `basic.consume` on consumer channels → fire `WithOnReconnect`. `Publish` blocks on `ErrReconnecting` until the barrier clears (or the context is cancelled).
+On reconnect, Warren runs a **synchronous barrier** before resuming traffic on that socket: reopen channels → redeclare attached topology → re-issue `basic.consume` on consumer channels (firing `WithOnResubscribe(queue)` per consumer) → fire `WithOnReconnect`. `Publish` blocks on `ErrReconnecting` until the barrier clears (or the context is cancelled).
 
 ---
 
