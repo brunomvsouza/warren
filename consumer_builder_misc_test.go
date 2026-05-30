@@ -75,7 +75,7 @@ func TestConsumerBuilder_PrefetchBytes_IsNoOp(t *testing.T) {
 	assert.NotNil(t, c)
 }
 
-// — ConsumerBuilder stubs (T35/T36 placeholders) ————————————————————
+// — ConsumerBuilder stubs (T36 placeholders) ————————————————————————
 
 func TestConsumerBuilder_Exclusive_IsChainable(t *testing.T) {
 	conn := newFakeConsumerConn(t)
@@ -83,10 +83,20 @@ func TestConsumerBuilder_Exclusive_IsChainable(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestConsumerBuilder_AutoAck_IsChainable(t *testing.T) {
+// — AutoAck (T35) — broker no-ack flag is stored on the consumer —————————
+
+func TestConsumerBuilder_AutoAck_EnablesBrokerNoAck(t *testing.T) {
 	conn := newFakeConsumerConn(t)
-	_, err := ConsumerFor[string](conn).Queue("q").AutoAck().Build()
+	c, err := ConsumerFor[string](conn).Queue("q").AutoAck().Build()
 	require.NoError(t, err)
+	assert.True(t, c.brokerAutoAck, "AutoAck() must enable the broker no-ack flag")
+}
+
+func TestConsumerBuilder_AutoAck_DefaultsOff(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	c, err := ConsumerFor[string](conn).Queue("q").Build()
+	require.NoError(t, err)
+	assert.False(t, c.brokerAutoAck, "brokerAutoAck must default to false (manual ack)")
 }
 
 func TestConsumerBuilder_Args_IsChainable(t *testing.T) {
