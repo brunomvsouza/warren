@@ -442,3 +442,46 @@ func TestCloseManagedConns_withFakeSupervisors_drainsAll(t *testing.T) {
 	}
 	closeManagedConns(conns)
 }
+
+// — round-robin address failover (T33) ————————————————————————————————————
+
+func TestDialAddrs_prefersAddrsOverAddr(t *testing.T) {
+	opts := &connOptions{addr: "amqp://primary/", addrs: []string{"amqp://x/", "amqp://y/"}}
+	assert.Equal(t, []string{"amqp://x/", "amqp://y/"}, opts.dialAddrs())
+}
+
+func TestDialAddrs_singleAddrWhenNoAddrs(t *testing.T) {
+	opts := &connOptions{addr: "amqp://primary/"}
+	assert.Equal(t, []string{"amqp://primary/"}, opts.dialAddrs())
+}
+
+func TestNextDialAddr_singleAddr_alwaysReturnsSame(t *testing.T) {
+	mc := &managedConn{opts: &connOptions{addr: "amqp://a/"}}
+	for range 3 {
+		assert.Equal(t, "amqp://a/", mc.nextDialAddr())
+	}
+}
+
+// Acceptance: WithAddrs tries addresses in order on initial connect.
+func TestNextDialAddr_multiAddr_initialConnectTriesInOrder(t *testing.T) {
+	mc := &managedConn{opts: &connOptions{addrs: []string{"amqp://a/", "amqp://b/", "amqp://c/"}}}
+	assert.Equal(t, "amqp://a/", mc.nextDialAddr())
+	assert.Equal(t, "amqp://b/", mc.nextDialAddr())
+	assert.Equal(t, "amqp://c/", mc.nextDialAddr())
+}
+
+// Acceptance: on reconnect, rotates to the next address (round-robin), wrapping
+// back to the head once the list is exhausted.
+func TestNextDialAddr_multiAddr_reconnectRotatesRoundRobin(t *testing.T) {
+	mc := &managedConn{opts: &connOptions{addrs: []string{"amqp://a/", "amqp://b/"}}}
+	assert.Equal(t, "amqp://a/", mc.nextDialAddr()) // initial → a (sticks while connected)
+	assert.Equal(t, "amqp://b/", mc.nextDialAddr()) // reconnect → b
+	assert.Equal(t, "amqp://a/", mc.nextDialAddr()) // reconnect → a (wraps)
+	assert.Equal(t, "amqp://b/", mc.nextDialAddr())
+}
+
+func TestNextDialAddr_emptyAddrs_fallsBackToAddr(t *testing.T) {
+	mc := &managedConn{opts: &connOptions{addr: "amqp://only/"}}
+	assert.Equal(t, "amqp://only/", mc.nextDialAddr())
+	assert.Equal(t, "amqp://only/", mc.nextDialAddr())
+}

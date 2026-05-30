@@ -103,9 +103,18 @@ func WithAddr(addr string) Option {
 	return func(o *connOptions) { o.addr = addr }
 }
 
-// WithAddrs sets a cluster-failover list of AMQP URIs. When set, this
-// overrides WithAddr. Currently the first URI in the slice is always used;
-// round-robin selection across URIs on reconnect is planned for a future release.
+// WithAddrs sets a cluster-failover list of AMQP URIs. When set, this overrides
+// WithAddr.
+//
+// The list is tried in order on the initial connect: the first reachable node
+// wins and sticks for the life of that socket. On a disconnect, reconnect
+// rotates round-robin to the next URI in the list (wrapping at the end), so a
+// downed node is skipped on the following attempt instead of being retried in
+// place. Each TCP socket in the pool keeps its own cursor.
+//
+// All URIs should share the same scheme (amqp:// or amqps://); the TLS, SASL,
+// and credential settings configured on the Connection apply to whichever node
+// is dialled.
 func WithAddrs(addrs []string) Option {
 	return func(o *connOptions) { o.addrs = addrs }
 }

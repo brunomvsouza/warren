@@ -851,14 +851,16 @@ decision 49. Closes the Phase 7 checkpoint.
 - **Files:** edits to `connection.go`, `options_connection.go`, `amqptest/certs/*`, `connection_tls_integration_test.go`.
 - **Deps:** T07.
 
-### [ ] T33 — Cluster failover via `WithAddrs` · S
+### [x] T33 — Cluster failover via `WithAddrs` · S
 - **Acceptance:**
-  - [ ] `WithAddrs([]string)` tries addresses in order on initial connect.
-  - [ ] On reconnect, rotates to the next address (round-robin).
-  - [ ] First successful address sticks until the next disconnect.
+  - [x] `WithAddrs([]string)` tries addresses in order on initial connect.
+  - [x] On reconnect, rotates to the next address (round-robin).
+  - [x] First successful address sticks until the next disconnect.
 - **Verify:** Integration test: docker-compose two RabbitMQ nodes; stop the first, assert reconnect succeeds against the second.
 - **Files:** edits to `connection.go`, `options_connection.go`, `connection_failover_integration_test.go`.
 - **Deps:** T07.
+- **Done:** Per-socket round-robin cursor (`managedConn.dialCursor` + `nextDialAddr`/`connOptions.dialAddrs`); `dialAMQP` now takes the concrete `addr` selected by the cursor instead of hard-coding `addrs[0]`. Each dial attempt advances the cursor, so the initial connect walks the list in order and every reconnect resumes at the next node (wrapping at the end); the connected address sticks until a disconnect. `WithAddrs` godoc rewritten (was "first URI always used; round-robin planned"). Unit tests in `connection_internal_test.go` cover the rotation sequence (single-addr stickiness, in-order initial, round-robin wrap, `WithAddr` fallback). Integration `connection_failover_integration_test.go` proves both directions against a real broker using a dead `127.0.0.1:1` node — initial-connect skip and ForceReconnect rotate-past-dead-and-recover — needing only one broker instead of a two-node compose. **Verified:** unit `-race` green, full integration lane `-race` green (30s), examples smoke `-race` green, lint 0 issues, build green.
+- **Deferred:** the reconnect loop applies its backoff between every dial attempt, so with N addresses a full sweep over a partitioned cluster waits N×Min before wrapping rather than fast-cycling all addresses before the first backoff. Acceptable for v0.1 (acceptance asks only for in-order + round-robin); a "try all addresses before backing off" optimisation is a future refinement.
 
 ### [ ] T34 — Remaining Connection options · S
 Rev 5 adds `WithConnectionName`, `WithPublisherConnections`,

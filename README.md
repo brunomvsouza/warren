@@ -168,7 +168,7 @@ Warren is built with "production-first" principles, embedding several reliabilit
 
 ### Available now
 
-- **Connection** — `Dial`, role-split TCP pool, PLAIN SASL, heartbeat and frame sizing, `Health` / `Close` / `ForceReconnect` (TLS, cluster failover, and SASL EXTERNAL options are wired up under production hardening — see roadmap)
+- **Connection** — `Dial`, role-split TCP pool, PLAIN SASL, heartbeat and frame sizing, multi-address cluster failover (`WithAddrs`, in-order initial connect + round-robin rotation on reconnect), `Health` / `Close` / `ForceReconnect` (TLS and SASL EXTERNAL options are wired up under production hardening — see roadmap)
 - **Publisher** — `PublisherFor[M]`, publisher confirms, mandatory + returns, `PublishRetry`, confirm/publish timeouts, concurrent-safe `Publish`, payload size guardrail
 - **Topology** — declarative exchanges, queues, bindings, dead-letter expansion (quorum + DLX gets `x-dead-letter-strategy: at-least-once` automatically); `Declare` + `AttachTo` for reconnect redeclare; degraded state on persistent redeclare failure
 - **Consumer** — `ConsumerFor[M]`, prefetch, concurrency, handler error mapping (`ErrRequeue`), re-subscribe loop, `ConsumeRaw`; `MaxRedeliveries` (quorum `DeliveryLimit` + `x-death` + in-process counters) and per-handler `HandlerTimeout` with a configurable `HandlerTimeoutVerdict`
@@ -182,7 +182,7 @@ Warren is built with "production-first" principles, embedding several reliabilit
 ### On the roadmap (`v0.1.0`)
 
 - **Consumer cancellation** — `OnCancel(func(reason))` callback + `consumer_cancelled_total` metric for broker `basic.cancel`
-- **Production hardening** — TLS / `amqps://`, multi-address cluster failover, SASL EXTERNAL (mTLS), remaining connection options, panic isolation for user callbacks, `AutoAck()` opt-in
+- **Production hardening** — TLS / `amqps://`, SASL EXTERNAL (mTLS), remaining connection options, panic isolation for user callbacks, `AutoAck()` opt-in
 - **Tooling** — `amqpmock/`, `amqptest/` (testcontainers), conformance suite, chaos/reconnect benchmarks
 
 See [`tasks/todo.md`](tasks/todo.md) for the live checklist.
