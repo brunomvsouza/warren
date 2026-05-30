@@ -50,6 +50,13 @@ type managedConn struct {
 	hooksMu sync.Mutex
 	hooks   []func(ctx context.Context) error
 
+	// dialCursor is the round-robin index into the WithAddrs failover list.
+	// It advances once per dial attempt (see nextDialAddr), so the initial
+	// connect walks the list in order and each subsequent reconnect resumes at
+	// the next address. Touched only from the per-socket reconnect path, which
+	// runs serially for a given socket, so it needs no synchronisation.
+	dialCursor int
+
 	// lifecycle
 	cancel           context.CancelFunc
 	done             chan struct{}
@@ -438,13 +445,36 @@ func (mc *managedConn) connectOnce(ctx context.Context) error {
 	return nil
 }
 
+// dialAddrs returns the ordered list of candidate broker addresses. WithAddrs
+// takes precedence over WithAddr; a lone WithAddr collapses to a one-element
+// list so the dial path is uniform.
+func (opts *connOptions) dialAddrs() []string {
+	if len(opts.addrs) > 0 {
+		return opts.addrs
+	}
+	return []string{opts.addr}
+}
+
+// nextDialAddr returns the broker address for the next dial attempt and advances
+// the round-robin cursor (T33). With a single address it always returns that
+// address. With WithAddrs it walks the list in order — so the initial connect
+// tries addrs[0], addrs[1], … — and each later reconnect resumes at the next
+// entry, wrapping at the end. The previously-connected address therefore sticks
+// until a disconnect forces a fresh attempt, which then rotates to the next node.
+func (mc *managedConn) nextDialAddr() string {
+	addrs := mc.opts.dialAddrs()
+	addr := addrs[mc.dialCursor%len(addrs)]
+	mc.dialCursor++
+	return addr
+}
+
 // reconnectRaw dials a new raw AMQP connection using the configured backoff
 // policy and sets mc.raw on success.
 func (mc *managedConn) reconnectRaw(ctx context.Context) (connected bool, lastErr error) {
 	loop := reconnect.New(
 		ctx,
 		func(ctx context.Context) error {
-			raw, err := dialAMQP(ctx, mc.opts, mc.name)
+			raw, err := dialAMQP(ctx, mc.opts, mc.name, mc.nextDialAddr())
 			if err != nil {
 				lastErr = err
 				return err
@@ -811,7 +841,9 @@ func computeAuthUser(opts *connOptions) string {
 // dialAMQP creates a single amqp091-go connection from the resolved options.
 // The name parameter sets the AMQP connection_name client-property, allowing
 // each socket in the pool to carry a distinct name visible in the broker UI.
-func dialAMQP(_ context.Context, opts *connOptions, name string) (*amqp091.Connection, error) {
+// The addr parameter is the concrete broker URI to dial, selected by the
+// caller's round-robin failover cursor (see nextDialAddr).
+func dialAMQP(_ context.Context, opts *connOptions, name, addr string) (*amqp091.Connection, error) {
 	cfg := amqp091.Config{
 		Vhost:      opts.vhost,
 		ChannelMax: opts.channelMax,
@@ -850,11 +882,6 @@ func dialAMQP(_ context.Context, opts *connOptions, name string) (*amqp091.Conne
 	}
 	maps.Copy(props, opts.clientProperties)
 	cfg.Properties = props
-
-	addr := opts.addr
-	if len(opts.addrs) > 0 {
-		addr = opts.addrs[0]
-	}
 
 	return amqp091.DialConfig(addr, cfg)
 }
