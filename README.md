@@ -40,7 +40,7 @@ Raw `amqp091-go` is correct and minimal. Production RabbitMQ clients need more:
 
 ## Quick start
 
-Requires **Go 1.23+** and a **RabbitMQ 3.13 LTS or 4.x** broker.
+Requires **Go 1.25+** and a **RabbitMQ 3.13 LTS or 4.x** broker.
 
 ```bash
 # Until the first tag (v0.1.0), pin to main:

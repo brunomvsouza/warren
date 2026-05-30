@@ -65,7 +65,7 @@ make integration-down
 
 ### Coding Standards & Testing Conventions
 
-- **Language:** Go 1.23+ (Generics are central).
+- **Language:** Go 1.25+ (Generics are central).
 - **Testing:** 
   - Use `github.com/stretchr/testify` (`assert`/`require`) in every `_test.go`.
   - Use `go.uber.org/goleak.VerifyNone(t)` at the end of any test that spawns goroutines.
