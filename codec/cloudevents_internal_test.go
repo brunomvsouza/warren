@@ -47,15 +47,14 @@ func TestCloudEventsBinary_DecodeWithHeaders_AcceptsExtensionsAtCap(t *testing.T
 		"every extension up to the cap must be preserved")
 }
 
-// — LATER-61: structured Encode marshal-failure branch via the marshalEvent seam —
+// — LATER-61: structured Encode marshal-failure branch via the injected marshaler —
 
 func TestCloudEventsStructured_Encode_MarshalFailureWrapsErrInvalidMessage(t *testing.T) {
 	sentinel := errors.New("synthetic marshal failure")
-	orig := marshalEvent
-	marshalEvent = func(any) ([]byte, error) { return nil, sentinel }
-	t.Cleanup(func() { marshalEvent = orig })
-
-	c := &ceStructuredCodec{}
+	// Inject a failing marshaler per-instance (no mutable package global): a
+	// validated event always marshals in practice, so this is the only way to
+	// reach the json.Marshal error branch.
+	c := &ceStructuredCodec{marshal: func(any) ([]byte, error) { return nil, sentinel }}
 	ev := event.New()
 	ev.SetID("id-1")
 	ev.SetSource("/x")

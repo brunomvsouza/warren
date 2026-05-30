@@ -32,12 +32,6 @@ const (
 	maxCEBinaryExtensions = 128
 )
 
-// marshalEvent serialises a validated CloudEvents envelope. It is a package var so
-// a test can inject a failure and cover the otherwise-unreachable json.Marshal
-// error branch in ceStructuredCodec.Encode (a validated cloudevents.Event always
-// marshals). Production always uses encoding/json.
-var marshalEvent = json.Marshal
-
 // ceStandardAttrs are the context-attribute names handled as typed event fields
 // (the rest of the cloudEvents:-prefixed headers are extensions). datacontenttype
 // is listed so a stray cloudEvents:datacontenttype header is not mistaken for an
@@ -77,14 +71,22 @@ func asEventDest(v any) (*event.Event, error) {
 
 // ceStructuredCodec serialises the full CloudEvent JSON envelope into the body,
 // delegating to the SDK's JSON event format.
-type ceStructuredCodec struct{}
+type ceStructuredCodec struct {
+	// marshal serialises the validated event. It is a field — set to json.Marshal
+	// by NewCloudEventsStructured — so a test can inject a failure and cover the
+	// otherwise-unreachable json.Marshal error branch in Encode (a validated
+	// cloudevents.Event always marshals in practice). Injecting per-instance avoids
+	// a mutable package global; construct via NewCloudEventsStructured (the zero
+	// value carries no marshaler).
+	marshal func(any) ([]byte, error)
+}
 
 // NewCloudEventsStructured returns a codec that serialises a cloudevents.Event as
 // a full CloudEvents JSON envelope in the message body (content-type
 // application/cloudevents+json). Serialization is delegated to the SDK event
 // format, so data / data_base64, extensions, and time follow the spec exactly.
 func NewCloudEventsStructured() Codec {
-	return &ceStructuredCodec{}
+	return &ceStructuredCodec{marshal: json.Marshal}
 }
 
 func (c *ceStructuredCodec) ContentType() string { return ceStructuredContentType }
@@ -97,7 +99,7 @@ func (c *ceStructuredCodec) Encode(v any) ([]byte, error) {
 	if err := ev.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
-	out, err := marshalEvent(ev)
+	out, err := c.marshal(ev)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}
