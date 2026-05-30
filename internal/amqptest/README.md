@@ -1,13 +1,13 @@
 # amqptest
 
-`amqptest` is a public [testcontainers-go](https://golang.testcontainers.org/)
-helper that spins up a RabbitMQ broker for warren's — and downstream
-applications' — integration suites. It is exported so the same fixture can be
-reused outside this module; the root `warren` package never imports it at
-runtime.
+`amqptest` is an **internal** [testcontainers-go](https://golang.testcontainers.org/)
+helper that spins up a RabbitMQ broker for warren's own integration suites (the
+root and example `*_integration_test.go` files). It lives under `internal/` so it
+is not part of warren's public API; the production packages never import it, so
+its testcontainers/docker dependencies stay out of consumers' builds.
 
 ```go
-import "github.com/brunomvsouza/warren/amqptest"
+import "github.com/brunomvsouza/warren/internal/amqptest"
 
 func TestThing_integration(t *testing.T) {
     rmq := amqptest.NewRabbitMQ(t)              // auto-terminated via t.Cleanup
@@ -40,7 +40,7 @@ order and picks the first available:
    [`docker/Dockerfile.amqptest`](docker/Dockerfile.amqptest):
 
    ```sh
-   docker build -f amqptest/docker/Dockerfile.amqptest -t <registry>/warren-amqptest:3.13 .
+   docker build -f internal/amqptest/docker/Dockerfile.amqptest -t <registry>/warren-amqptest:3.13 .
    AMQPTEST_IMAGE=<registry>/warren-amqptest:3.13 go test -tags=integration ./...
    ```
 

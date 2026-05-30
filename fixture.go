@@ -13,11 +13,10 @@ import (
 // fields can therefore be added in a minor release without breaking callers.
 type noUnkeyedFixtureLiterals struct{}
 
-// DeliveryFixture is the keyed-literal input to [NewDeliveryFixture] (and its
-// re-export amqpmock.NewDelivery). It fabricates a [Delivery] for unit tests
-// without a live broker and — unlike the amqpmock subpackage — without pulling
-// in go.uber.org/mock, so consumer/raw/batch unit tests stay gomock-free
-// (SPEC §10 decision 9, GA-09).
+// DeliveryFixture is the keyed-literal input to [NewDeliveryFixture]. It
+// fabricates a [Delivery] for unit tests — including consumer/raw/batch handler
+// tests, in this package or downstream — without a live broker (SPEC §10
+// decision 9, GA-09).
 //
 // Only keyed literals compile from outside the package; the trailing guard
 // field rejects positional literals so future fields are non-breaking.
@@ -47,9 +46,8 @@ type DeliveryFixture[M any] struct {
 	_ noUnkeyedFixtureLiterals
 }
 
-// BatchFixture is the keyed-literal input to [NewBatchFixture] (and its
-// re-export amqpmock.NewBatch). It fabricates a [Batch] from a slice of
-// per-message fixtures, in order.
+// BatchFixture is the keyed-literal input to [NewBatchFixture]. It fabricates a
+// [Batch] from a slice of per-message fixtures, in order.
 type BatchFixture[M any] struct {
 	// Deliveries are the per-message fixtures composing the batch, in order.
 	Deliveries []DeliveryFixture[M]

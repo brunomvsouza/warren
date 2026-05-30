@@ -8,11 +8,18 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/rabbitmq"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// brokerStartupTimeout is how long to wait for the broker to finish booting.
+// The module's default is 60s, which a loaded CI runner — or a memory-constrained
+// Docker VM already running other brokers — can exceed; this gives headroom.
+const brokerStartupTimeout = 180 * time.Second
 
 // RabbitMQ is a running RabbitMQ test broker. Construct it with [NewRabbitMQ];
 // it is terminated automatically when the test ends.
@@ -77,11 +84,28 @@ func NewRabbitMQ(t *testing.T, opts ...Option) *RabbitMQ {
 		}))
 	}
 
-	container, err := rabbitmq.Run(ctx, res.image, customizers...)
-	require.NoError(t, err, "amqptest: start RabbitMQ container (image %q)", res.image)
+	// Replace the module's wait (and, for TLS, its extra listener wait) with a
+	// single, generous wait for the final boot log. "Server startup complete" is
+	// logged after the AMQP and TLS listeners are bound, so it is a safe superset;
+	// placing this last lets it override the module defaults. The timeout must be
+	// raised at BOTH levels — the inner ForLog's own startup timeout (default 60s,
+	// the limiting factor) and the ForAll deadline — or a loaded runner whose boot
+	// exceeds 60s times out spuriously.
+	customizers = append(customizers, testcontainers.WithWaitStrategyAndDeadline(
+		brokerStartupTimeout,
+		wait.ForLog(".*Server startup complete.*").AsRegexp().WithStartupTimeout(brokerStartupTimeout),
+	))
 
+	container, err := rabbitmq.Run(ctx, res.image, customizers...)
+	// Register termination before asserting success: on a wait-strategy timeout
+	// the module still returns a non-nil (running) container, so the cleanup must
+	// be in place before require.NoError's FailNow, or the broker leaks when Ryuk
+	// is disabled.
 	r := &RabbitMQ{container: container}
-	t.Cleanup(func() { r.terminate(t) })
+	if container != nil {
+		t.Cleanup(func() { r.terminate(t) })
+	}
+	require.NoError(t, err, "amqptest: start RabbitMQ container (image %q)", res.image)
 
 	if res.mode != modePrebakedImage {
 		plugins := append([]string(nil), cfg.extraPlugins...)

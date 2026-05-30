@@ -991,36 +991,45 @@ would be misleading API surface.
   (45/45 PASS, locking the cancelCh-close regression fix), examples-smoke `-race` 8/8,
   lint 0, gofmt + build + vet clean.
 
-### [x] T37 — `amqpmock/` + `amqptest/` subpackages · M
-Rev 5 promotes the testcontainers helper to a public `amqptest/`
-subpackage so downstream applications can reuse the fixture.
+### [x] T37 — public `Delivery`/`Batch` fixtures + `internal/amqptest` · M
+Rev 5 promised a public `amqptest/` + a gomock `amqpmock/`.
+**Post-review refactor (maintainer, 2026-05-30):** the public `amqpmock`
+(generated gomock mocks) was **deleted** — nothing in the repo used it and
+exporting it forced `go.uber.org/mock` on consumers who may not use gomock;
+downstream generates its own interface mocks. `amqptest` was **moved to
+`internal/amqptest`** — it is warren's own test infrastructure, not a public
+compat commitment. The one fixture only the library can build (`Delivery[M]`/
+`Batch[M]` have unexported fields) stays **public in the root** package
+(`NewDeliveryFixture`/`NewBatchFixture`). SPEC §4/§5/§6/§10.9 + the stack table
+amended accordingly; `go.uber.org/mock` removed from go.mod; `make mocks` and
+the `//go:generate` directives removed.
 - **Acceptance:**
-  - [x] `go generate ./...` produces gomock mocks for `codec.Codec`, `log.Logger`, all three metrics interfaces, `otel.Tracer`. (Also `codec.HeaderCodec`, `otel.Span`, `otel.LinkingTracer` — the full public-interface set. Directives in `amqpmock/generate.go`; gomock package mode; generated `amqpmock/{codec,logger,metrics,tracer}.go` carry the `DO NOT EDIT` header so golangci-lint skips them.)
-  - [x] Hand-written `amqpmock.NewDelivery[M](Fixture)` and `amqpmock.NewBatch[M](Fixture)` constructors that produce usable `*Delivery[M]` / `*Batch[M]` values for tests. (Thin re-exports of the root `warren.NewDeliveryFixture`/`NewBatchFixture`; `amqpmock.DeliveryFixture`/`BatchFixture` are generic type aliases of the root types.)
-  - [x] Root package has zero gomock imports at runtime (only in `amqpmock/` and `*_test.go`). Verified: `go list -deps github.com/brunomvsouza/warren | grep go.uber.org/mock` is empty; no non-test root `.go` imports gomock or `amqpmock`.
-  - [x] **Lens-06 (GA-09):** a **lightweight `Delivery[M]`/`Batch[M]` fixture path with no `go.uber.org/mock` dependency** (e.g. `DeliveryFixture`/`BatchFixture` constructors, guarded against unkeyed struct literals) lets consumer/raw/batch unit tests fabricate deliveries without importing the gomock-heavy mock subpackage. (Implemented as `warren.DeliveryFixture[M]`/`BatchFixture[M]` + `warren.NewDeliveryFixture`/`NewBatchFixture` in the root package; both fixture structs carry an unexported `noUnkeyedFixtureLiterals` guard field so positional literals from other packages fail to compile, making new fields non-breaking.)
-  - [x] **`amqptest/` public package**: `amqptest.NewRabbitMQ(t *testing.T, opts ...Option) *RabbitMQ` spins up a `rabbitmq:3.13.x-management` or `rabbitmq:4.0.x-management` testcontainer with:
+  - [x] ~~gomock mocks~~ **SUPERSEDED** — no mock package is shipped (maintainer review). Interface mocks are the consumer's to generate.
+  - [x] `Delivery[M]`/`Batch[M]` fixture constructors that produce usable `*Delivery[M]` / `*Batch[M]` values for tests. Implemented as **public root** `warren.NewDeliveryFixture[M]`/`NewBatchFixture[M]` (keyed-literal `DeliveryFixture`/`BatchFixture` inputs, no live broker). ~~`amqpmock.NewDelivery`~~ removed.
+  - [x] Root package (and the whole module) has zero gomock imports — `go.uber.org/mock` is no longer a dependency at all. Verified: `grep go.uber.org/mock go.mod` empty; `go list -deps` clean.
+  - [x] **Lens-06 (GA-09):** the `Delivery[M]`/`Batch[M]` fixture path has **no `go.uber.org/mock` dependency** (trivially — no mock package exists anymore). Implemented as **public root** `warren.DeliveryFixture[M]`/`BatchFixture[M]` + `warren.NewDeliveryFixture`/`NewBatchFixture`; both fixture structs carry an unexported `noUnkeyedFixtureLiterals` guard field so positional literals from other packages fail to compile, making new fields non-breaking.
+  - [x] **`internal/amqptest/` package** (moved from public per maintainer review): `amqptest.NewRabbitMQ(t *testing.T, opts ...Option) *RabbitMQ` spins up a `rabbitmq:3.13.x-management` or `rabbitmq:4.0.x-management` testcontainer with:
     - `rabbitmq_delayed_message_exchange` plugin (for T31).
     - `rabbitmq_auth_mechanism_ssl` plugin + `external_auth` user (for T34b).
-    - Pre-generated TLS server + client certs in `amqptest/certs/` (for T32 + T34b).
+    - Pre-generated TLS server + client certs in `internal/amqptest/certs/` (for T32 + T34b).
     Options: `WithRabbitMQVersion(string)`, `WithEnabledPlugins(...string)`, `WithExtraConfig(map[string]string)`.
   - [x] **Plugin enablement strategy (Rev 6) — three explicit modes**, evaluated in order:
-    1. **Pre-baked image:** if env `AMQPTEST_IMAGE` is set, that image is used as-is. Library ships `amqptest/docker/Dockerfile.amqptest` so consumers can publish their own.
-    2. **Mounted `.ez`:** if env `AMQPTEST_DELAYED_PLUGIN_FILE` points at a local `.ez`, mount it into `/plugins/` and enable via `RABBITMQ_ENABLED_PLUGINS_FILE`. `amqptest/README.md` lists tested plugin versions per RabbitMQ minor + download URLs.
+    1. **Pre-baked image:** if env `AMQPTEST_IMAGE` is set, that image is used as-is. Ships `internal/amqptest/docker/Dockerfile.amqptest`.
+    2. **Mounted `.ez`:** if env `AMQPTEST_DELAYED_PLUGIN_FILE` points at a local `.ez`, mount it into `/opt/rabbitmq/plugins/` and enable after start. `internal/amqptest/README.md` lists tested plugin versions per RabbitMQ minor + download URLs.
     3. **Skip fallback:** neither set → `amqptest.RequireDelayedExchange(t)` calls `t.Skip("delayed-message plugin not available; set AMQPTEST_IMAGE or AMQPTEST_DELAYED_PLUGIN_FILE")`. Tests not gated on the delayed exchange run normally.
   - [x] `amqptest.RabbitMQ` exposes `URI() string` (with credentials), `AMQPSURI() string`, `Cleanup(t)`, and `Container() testcontainers.Container` for advanced cases.
   - [x] godoc and a README in `amqptest/` document downstream usage (`go test ./...` from another module) and the three plugin modes.
   - [x] **Lens-10 (TV-08):** the `rabbitmq_delayed_message_exchange` plugin is guaranteed present in ≥1 **required** CI lane (the pre-baked-image mode `AMQPTEST_IMAGE`), so the delayed-exchange conformance/example criteria do **not** silently `t.Skip` green; the three plugin-enablement modes stay, but the required lane uses the present-plugin mode and **fails (not skips)** if the plugin is expected but missing. dep VG-1.
   - **Done (amqptest):** `NewRabbitMQ(t, opts…)` uses the official testcontainers RabbitMQ module (v0.42.0). The three plugin modes resolve in `plugins.go` (`resolve`, pure + env-injected): pre-baked `AMQPTEST_IMAGE` → used as-is; `AMQPTEST_DELAYED_PLUGIN_FILE` → mounted into `/opt/rabbitmq/plugins/` (mirrors `Dockerfile.rabbitmq-delayed`) and enabled after start; neither → `RequireDelayedExchange(t)` skips. **TV-08:** `RequireDelayedExchange` does **not** skip once a source is configured — a missing-but-expected plugin then fails on the `x-delayed-message` declare. `rabbitmq_auth_mechanism_ssl` is enabled after start in the non-pre-baked modes (via `rabbitmq-plugins enable`, which appends) and baked into `docker/Dockerfile.amqptest`; `RequireSSLAuth(t)` gates SASL EXTERNAL on the pre-baked image (the `external_auth` user/`ssl_cert_login` mapping is T34b's wiring). **TLS is opt-in via `WithTLS()`** — the module configures TLS as `listeners.tcp=none` (TLS-only), which would break the common plain-AMQP fixture; certs in `certs/` are embedded (`//go:embed`) and exposed via `CACertPEM`/`Client*`/`Server*` + written to a tempdir for the module's `SSLSettings`. **Verified live** against `AMQPTEST_IMAGE=warren-rabbitmq-delayed:3.13` (`TESTCONTAINERS_RYUK_DISABLED=true`): `TestNewRabbitMQ_DelayedExchange_integration` (plain AMQP + real `x-delayed-message` exchange holding a message for its `x-delay`, 25.8s) and `TestNewRabbitMQ_TLS_integration` (`amqps://` handshake against the provisioned listener with the embedded CA, 22.8s) both PASS. Root stays free of testcontainers/gomock/docker at runtime (`go list -deps` verified).
-- **Verify:** Run `go list -deps ./... | grep go.uber.org/mock` and confirm only test files match. Downstream-usability test: a separate `examples/integration-test-fixture/` module imports `amqptest` and asserts the fixture spins up cleanly without root-package leakage.
-- **Files:** `amqpmock/codec.go`, `amqpmock/logger.go`, `amqpmock/metrics.go`, `amqpmock/tracer.go`, `amqpmock/delivery.go`, `amqpmock/batch.go`, `amqpmock/*_test.go`, plus `//go:generate` lines in source files. **New:** `amqptest/rabbitmq.go`, `amqptest/options.go`, `amqptest/plugins.go` (RequireDelayedExchange/RequireSSLAuth helpers), `amqptest/certs/{ca.pem,server.pem,server.key,client.pem,client.key}`, `amqptest/docker/Dockerfile.amqptest`, `amqptest/README.md`, `amqptest/*_test.go`.
+- **Verify:** `grep go.uber.org/mock go.mod` is empty (dependency removed entirely). `go list -deps github.com/brunomvsouza/warren` is free of testcontainers/gomock/docker. (The separate-module downstream smoke from the original prose is moot — `amqptest` is now `internal/`, not a public downstream fixture.)
+- **Files:** `fixture.go`, `fixture_test.go` (public root `Delivery`/`Batch` fixtures); `internal/amqptest/{rabbitmq,options,plugins,certs,doc}.go`, `internal/amqptest/amqptest_test.go`, `internal/amqptest/rabbitmq_integration_test.go`, `internal/amqptest/certs/{ca.pem,server.pem,server.key,client.pem,client.key}` + `certs/gen.go`, `internal/amqptest/docker/Dockerfile.amqptest`, `internal/amqptest/README.md`. **Deleted vs the original plan:** the whole `amqpmock/` subpackage + `go.uber.org/mock` dependency.
 - **Deps:** T03, T04, T05, T09, T17, T23.
 
 ### Checkpoint — Phase 8 done
 - [ ] mTLS + cluster failover green.
 - [ ] All Connection/Consumer/BatchConsumer options surfaced.
 - [x] AutoAck warning documented and demonstrated.
-- [x] Mocks usable downstream. (amqpmock fixtures + gomock mocks build/test green; amqptest spins a real broker — delayed + TLS integration tests PASS live; root stays free of testcontainers/gomock at runtime.)
+- [x] Test fixtures usable. (Public root `NewDeliveryFixture`/`NewBatchFixture` build/test green; `internal/amqptest` spins a real broker — delayed + TLS integration tests PASS live. No public mock package; `go.uber.org/mock` not a dependency.)
 - [ ] **Review with human before Phase 9.**
 
 ---
