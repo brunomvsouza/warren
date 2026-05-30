@@ -333,12 +333,16 @@ if err := pub.Publish(ctx, msg); err != nil {
 make build              # compile all packages
 make test               # unit tests (-race -cover)
 make test-stress        # hammer scheduling-sensitive tests (-race, stress tag)
+make cover              # coverage gate: per-package >=80%, critical-path >=95%
 make lint               # golangci-lint
 
 make integration-up     # RabbitMQ via Docker Compose
 AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ \
 AMQP_TEST_MANAGEMENT_URL=http://guest:guest@localhost:15672 make test-integration
 make integration-down
+
+AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ \
+make bench              # throughput benchmarks (msg/s per classic+quorum queue)
 ```
 
 Pre-commit hook (opt-in): `make hooks` installs `lint` + `test` on commit.

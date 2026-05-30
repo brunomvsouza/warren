@@ -1,0 +1,96 @@
+name: Benchmarks
+
+# Throughput benchmark suite (T44b / SPEC §9). NOT run on every PR: benchmarks
+# need a broker and stable timing, and per Lens-10 TV-04 the absolute targets
+# (>=30k single-conn, >=100k multi-conn, batch >=5x) are release-tag targets on
+# reference hardware, not CI gates. This lane runs on release tags, nightly, and
+# on demand, producing a drift report.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  schedule:
+    - cron: "0 4 * * *" # nightly drift report
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Throughput benchmarks
+    runs-on: ubuntu-latest
+    env:
+      AMQP_TEST_URL: amqp://guest:guest@localhost:5672/
+      AMQP_TEST_MANAGEMENT_URL: http://guest:guest@localhost:15672
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+
+      # Same pinned, plugin-enabled broker the integration lane uses, so the
+      # benchmark broker is identical run to run.
+      - name: Start RabbitMQ (pinned broker)
+        run: make integration-up
+
+      # Run every benchmark for a classic and a quorum queue. -count feeds
+      # benchstat multiple samples; -run '^$' disables the unit tests so only
+      # benchmarks execute.
+      - name: Run throughput benchmarks
+        run: |
+          set -o pipefail
+          go test -tags=bench -run='^$' -bench=. -benchmem \
+            -benchtime=2s -count=6 -timeout=30m ./... 2>&1 | tee bench.txt
+
+      # Zero-run guard (mirrors the integration lane TV-13): if AMQP_TEST_URL were
+      # unset every benchmark would b.Skip, producing a vacuous green. Fail loudly.
+      - name: Guard against zero benchmarks executed
+        run: |
+          ran=$(grep -cE '^Benchmark[A-Za-z0-9_/]+' bench.txt) || true
+          echo "benchmarks executed: ${ran}"
+          if [ "${ran:-0}" -eq 0 ]; then
+            echo "::error::no benchmarks executed (broker unreachable? all skipped)"
+            exit 1
+          fi
+
+      # Relative regression gate (Lens-10 TV-04): when a reference baseline is
+      # committed (testdata/bench-baseline.txt, captured on the named reference
+      # runner), compare and fail on a regression beyond the threshold. Until a
+      # baseline exists this reports only — the absolute numbers cannot gate CI on
+      # a shared runner. See LATER-* for capturing the baseline.
+      - name: Relative regression gate (vs reference baseline, if present)
+        run: |
+          if [ -f testdata/bench-baseline.txt ]; then
+            go install golang.org/x/perf/cmd/benchstat@latest
+            benchstat testdata/bench-baseline.txt bench.txt | tee benchstat.txt
+          else
+            echo "no testdata/bench-baseline.txt committed yet — reporting only (no gate)"
+          fi
+
+      - name: Publish benchmark report to job summary
+        if: always()
+        run: |
+          {
+            echo '## Throughput benchmarks'
+            echo '```'
+            cat bench.txt 2>/dev/null || echo '(no bench.txt produced)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            bench.txt
+            benchstat.txt
+          if-no-files-found: warn
+
+      - name: Stop RabbitMQ
+        if: always()
+        run: make integration-down

@@ -18,7 +18,7 @@ GOTOOLCHAIN     ?= go$(GO_MOD_VERSION)
 # so membership stays next to the code and a rename breaks the build instead of going stale.
 STRESS_COUNT ?= 200
 
-.PHONY: help build test test-stress test-integration test-conformance test-all lint vuln tidy doc hooks clean examples-build examples-smoke integration-up integration-down cover
+.PHONY: help build test test-stress test-integration test-conformance test-all lint vuln tidy doc hooks clean examples-build examples-smoke integration-up integration-down cover bench
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -49,6 +49,9 @@ test-all: ## Run unit + integration + conformance tests.
 
 test-stress: ## Hammer scheduling-sensitive tests (stress build tag) under -race to guard determinism (override STRESS_COUNT).
 	$(GO) test -race -tags=stress -count=$(STRESS_COUNT) -run '^TestStress$$' .
+
+bench: ## Run throughput benchmarks (bench build tag; requires broker via AMQP_TEST_URL). Reports msg/s per classic+quorum.
+	$(GO) test -tags=bench -run='^$$' -bench=. -benchmem -timeout=30m $(PKG)
 
 tidy: ## Tidy go.mod/go.sum using the Go version declared in go.mod (prevents toolchain drift).
 	GOTOOLCHAIN=$(GOTOOLCHAIN) $(GO) mod tidy
