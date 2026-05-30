@@ -43,17 +43,6 @@ jobs:
   integration:
     name: Integration tests
     runs-on: ubuntu-latest
-    services:
-      rabbitmq:
-        image: rabbitmq:3-management
-        ports:
-          - 5672:5672
-          - 15672:15672
-        options: >-
-          --health-cmd "rabbitmq-diagnostics ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       AMQP_TEST_URL: amqp://guest:guest@localhost:5672/
       AMQP_TEST_MANAGEMENT_URL: http://guest:guest@localhost:15672
@@ -66,11 +55,24 @@ jobs:
         with:
           go-version: "1.25"
 
+      # Build + start the plugin-enabled broker (rabbitmq:3.13-management +
+      # rabbitmq_delayed_message_exchange) and wait until healthy. Reusing the same
+      # docker-compose.integration.yml as local dev keeps the CI broker identical to
+      # `make integration-up`, and -- unlike the services: shorthand, which can only
+      # pull a pre-built registry image -- bakes in the delayed-message plugin so the
+      # delayed-delivery timing assertion actually runs instead of skipping.
+      - name: Start RabbitMQ (delayed-plugin broker)
+        run: make integration-up
+
       - name: Integration tests (race)
         run: make test-integration
 
       - name: Examples smoke-run (race)
         run: make examples-smoke
+
+      - name: Stop RabbitMQ
+        if: always()
+        run: make integration-down
 
   vuln:
     name: Vulnerability scan

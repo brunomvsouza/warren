@@ -37,6 +37,12 @@ AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ make examples-smoke
 make integration-down                                         # stop and remove the broker
 ```
 
+The broker is built from `Dockerfile.rabbitmq-delayed` (`rabbitmq:3.13-management`
+plus the `rabbitmq_delayed_message_exchange` community plugin, pinned by SHA-256), so
+the delayed-delivery timing assertions (`TestDelay_DelayedDelivery_integration` and
+`examples/delayed`) actually run instead of skipping. The probe-and-`t.Skip` guard
+stays in place, so the suite still degrades cleanly on a plugin-less broker.
+
 `AMQP_TEST_URL` must be exported or prefixed on the command; without it the
 integration tests **fail** (`t.Fatal`) rather than skip — the `integration`
 build tag is the opt-in, so a missing broker URL is a misconfiguration, not a
