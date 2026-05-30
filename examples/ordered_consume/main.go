@@ -54,7 +54,8 @@ const (
 	queue          = "warren.examples.ordered.events"
 	routingKey     = "event.created"
 	numEvents      = 20
-	handoffAt      = 9 // kill the active consumer after it accepts this sequence number
+	handoffAt      = 9  // kill the active consumer after it accepts this sequence number
+	probeSeq       = -1 // readiness probe: out-of-band sequence number, never part of 0..N-1
 	exampleTimeout = 60 * time.Second
 )
 
@@ -120,12 +121,23 @@ func run() error {
 		seen:     make(map[int]struct{}, numEvents),
 		nextWant: 0,
 	}
-	allDone := make(chan struct{})      // closed when every sequence number is accepted
-	handoffOnce := make(chan string, 1) // receives the active consumer's name once at handoffAt
+	allDone := make(chan struct{})       // closed when every sequence number is accepted
+	handoffOnce := make(chan string, 1)  // receives the active consumer's name once at handoffAt
+	probeReady := make(chan struct{}, 1) // signalled once consumer-a processes the readiness probe
 
 	// makeHandler builds a Concurrency(1) handler for a named consumer instance.
 	makeHandler := func(name string) warren.Handler[Event] {
 		return func(_ context.Context, e Event) error {
+			if e.Seq == probeSeq {
+				// The readiness probe: receiving it proves this consumer's
+				// basic.consume is registered and it is the active consumer.
+				log.Printf("%s: readiness probe handled → ack (active consumer confirmed)", name)
+				select {
+				case probeReady <- struct{}{}:
+				default:
+				}
+				return nil
+			}
 			result := tracker.accept(e.Seq)
 			switch result {
 			case acceptOutOfOrder:
@@ -168,27 +180,38 @@ func run() error {
 		}
 		cctx, ccancel := context.WithCancel(ctx)
 		cancels[name] = ccancel
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer ccancel() // idempotent with the external kill; guarantees cancel on return
 			consumerErrs <- c.Consume(cctx, makeHandler(name))
-		}()
+		})
 		return nil
 	}
 
 	if err := startConsumer("consumer-a"); err != nil {
 		return err
 	}
-	// Give consumer-a a head start so it becomes the active consumer, then add the
-	// standby.
-	time.Sleep(500 * time.Millisecond)
+	// Make consumer-a's activeness OBSERVABLE instead of guessing with a sleep —
+	// the library bans magic sleeps as synchronization. While consumer-a is the
+	// only subscriber it is necessarily the active consumer, so publishing one
+	// readiness probe and blocking until consumer-a's handler processes it proves
+	// its basic.consume is registered and live. Only then do we add the standby;
+	// SingleActiveConsumer keeps consumer-a active because it subscribed first.
+	if err := pub.Publish(ctx, warren.Message[Event]{Body: &Event{Seq: probeSeq}}); err != nil {
+		return fmt.Errorf("publish readiness probe: %w", err)
+	}
+	select {
+	case <-probeReady:
+	case <-time.After(15 * time.Second):
+		return fmt.Errorf("consumer-a did not become the active consumer within 15s")
+	case <-ctx.Done():
+		return fmt.Errorf("context cancelled before consumer-a became active: %w", ctx.Err())
+	}
 	if err := startConsumer("consumer-b"); err != nil {
 		return err
 	}
 
 	// — Publish the ordered sequence ——————————————————————————————————————————
-	for seq := 0; seq < numEvents; seq++ {
+	for seq := range numEvents {
 		e := Event{Seq: seq}
 		if err := pub.Publish(ctx, warren.Message[Event]{Body: &e}); err != nil {
 			return fmt.Errorf("publish seq=%d: %w", seq, err)

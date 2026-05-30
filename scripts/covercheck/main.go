@@ -101,7 +101,14 @@ func analyze(r io.Reader) (*analysis, error) {
 			return nil, fmt.Errorf("line %d: no ':' in block spec: %q", i+1, fields[0])
 		}
 		file := fields[0][:colon]
-		pkg := file[:strings.LastIndex(file, "/")]
+		// The package is the directory of the file (everything before the last
+		// '/'). Guard the no-slash case: without it, LastIndex returns -1 and
+		// file[:-1] panics on a malformed profile line.
+		slash := strings.LastIndex(file, "/")
+		if slash < 0 {
+			return nil, fmt.Errorf("line %d: no '/' in file path: %q", i+1, file)
+		}
+		pkg := file[:slash]
 
 		addStat(a.packages, pkg, numStmts, count)
 		addStat(a.files, file, numStmts, count)
@@ -178,43 +185,51 @@ func trimModule(p string) string {
 }
 
 func main() {
-	os.Exit(run())
+	os.Exit(run(os.Args, os.Stdout, os.Stderr))
 }
 
 // run does the work and returns the process exit code. main is a thin wrapper so
-// that deferred cleanup (file close) runs before the process exits.
-func run() int {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: covercheck <coverage-profile>")
+// that deferred cleanup (file close) runs before the process exits. args, stdout,
+// and stderr are injected so the exit-code contract the CI gate relies on is
+// directly testable without spawning a subprocess.
+func run(args []string, stdout, stderr io.Writer) int {
+	// outln/outf write to the gate's output streams. A failed write to stdout or
+	// stderr is unrecoverable for a CLI, so the error is intentionally ignored —
+	// centralized here so the call sites stay readable.
+	outln := func(w io.Writer, a ...any) { _, _ = fmt.Fprintln(w, a...) }
+	outf := func(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
+
+	if len(args) != 2 {
+		outln(stderr, "usage: covercheck <coverage-profile>")
 		return 2
 	}
 	// The profile path is an operator-supplied CLI argument to a local dev/CI
 	// tool, not untrusted input.
-	f, err := os.Open(os.Args[1]) //nolint:gosec // G703: operator-supplied CLI path
+	f, err := os.Open(args[1]) //nolint:gosec // G703: operator-supplied CLI path
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "covercheck: %v\n", err)
+		outf(stderr, "covercheck: %v\n", err)
 		return 2
 	}
 	defer f.Close() //nolint:errcheck
 
 	a, err := analyze(f)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "covercheck: parse: %v\n", err)
+		outf(stderr, "covercheck: parse: %v\n", err)
 		return 2
 	}
 
 	violations, report := a.check()
-	fmt.Println("coverage by package:")
+	outln(stdout, "coverage by package:")
 	for _, line := range report {
-		fmt.Println(line)
+		outln(stdout, line)
 	}
 	if len(violations) > 0 {
-		fmt.Fprintf(os.Stderr, "\ncovercheck: FAILED — %d package(s)/file(s) below floor:\n", len(violations))
+		outf(stderr, "\ncovercheck: FAILED — %d package(s)/file(s) below floor:\n", len(violations))
 		for _, v := range violations {
-			fmt.Fprintf(os.Stderr, "  %s: %.1f%% < %.0f%%\n", v.name, v.pct, v.floor)
+			outf(stderr, "  %s: %.1f%% < %.0f%%\n", v.name, v.pct, v.floor)
 		}
 		return 1
 	}
-	fmt.Println("\ncovercheck: PASS — all packages meet their coverage floor")
+	outln(stdout, "\ncovercheck: PASS — all packages meet their coverage floor")
 	return 0
 }

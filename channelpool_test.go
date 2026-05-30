@@ -37,11 +37,9 @@ func TestChannelPool_Saturated_ReturnsExhausted(t *testing.T) {
 	p := newChannelPool(1, openFn)
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		_, _, _ = p.Acquire(context.Background())
-	}()
+	})
 
 	// Wait until the first goroutine has consumed the token.
 	<-tokenHeld
@@ -217,16 +215,14 @@ func TestChannelPool_ConcurrentAcquireRelease_Race(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 64 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 			defer cancel()
 			_, rel, err := p.Acquire(ctx)
 			if err == nil {
 				rel()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

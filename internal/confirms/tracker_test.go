@@ -487,16 +487,14 @@ func TestTracker_ConcurrentRegisterAckWait_RaceClean(t *testing.T) {
 	// on its own confirm. Concurrent allocation means tags reach Register out of
 	// order across goroutines, exercising orderInsert's binary-insert path too.
 	for range publishers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range perPublisher {
 				tag := atomic.AddUint64(&nextTag, 1)
 				require.NoError(t, tr.Register(tag))
 				acks <- tag
 				errs <- tr.Wait(ctx, tag, 10*time.Second)
 			}
-		}()
+		})
 	}
 
 	// Broker: resolve every delivered tag. Every k%5 frame is multiple=true so

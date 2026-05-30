@@ -227,9 +227,7 @@ func TestDropSampler_ConcurrentSample_TotalIsExact(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start // line every goroutine up so the calls genuinely overlap
 			for range perG {
 				emit, total := s.sample()
@@ -243,7 +241,7 @@ func TestDropSampler_ConcurrentSample_TotalIsExact(t *testing.T) {
 					}
 				}
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

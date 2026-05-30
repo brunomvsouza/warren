@@ -623,15 +623,13 @@ func (mc *managedConn) runBarrier(ctx context.Context) {
 		mc.degradedErr = fmt.Errorf("%w: %w", ErrTopologyRedeclareFailed, redact.Error(hookErr))
 		if !wasAlreadyDegraded && mc.opts.onTopoDegraded != nil {
 			degradedErr := mc.degradedErr
-			mc.wg.Add(1)
-			go func() {
-				defer mc.wg.Done()
+			mc.wg.Go(func() {
 				// recover runs before wg.Done (LIFO): a panic degrades to a
 				// logged error instead of crashing the process, and Close's
 				// wg.Wait still returns.
 				defer mc.recoverCallback("WithOnTopologyDegraded")
 				mc.opts.onTopoDegraded(degradedErr)
-			}()
+			})
 		}
 		mc.mu.Unlock()
 	} else {
@@ -731,14 +729,12 @@ func (mc *managedConn) safeOnBlocked(reason string) {
 	if fn == nil {
 		return
 	}
-	mc.wg.Add(1)
-	go func() {
-		defer mc.wg.Done()
+	mc.wg.Go(func() {
 		// recover runs before wg.Done (LIFO) so the log is emitted before Close's
 		// wg.Wait returns.
 		defer mc.recoverCallback("WithOnBlocked")
 		fn(reason)
-	}()
+	})
 }
 
 // — option defaults and validation ————————————————————————————————————————
