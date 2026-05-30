@@ -2,6 +2,7 @@ package warren
 
 import (
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/google/uuid"
@@ -126,7 +127,13 @@ func (b *BatchConsumerBuilder[M]) Exclusive() *BatchConsumerBuilder[M] {
 // Args sets extra arguments forwarded in the basic.consume frame. When Priority is
 // also set, the typed x-priority value is layered on top (Priority wins).
 func (b *BatchConsumerBuilder[M]) Args(args Headers) *BatchConsumerBuilder[M] {
-	b.consumeArgs = args
+	// Copy at call time for strict value semantics (see ConsumerBuilder.Args); a nil
+	// map stays nil so a later Args(nil) clears prior args (last-wins).
+	if args == nil {
+		b.consumeArgs = nil
+	} else {
+		b.consumeArgs = maps.Clone(args)
+	}
 	return b
 }
 

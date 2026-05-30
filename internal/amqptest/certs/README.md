@@ -14,6 +14,10 @@ Do **not** use them anywhere real:
 - They carry a deliberately long (100-year) validity so downstream
   integration runs never fail on expiry.
 
+They are embedded by `../certs.go`, which carries `//go:build integration`, so
+the keys compile **only** under the integration build tag (the lane that starts
+brokers) and never enter a default `go build` / `go test ./...` artifact.
+
 This README is intended to mark the directory for humans and secret scanners.
 If your secret scanner flags these files, add this path to its allowlist.
 

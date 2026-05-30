@@ -38,4 +38,14 @@
 // certs/ holds long-lived test CA/server/client certificates (regenerate with
 // `go run gen.go`). [CACertPEM], [ClientCertPEM] and [ClientKeyPEM] build an
 // amqps:// client tls.Config; the server cert is mounted into the broker.
+//
+// # Build tag
+//
+// Every source file in this package except this doc carries //go:build
+// integration, so the package — and the embedded TLS private keys in certs.go —
+// compile only under the integration build tag (the lane that actually starts
+// brokers). The default `go build` / `go test ./...` lane sees an empty package,
+// keeping the committed test keys out of every non-integration build. The
+// package's own option / plugin-mode / cert unit tests run on the integration
+// lane as a result, alongside the helper they exercise.
 package amqptest

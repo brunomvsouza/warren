@@ -2,6 +2,7 @@ package warren
 
 import (
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/google/uuid"
@@ -172,7 +173,15 @@ func (b *ConsumerBuilder[M]) AutoAck() *ConsumerBuilder[M] {
 // set, the typed x-priority value is layered on top, so Priority wins over any
 // x-priority slipped through Args.
 func (b *ConsumerBuilder[M]) Args(args Headers) *ConsumerBuilder[M] {
-	b.consumeArgs = args
+	// Copy at call time so a later mutation of the caller's map cannot change the
+	// builder's recorded args. buildConsumeArgs copies again at subscribe time; this
+	// gives the builder strict value semantics across the configuration window. A nil
+	// map stays nil (clears any prior Args, last-wins).
+	if args == nil {
+		b.consumeArgs = nil
+	} else {
+		b.consumeArgs = maps.Clone(args)
+	}
 	return b
 }
 

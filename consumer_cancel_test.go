@@ -248,3 +248,33 @@ func TestBatchConsumer_BasicCancel_BufferedAtChannelClose_ReturnsErrConsumerCanc
 		t.Fatal("batch Consume hung instead of returning on the channel-closed-with-pending-cancel path")
 	}
 }
+
+// TestForwardCancelReason_FullBuffer_FirstWins pins the contract of the free function
+// the delivery pump uses to relay a broker basic.cancel reason: it must NEVER block,
+// and when the size-1 buffer already holds a pending cancel the first one wins (a
+// second cancel is dropped rather than overwriting or blocking the pump). The
+// buffered-at-close tests inject cancelReasonCh directly and never call this, so this
+// is its only direct coverage.
+func TestForwardCancelReason_FullBuffer_FirstWins(t *testing.T) {
+	ch := make(chan string, 1)
+
+	forwardCancelReason(ch, "tag-A") // buffer now full
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		forwardCancelReason(ch, "tag-B") // must not block on the full buffer
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("forwardCancelReason must not block when the size-1 buffer is full")
+	}
+
+	assert.Equal(t, "tag-A", <-ch, "the first cancel reason wins; the second is dropped")
+	select {
+	case extra := <-ch:
+		t.Fatalf("only one reason may be buffered; got a second: %q", extra)
+	default:
+	}
+}

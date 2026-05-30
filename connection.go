@@ -834,10 +834,6 @@ func validateConnOptions(opts *connOptions) error {
 
 	// SASL EXTERNAL: fail-closed
 	if opts.saslMechanism == SASLExternal {
-		addr := opts.addr
-		if len(opts.addrs) > 0 {
-			addr = opts.addrs[0]
-		}
 		if opts.tlsConfig == nil {
 			return fmt.Errorf("%w: SASLExternal requires WithTLSConfig", ErrInvalidOptions)
 		}
@@ -846,9 +842,17 @@ func validateConnOptions(opts *connOptions) error {
 			return fmt.Errorf("%w: SASLExternal requires a client certificate in TLSConfig "+
 				"(Certificates or GetClientCertificate)", ErrInvalidOptions)
 		}
-		if !strings.HasPrefix(addr, "amqps://") {
-			return fmt.Errorf("%w: SASLExternal requires amqps:// scheme; got %q",
-				ErrInvalidOptions, redact.URI(addr))
+		// Every dial target must be amqps:// — the client certificate is presented
+		// during the TLS handshake, so a plaintext node would silently authenticate
+		// with no client cert. The scheme guard above already rejects a mixed list, so
+		// in practice all entries agree; iterating every dialAddrs() entry here is
+		// belt-and-suspenders against a future relaxation of that guard, not a second
+		// behaviour. The round-robin failover path dials each of these in turn.
+		for _, addr := range opts.dialAddrs() {
+			if !strings.HasPrefix(addr, "amqps://") {
+				return fmt.Errorf("%w: SASLExternal requires amqps:// scheme; got %q",
+					ErrInvalidOptions, redact.URI(addr))
+			}
 		}
 		// WithAuth under EXTERNAL is valid but ignored — warn at log level only
 		if opts.username != "" {
