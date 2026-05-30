@@ -171,7 +171,7 @@ Warren is built with "production-first" principles, embedding several reliabilit
 - **Connection** — `Dial`, role-split TCP pool, PLAIN SASL, heartbeat and frame sizing, multi-address cluster failover (`WithAddrs`, in-order initial connect + round-robin rotation on reconnect), `Health` / `Close` / `ForceReconnect` (TLS and SASL EXTERNAL options are wired up under production hardening — see roadmap)
 - **Publisher** — `PublisherFor[M]`, publisher confirms, mandatory + returns, `PublishRetry`, confirm/publish timeouts, concurrent-safe `Publish`, payload size guardrail
 - **Topology** — declarative exchanges, queues, bindings, dead-letter expansion (quorum + DLX gets `x-dead-letter-strategy: at-least-once` automatically); `Declare` + `AttachTo` for reconnect redeclare; degraded state on persistent redeclare failure
-- **Consumer** — `ConsumerFor[M]`, prefetch, concurrency, handler error mapping (`ErrRequeue`), re-subscribe loop, `ConsumeRaw`; `MaxRedeliveries` (quorum `DeliveryLimit` + `x-death` + in-process counters) and per-handler `HandlerTimeout` with a configurable `HandlerTimeoutVerdict`
+- **Consumer** — `ConsumerFor[M]`, prefetch, concurrency, handler error mapping (`ErrRequeue`), re-subscribe loop, `ConsumeRaw`; `MaxRedeliveries` (quorum `DeliveryLimit` + `x-death` + in-process counters) and per-handler `HandlerTimeout` with a configurable `HandlerTimeoutVerdict`; opt-in `AutoAck()` (at-most-once no-ack, with a sampled drop-warning when handlers error)
 - **Batch** — `Publisher.PublishBatch` (always-all, single-channel, `[]PublishResult` + `ErrBatchTooLarge`) and `BatchConsumerFor[M]` with size- and timer-based flush triggers and `multiple=true` acking
 - **Codec** — lax JSON by default (Postel's Law — unknown fields are tolerated so producer-first deploys do not poison v1 DLQs); opt-in `codec.NewJSONStrict()`; `codec.NewProtobuf()`; CloudEvents in both `codec.NewCloudEventsStructured()` and `codec.NewCloudEventsBinary()` modes (AMQP protocol binding via the `HeaderCodec` interface)
 - **Errors** — AMQP reply-code sentinels, `AMQPCode`, transient/permanent classifiers
@@ -182,7 +182,7 @@ Warren is built with "production-first" principles, embedding several reliabilit
 ### On the roadmap (`v0.1.0`)
 
 - **Consumer cancellation** — `OnCancel(func(reason))` callback + `consumer_cancelled_total` metric for broker `basic.cancel`
-- **Production hardening** — TLS / `amqps://`, SASL EXTERNAL (mTLS), remaining connection options, panic isolation for user callbacks, `AutoAck()` opt-in
+- **Production hardening** — TLS / `amqps://`, SASL EXTERNAL (mTLS), remaining connection options, panic isolation for user callbacks
 - **Tooling** — `amqpmock/`, `amqptest/` (testcontainers), conformance suite, chaos/reconnect benchmarks
 
 See [`tasks/todo.md`](tasks/todo.md) for the live checklist.

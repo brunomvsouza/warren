@@ -925,14 +925,35 @@ run in a goroutine to avoid blocking the event-loop that dispatches them.
   - **I-1 (Important) — `WithOnResubscribe` panic isolation.** The sixth user callback (added in T34) was the only one not recover-guarded; a panic in it crashed the supervisor goroutine. Closed by recover-guarding it inside `notifyResubscribed` (signature changed to `notifyResubscribed(mc, cm, queue)` so the seam can reach `mc.recoverCallback`). This is the same log-and-continue class as the other five user callbacks and is NOT gated by T143/CG-5 (no socket-degrade metric involved — the subscription is already installed when it fires). Tests: `TestNotifyResubscribed_panickingCallback_recoversAndLogs_metricStillRecorded`, plus the two existing `notifyResubscribed` seam tests updated to the new signature.
   - **Nit — T33 `dialCursor` unbounded increment.** `nextDialAddr` advanced the round-robin cursor with `dialCursor++` (grew without bound; after `MaxInt` reconnects it would overflow into a negative index and panic). Changed to `dialCursor = (dialCursor + 1) % len(addrs)` so the cursor stays within `[0, len)`. Observable address sequence is unchanged (all T33 rotation tests still pass); added `TestNextDialAddr_cursorStaysBounded` as a regression guard. **Verified:** unit `-race` green (root cov 79.6%), integration lane `-race` green (30.4s), examples smoke `-race` green, lint 0 issues, build green, gofmt clean.
 
-### [ ] T35 — `AutoAck()` opt-in + warning · S
+### [x] T35 — `AutoAck()` opt-in + warning · S
 - **Acceptance:**
-  - [ ] `ConsumerBuilder.AutoAck()` enables the AMQP `no-ack` flag.
-  - [ ] godoc on the method contains the four-bullet warning from SPEC §6.3 verbatim.
-  - [ ] Consumer with `AutoAck` does not call `Ack/Nack`; handler errors are logged as warnings (with sample suppression).
+  - [x] `ConsumerBuilder.AutoAck()` enables the AMQP `no-ack` flag.
+  - [x] godoc on the method contains the four-bullet warning from SPEC §6.3 verbatim.
+  - [x] Consumer with `AutoAck` does not call `Ack/Nack`; handler errors are logged as warnings (with sample suppression).
 - **Verify:** Integration test that publishes 100 messages, AutoAck consumer crashes mid-stream, restarts → asserts that previously-streamed messages are gone (demonstrating the trade-off, not a regression).
 - **Files:** edits to `consumer.go`, `consumer_builder.go`, `consumer_autoack_integration_test.go`.
 - **Deps:** T18.
+- **Done:** `AutoAck()` stores a `brokerAutoAck` flag (distinct from the dispatch
+  `autoAck` param, which only selects Consume vs ConsumeRaw); the flag is passed
+  as the `basic.consume` no-ack argument in `openDeliveryCh`. The method godoc
+  carries the §6.3 four-bullet warning verbatim. Under `brokerAutoAck` the whole
+  ack machinery is bypassed: counter A is skipped (it would Nack), counter B keys
+  are not built, the decode-error path drops instead of Nacking, the timeout path
+  records the would-be verdict label without Nacking, and a new shared
+  `settleVerdict` seam (factored out of the duplicated fast/timeout verdict blocks)
+  issues no Ack/Nack — a non-nil handler error (or a decode failure) degrades to a
+  rate-limited warning via `logAutoAckDrop` + the `dropSampler` (first occurrence
+  then 1-in-`defaultAutoAckLogEvery`=100; the error is reported by closed-vocab
+  type only, never its message — SPEC §8). **Verify** = `consumer_autoack_integration_test.go`:
+  100 published, an AutoAck consumer stalls on the first delivery, the broker
+  drains all 100 anyway (no backpressure) with `entered==1`, the consumer is
+  stopped, and a restarted manual-ack consumer receives **zero** (at-most-once
+  loss proven via `require.Never`). Unit coverage in `consumer_autoack_test.go`
+  (no-ack/no-nack, sampled-warning suppression, decode-drop, `dropSampler`) +
+  builder flag tests in `consumer_builder_misc_test.go`. README: `AutoAck()` moved
+  from the roadmap into the Consumer "Available now" line. **Verified:** unit
+  `-race` green (root cov 79.7%), integration lane `-race` green (31.3s),
+  examples-smoke `-race` green, lint 0 issues, build + gofmt clean.
 
 ### [ ] T36 — Remaining consumer options · S
 SPEC compliance reminder: **`NoLocal()` is intentionally omitted** (SPEC
@@ -977,7 +998,7 @@ subpackage so downstream applications can reuse the fixture.
 ### Checkpoint — Phase 8 done
 - [ ] mTLS + cluster failover green.
 - [ ] All Connection/Consumer/BatchConsumer options surfaced.
-- [ ] AutoAck warning documented and demonstrated.
+- [x] AutoAck warning documented and demonstrated.
 - [ ] Mocks usable downstream.
 - [ ] **Review with human before Phase 9.**
 

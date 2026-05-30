@@ -25,6 +25,7 @@ type ConsumerBuilder[M any] struct {
 	channelQoS  bool
 	priority    int
 	prioritySet bool
+	autoAck     bool
 
 	handlerTimeout time.Duration
 	timeoutVerdict TimeoutVerdict
@@ -128,10 +129,30 @@ func (b *ConsumerBuilder[M]) Tracer(t otel.Tracer) *ConsumerBuilder[M] {
 // NOTE: full implementation is in T36; the flag is stored here.
 func (b *ConsumerBuilder[M]) Exclusive() *ConsumerBuilder[M] { return b }
 
-// AutoAck opts into broker-side auto-acknowledgement. Use with caution: messages
-// are considered delivered as soon as the broker sends them and cannot be nacked.
-// NOTE: full implementation is in T35; the flag is stored here.
-func (b *ConsumerBuilder[M]) AutoAck() *ConsumerBuilder[M] { return b }
+// AutoAck enables the AMQP no-ack flag on basic.consume, which tells the broker
+// to consider every delivery already acknowledged before the client sees it.
+// This is a real AMQP feature, exposed for protocol fidelity, but it changes
+// critical semantics:
+//
+//   - Handler error semantics are bypassed. nil/error/ErrRequeue/ErrPoison
+//     returns all become no-ops. A handler that panics or errors silently drops
+//     the message.
+//   - No redelivery on consumer crash. If the consumer dies mid-handle, the
+//     broker has already removed the message; it will not be redelivered to
+//     another consumer. Use only when at-most-once delivery is acceptable.
+//   - No backpressure via prefetch. With AutoAck, prefetch loses its ack-gating
+//     effect. The broker streams as fast as the channel will carry, and slow
+//     handlers can OOM the consumer.
+//   - DLX / MaxRedeliveries do not engage. Both depend on Nacks the client never
+//     sends.
+//
+// Use AutoAck only for genuinely fire-and-forget streams (e.g., high-volume
+// telemetry where occasional drops are acceptable). For everything else, leave
+// it off and let the error-driven semantics work.
+func (b *ConsumerBuilder[M]) AutoAck() *ConsumerBuilder[M] {
+	b.autoAck = true
+	return b
+}
 
 // Args sets extra queue-consume arguments forwarded in basic.consume.
 // NOTE: full implementation is in T36.

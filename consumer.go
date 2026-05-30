@@ -228,11 +228,20 @@ type Consumer[M any] struct {
 	queue string
 	tag   string
 
-	concurrency    uint
-	prefetch       uint16
-	channelQoS     bool
-	priority       int
-	prioritySet    bool
+	concurrency uint
+	prefetch    uint16
+	channelQoS  bool
+	priority    int
+	prioritySet bool
+
+	// brokerAutoAck issues basic.consume with the AMQP no-ack flag (AutoAck()).
+	// This is DISTINCT from the dispatch `autoAck` parameter, which only selects
+	// the Consume (library applies the verdict) vs ConsumeRaw (handler applies it)
+	// path. brokerAutoAck=true means the BROKER already acked on dispatch, so the
+	// library issues no ack/nack at all and a handler error degrades to a sampled
+	// warning (SPEC §6.3 "handler error semantics are bypassed").
+	brokerAutoAck bool
+
 	handlerTimeout time.Duration
 	timeoutVerdict TimeoutVerdict
 
@@ -252,6 +261,11 @@ type Consumer[M any] struct {
 	// msgType is the message_type metrics label value (Go type name of M),
 	// computed once at build time.
 	msgType string
+
+	// autoAckDropLog rate-limits the "message dropped" warning emitted under
+	// brokerAutoAck when a handler errors or a payload fails to decode (the broker
+	// already acked, so there is nothing to nack). See dropSampler.
+	autoAckDropLog dropSampler
 
 	// mc is the consumer-role managed connection this consumer is pinned to.
 	mc *managedConn
@@ -300,6 +314,7 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 		channelQoS:       b.channelQoS,
 		priority:         b.priority,
 		prioritySet:      b.prioritySet,
+		brokerAutoAck:    b.autoAck,
 		handlerTimeout:   b.handlerTimeout,
 		timeoutVerdict:   b.timeoutVerdict,
 		maxRedeliveries:  b.maxRedeliveries,
@@ -315,6 +330,9 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 	// Initialise counterState with an empty map; openDeliveryCh rotates this on every
 	// channel open so "channel close resets counter B" holds without explicit cleanup.
 	c.counterState.Store(&redeliveryCounter{})
+	// Set the sampler interval in place (not via a struct literal) so the embedded
+	// atomic counter is never copied.
+	c.autoAckDropLog.every = defaultAutoAckLogEvery
 	return c
 }
 
@@ -496,7 +514,9 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 		args = amqp091.Table{"x-priority": c.priority}
 	}
 
-	deliveries, err := ch.Consume(c.queue, c.tag, false, false, false, false, args)
+	// The third argument is the AMQP no-ack flag: c.brokerAutoAck (AutoAck()) makes
+	// the broker treat every delivery as acknowledged on dispatch (SPEC §6.3).
+	deliveries, err := ch.Consume(c.queue, c.tag, c.brokerAutoAck, false, false, false, args)
 	if err != nil {
 		_ = ch.Close()
 		return deliverySub{}, fmt.Errorf("warren: consumer subscribe: %w", wrapAMQPError(err))
@@ -571,6 +591,12 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		// Record actual decode duration so the metric is meaningful even for
 		// large or slow-to-fail payloads (previously hardcoded to 0).
 		c.recordHandler("decode_error", time.Since(decodeStart))
+		if c.brokerAutoAck {
+			// No-ack: the broker already removed this message, so there is no nack
+			// to send and no DLX routing. Surface the silent drop as a sampled log.
+			c.logAutoAckDrop(err)
+			return
+		}
 		_ = raw.Nack(false, false)
 		return
 	}
@@ -603,7 +629,9 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 	// — Counter A (x-death, cross-process) ————————————————————————————
 	// Fires BEFORE calling the handler. Short-circuits without invoking the
 	// handler when the message has already bounced through DLX n+ times.
-	if c.maxRedeliveries > 0 && d.DeathCount() >= c.maxRedeliveries {
+	// Skipped under brokerAutoAck: redelivery bounding depends on Nacks the
+	// no-ack client never sends, and the short-circuit itself would Nack.
+	if !c.brokerAutoAck && c.maxRedeliveries > 0 && d.DeathCount() >= c.maxRedeliveries {
 		c.cm.RecordMaxRedeliveries(c.queue, "x-death")
 		c.mc.opts.logger.Warningf(
 			"warren: max redeliveries exceeded for queue %q (cause=x-death, death_count=%d, limit=%d)",
@@ -622,7 +650,7 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 	// Key families: see redeliveryCounter struct comment.
 	var counterBKey string
 	var cs *redeliveryCounter
-	if autoAck && c.maxRedeliveries > 0 && !c.counterBDisabled {
+	if autoAck && !c.brokerAutoAck && c.maxRedeliveries > 0 && !c.counterBDisabled {
 		cs = c.counterState.Load()
 		if raw.MessageId != "" {
 			// Stable key: MessageID persists across redeliveries → counter accumulates correctly.
@@ -660,16 +688,7 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 			finishConsumeSpan(span, outcomeChannelClosed, ErrChannelClosed)
 			return // no ack — broker will redeliver
 		}
-		if autoAck {
-			processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
-			c.recordHandler(handlerOutcome(processedErr), elapsed)
-			finishConsumeSpan(span, consumeVerdictOutcome(processedErr), processedErr)
-			_ = d.AckIf(processedErr)
-		} else {
-			// ConsumeRaw: handler is responsible for ack/nack.
-			c.recordHandler("raw", elapsed)
-			finishConsumeSpan(span, consumeVerdictOutcome(handlerErr), handlerErr)
-		}
+		c.settleVerdict(d, span, cs, counterBKey, handlerErr, elapsed, autoAck)
 		return
 	}
 
@@ -696,15 +715,7 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 			finishConsumeSpan(span, outcomeChannelClosed, ErrChannelClosed)
 			return
 		}
-		if autoAck {
-			processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
-			c.recordHandler(handlerOutcome(processedErr), elapsed)
-			finishConsumeSpan(span, consumeVerdictOutcome(processedErr), processedErr)
-			_ = d.AckIf(processedErr)
-		} else {
-			c.recordHandler("raw", elapsed)
-			finishConsumeSpan(span, consumeVerdictOutcome(handlerErr), handlerErr)
-		}
+		c.settleVerdict(d, span, cs, counterBKey, handlerErr, elapsed, autoAck)
 
 	case <-chanDone: // nil channel: never selected when chanDone is nil
 		elapsed := time.Since(start)
@@ -720,8 +731,13 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 		case errors.Is(hCtx.Err(), context.DeadlineExceeded):
 			// HandlerTimeout fired.
 			c.cm.RecordHandlerTimeout(c.queue)
-			switch c.timeoutVerdict {
-			case TimeoutNackRequeue:
+			switch {
+			case c.brokerAutoAck:
+				// No-ack: the broker already acked on dispatch, so the timeout
+				// cannot nack. Record the would-be verdict label for parity with
+				// manual-ack observability; the message is silently dropped.
+				c.recordHandler("timeout_nack_no_requeue", elapsed)
+			case c.timeoutVerdict == TimeoutNackRequeue:
 				c.recordHandler("timeout_nack_requeue", elapsed)
 				_ = raw.Nack(false, true)
 			default:
@@ -845,6 +861,74 @@ func handlerOutcome(err error) string {
 		return "nack_requeue"
 	}
 	return "nack_no_requeue"
+}
+
+// settleVerdict finalises one delivery after the handler returns: it records the
+// handler metric and the span outcome, then settles the acknowledgement in one of
+// three modes (see the brokerAutoAck field for the autoAck-param vs brokerAutoAck
+// distinction):
+//
+//   - brokerAutoAck: the broker already acked on dispatch (AMQP no-ack), so no
+//     ack/nack is sent; a non-nil handler error is surfaced as a sampled warning
+//     (SPEC §6.3 "handler error semantics are bypassed").
+//   - autoAck (Consume path): apply counter B, then d.AckIf the resulting verdict.
+//   - neither (ConsumeRaw path): the handler owns the ack; record the "raw" label.
+func (c *Consumer[M]) settleVerdict(d *Delivery[M], span otel.Span, cs *redeliveryCounter, counterBKey string, handlerErr error, elapsed time.Duration, autoAck bool) {
+	if c.brokerAutoAck {
+		c.recordHandler(handlerOutcome(handlerErr), elapsed)
+		finishConsumeSpan(span, consumeVerdictOutcome(handlerErr), handlerErr)
+		if handlerErr != nil {
+			c.logAutoAckDrop(handlerErr)
+		}
+		return
+	}
+	if autoAck {
+		processedErr := c.applyCounterB(cs, counterBKey, handlerErr)
+		c.recordHandler(handlerOutcome(processedErr), elapsed)
+		finishConsumeSpan(span, consumeVerdictOutcome(processedErr), processedErr)
+		_ = d.AckIf(processedErr)
+		return
+	}
+	// ConsumeRaw: the handler is responsible for ack/nack.
+	c.recordHandler("raw", elapsed)
+	finishConsumeSpan(span, consumeVerdictOutcome(handlerErr), handlerErr)
+}
+
+// defaultAutoAckLogEvery is the sampling interval for the brokerAutoAck drop
+// warning: the first drop logs, then one in every defaultAutoAckLogEvery, so a
+// high-volume no-ack stream of failing handlers cannot flood the logs.
+const defaultAutoAckLogEvery uint64 = 100
+
+// logAutoAckDrop emits a rate-limited warning that a message was silently dropped
+// under brokerAutoAck (handler error or decode failure). The error is reported by
+// its closed-vocabulary type only — never its message — so a handler error that
+// embeds payload or PII cannot leak into the logs (SPEC §8).
+func (c *Consumer[M]) logAutoAckDrop(err error) {
+	if emit, total := c.autoAckDropLog.sample(); emit {
+		c.mc.opts.logger.Warningf(
+			"warren: AutoAck consumer for queue %q dropped a message (handler/decode error %s); nacks are no-ops under AutoAck (total dropped: %d)",
+			c.queue, consumeErrorType(err), total,
+		)
+	}
+}
+
+// dropSampler rate-limits a repeated warning. It emits the first occurrence and
+// then one in every `every` occurrences (every<=1 emits every time), reporting the
+// running total (logged + suppressed) so an operator can still gauge the drop rate.
+// Safe for concurrent use.
+type dropSampler struct {
+	every uint64
+	n     atomic.Uint64
+}
+
+// sample records one occurrence and reports whether it should be logged plus the
+// running total of occurrences observed so far.
+func (s *dropSampler) sample() (emit bool, total uint64) {
+	total = s.n.Add(1)
+	if s.every <= 1 {
+		return true, total
+	}
+	return (total-1)%s.every == 0, total
 }
 
 // safeDecodeConsumer decodes payload, recovering from codec panics per T09 contract.
