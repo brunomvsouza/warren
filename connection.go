@@ -465,8 +465,11 @@ func (opts *connOptions) dialAddrs() []string {
 // until a disconnect forces a fresh attempt, which then rotates to the next node.
 func (mc *managedConn) nextDialAddr() string {
 	addrs := mc.opts.dialAddrs()
-	addr := addrs[mc.dialCursor%len(addrs)]
-	mc.dialCursor++
+	addr := addrs[mc.dialCursor]
+	// Wrap within [0, len) on advance rather than incrementing without bound, so
+	// the cursor can never overflow int into a negative index (opts.addrs is
+	// read-only after Dial, so len is stable).
+	mc.dialCursor = (mc.dialCursor + 1) % len(addrs)
 	return addr
 }
 
@@ -967,10 +970,17 @@ func warrenVersion() string {
 // WithOnResubscribe callback after a consumer re-installs its subscription on
 // reconnect. Consumer and BatchConsumer funnel through this single seam so the
 // metric and the user callback stay paired.
-func notifyResubscribed(cm metrics.ConsumerMetrics, onResubscribe func(queue string), queue string) {
+//
+// The callback is recover-guarded (T34c parity): it runs inside the reconnect
+// barrier on the supervisor goroutine, where an unrecovered panic would crash
+// the process. The replacement subscription is already installed by the time
+// this fires, so a panicking callback degrades to a logged error and delivery
+// still resumes — identical handling to WithOnReconnect.
+func notifyResubscribed(mc *managedConn, cm metrics.ConsumerMetrics, queue string) {
 	cm.RecordResubscribed(queue)
-	if onResubscribe != nil {
-		onResubscribe(queue)
+	if mc.opts.onResubscribe != nil {
+		defer mc.recoverCallback("WithOnResubscribe")
+		mc.opts.onResubscribe(queue)
 	}
 }
 

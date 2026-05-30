@@ -485,3 +485,16 @@ func TestNextDialAddr_emptyAddrs_fallsBackToAddr(t *testing.T) {
 	assert.Equal(t, "amqp://only/", mc.nextDialAddr())
 	assert.Equal(t, "amqp://only/", mc.nextDialAddr())
 }
+
+// Regression (review Nit): the round-robin cursor must stay within
+// [0, len(addrs)) instead of incrementing without bound, so it can never
+// overflow int and wrap to a negative index after enough reconnects.
+func TestNextDialAddr_cursorStaysBounded(t *testing.T) {
+	addrs := []string{"amqp://a/", "amqp://b/", "amqp://c/"}
+	mc := &managedConn{opts: &connOptions{addrs: addrs}}
+	for range 10 {
+		_ = mc.nextDialAddr()
+		assert.GreaterOrEqual(t, mc.dialCursor, 0)
+		assert.Less(t, mc.dialCursor, len(addrs))
+	}
+}
