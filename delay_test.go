@@ -96,3 +96,18 @@ func TestPublisher_encodeMsg_AllowsDelayAtCeiling(t *testing.T) {
 
 	require.NoError(t, err)
 }
+
+// TestPublisher_encodeMsg_RejectsNegativeDelay asserts a negative Delay is rejected
+// symmetrically with the upper bound rather than silently publishing immediately:
+// buildPublishing's `Delay > 0` gate would otherwise drop a negative delay with no
+// error, a silent surprise for arithmetic that underflows. A sub-millisecond
+// magnitude rounds to 0 ms (no delay) and is therefore not rejected.
+func TestPublisher_encodeMsg_RejectsNegativeDelay(t *testing.T) {
+	p := &Publisher[int]{codec: codec.NewJSON()}
+	body := 7
+
+	_, _, err := p.encodeMsg(Message[int]{Body: &body, Delay: -5 * time.Second})
+
+	require.ErrorIs(t, err, ErrInvalidMessage)
+	assert.Contains(t, err.Error(), "Delay", "the error must name the offending field")
+}
