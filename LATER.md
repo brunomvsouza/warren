@@ -1139,3 +1139,17 @@ dependency for the doc reconciliation itself.
 
 **Prerequisites:** T42 / T151 (CI lane wiring).
 
+---
+
+### LATER-70 — Benchmark relative-regression gate is inert until a reference baseline is committed
+
+**Context:** `.github/workflows/bench.yml` (T44b) implements the Lens-10 TV-04 relative-regression gate as a `benchstat testdata/bench-baseline.txt bench.txt` comparison, but the comparison is guarded by `if [ -f testdata/bench-baseline.txt ]` and no baseline file is committed yet. The bench suite (`bench_*_test.go`, `//go:build bench`) currently MEASURES and REPORTS msg/s per classic+quorum queue; the absolute §9 targets (>=30k single-conn, >=100k multi-conn with 4 conns + pool 16, batch >=5x) are documented in the benchmark godoc as release-tag targets on reference hardware, not asserted, because shared-runner numbers cannot gate.
+
+**Impact:** Until a baseline exists, a throughput regression between releases is visible only by manually reading the job summary / artifact — nothing fails CI. The gate is scaffolding, not yet enforcing.
+
+**Evidence:** T44b implementation. TV-04 asks for a CI-gradeable relative gate; the mechanism is wired but the baseline (the thing it compares against) is deferred because it must be captured on the named reference runner, not an author laptop.
+
+**Suggested solution:** Capture `testdata/bench-baseline.txt` on the stated reference runner class (e.g. the nightly `ubuntu-latest` bench job, `-count>=6`), commit it, and add a threshold step that fails when benchstat reports a regression beyond X% (e.g. p<0.05 and delta > +10%) on the headline `msg/s` metric. Refresh the baseline deliberately on each release tag, like any other pinned artifact.
+
+**Prerequisites:** T44b (this suite) + one green run of `.github/workflows/bench.yml` on the reference runner to source the baseline numbers. Capstone classification is T152.
+
