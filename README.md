@@ -8,7 +8,7 @@
 
 Warren wraps [`github.com/rabbitmq/amqp091-go`](https://github.com/rabbitmq/amqp091-go) with a type-safe API and a **hardened operational layer** built for high-scale reliability. It embeds the "SRE batteries" every production team needs: supervised reconnect with publisher confirms, centralized topology declaration, pluggable codecs, channel pooling across role-split TCP connections, **intelligent error classification (transient vs. permanent)**, **safety guardrails (credential redaction, fail-fast validation, payload caps)**, and native observability (logging, Prometheus, OpenTelemetry).
 
-> **Current Status:** Active development toward [`v0.1.0`](SPEC.md). Implementation follows [`tasks/plan.md`](tasks/plan.md). **Connection**, **Publisher**, **Topology**, **Consumer** (with `MaxRedeliveries` + handler timeouts), **batch publish/consume**, the **JSON / Protobuf / CloudEvents codecs**, and **end-to-end OpenTelemetry tracing** (publisher + consumer) are usable today; RPC, delayed-message helpers, and the test tooling are in progress.
+> **Current Status:** Active development toward [`v0.1.0`](SPEC.md). Implementation follows [`tasks/plan.md`](tasks/plan.md). **Connection**, **Publisher**, **Topology**, **Consumer** (with `MaxRedeliveries` + handler timeouts), **batch publish/consume**, the **JSON / Protobuf / CloudEvents codecs**, **end-to-end OpenTelemetry tracing** (publisher + consumer), and the **RPC + delayed-message patterns** are usable today; the test tooling is in progress.
 
 [![CI](https://github.com/brunomvsouza/warren/actions/workflows/ci.yml/badge.svg)](https://github.com/brunomvsouza/warren/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/brunomvsouza/warren)](https://goreportcard.com/report/github.com/brunomvsouza/warren)
@@ -176,12 +176,12 @@ Warren is built with "production-first" principles, embedding several reliabilit
 - **Codec** — lax JSON by default (Postel's Law — unknown fields are tolerated so producer-first deploys do not poison v1 DLQs); opt-in `codec.NewJSONStrict()`; `codec.NewProtobuf()`; CloudEvents in both `codec.NewCloudEventsStructured()` and `codec.NewCloudEventsBinary()` modes (AMQP protocol binding via the `HeaderCodec` interface)
 - **Errors** — AMQP reply-code sentinels, `AMQPCode`, transient/permanent classifiers
 - **Observability** — pluggable `log.Logger`, Prometheus metrics (default), OpenTelemetry tracer + W3C propagation helpers; **publisher** spans inject trace context into AMQP headers before the frame is written and **consumer** spans extract it on the other side, so continuity survives DLX bounces (the broker preserves headers verbatim); `BatchConsumer` spans carry one Link per message
-- **Examples** — [`examples/publish`](examples/publish/main.go), [`examples/consume`](examples/consume/main.go), [`examples/topology`](examples/topology/main.go), [`examples/deadletter`](examples/deadletter/main.go), [`examples/batch_publish`](examples/batch_publish/main.go), [`examples/batch_consume`](examples/batch_consume/main.go)
+- **Patterns** — RPC over direct reply-to (`CallerFor[Req, Resp]` + `ReplierFor[Req, Resp]`, at-least-once replies deduped by `CorrelationID`, DLX-on-request-queue validation); delayed publish via `Message[M].Delay` + the `DelayedTopic` helper for the `x-delayed-message` plugin
+- **Examples** — [`examples/publish`](examples/publish/main.go), [`examples/consume`](examples/consume/main.go), [`examples/topology`](examples/topology/main.go), [`examples/deadletter`](examples/deadletter/main.go), [`examples/batch_publish`](examples/batch_publish/main.go), [`examples/batch_consume`](examples/batch_consume/main.go), [`examples/rpc`](examples/rpc/main.go), [`examples/delayed`](examples/delayed/main.go)
 
 ### On the roadmap (`v0.1.0`)
 
 - **Consumer cancellation** — `OnCancel(func(reason))` callback + `consumer_cancelled_total` metric for broker `basic.cancel`
-- **Patterns** — RPC (`Caller`/`Replier` over direct reply-to), delayed-message exchange helpers
 - **Production hardening** — TLS / `amqps://`, multi-address cluster failover, SASL EXTERNAL (mTLS), remaining connection options, panic isolation for user callbacks, `AutoAck()` opt-in
 - **Tooling** — `amqpmock/`, `amqptest/` (testcontainers), conformance suite, chaos/reconnect benchmarks
 
@@ -199,6 +199,8 @@ See [`tasks/todo.md`](tasks/todo.md) for the live checklist.
 | [`examples/deadletter`](examples/deadletter/main.go) | Dead-letter exchange / queue wiring |
 | [`examples/batch_publish`](examples/batch_publish/main.go) | `PublishBatch` always-all, `[]PublishResult`, `ErrBatchTooLarge` |
 | [`examples/batch_consume`](examples/batch_consume/main.go) | `BatchConsumerFor[M]` with `Size` + `FlushAfter` triggers and `multiple=true` ack |
+| [`examples/rpc`](examples/rpc/main.go) | Request/reply via `CallerFor`/`ReplierFor` over direct reply-to: concurrent calls demuxed by `CorrelationID`, DLX on the request queue, `ErrCallTimeout` |
+| [`examples/delayed`](examples/delayed/main.go) | Delayed delivery via `Message[M].Delay` + `DelayedTopic` against the `x-delayed-message` plugin |
 
 ```bash
 # Build all examples (no broker required)
