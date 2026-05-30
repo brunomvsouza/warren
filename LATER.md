@@ -1008,28 +1008,48 @@ phase is tackled first.
 
 ---
 
-### LATER-63 — Bump `golang.org/x/sys` and gate dependencies with `govulncheck` in CI
+### LATER-64 — Reconcile the Phase 9 CI Go-matrix planning docs with the new 1.25 baseline
 
-**Context:** `govulncheck ./...` during the Phase 6 `/ship` security audit (2026-05-29) reported GO-2026-5024 — an
-integer overflow in `NewNTUnicodeString` in `golang.org/x/sys` (current transitive pin `v0.35.0`), fixed in
-`golang.org/x/sys@v0.44.0`. The advisory is **Windows-only** and `govulncheck` confirms warren's code does not call the
-affected symbol (it is an uncalled transitive dependency). There is no `go.mod`/`go.sum` change in the Phase 6 commit
-range, so this pre-dates the change set. Separately, `govulncheck` is not currently wired into the CI lane, so dependency
-CVEs are not gated automatically.
+**Context:** Resolving LATER-63 raised warren's minimum Go from 1.23 to 1.25 and amended the *living*
+contract accordingly (SPEC §2 Tech Stack, §9 success criterion, §10 decision 6, README, GEMINI,
+CLAUDE). The *planning* docs for the not-yet-implemented Phase 9 CI work still describe the old
+`Go matrix (1.23, 1.24)`: `tasks/plan.md` (T42, T150, T151 and their VG-1..VG-6 gate references),
+`tasks/todo.md` (the T42 checkbox and the VG-1/VG-3 ground-truth rows), and the dated lens brief
+`spec-validation/10-test-strategy-verifiability-plan.md` (TV-07 "Go 1.24 not in the CI matrix",
+plus several "Go 1.23 only" CI-reality observations).
 
-**Impact:** None for warren's own code paths today (uncalled, platform-specific). The risk is latent: a future code path
-(or a downstream consumer on Windows) could reach the affected symbol, and without a CI gate a genuinely-called CVE in a
-future dependency bump would land unnoticed. OWASP A06 (Vulnerable & Outdated Components) — informational.
+**Impact:** Low and bounded. The dated `spec-validation/*.md` briefs are **historical review
+records** — at review time (2026-05-28/29) CI genuinely ran 1.23 only, so rewriting them would
+falsify the record; they should stay as-is. The `tasks/plan.md`/`tasks/todo.md` matrix references
+are forward-looking specs for unstarted work, so the only real risk is that whoever implements
+Phase 9 (T42/T150/T151) builds a 1.23/1.24 matrix that contradicts the 1.25 floor this PR set. No
+runtime or contract impact today (Phase 9 CI matrix does not exist yet).
 
-**Evidence:** Phase 6 `/ship` security audit, 2026-05-29 (security-auditor finding INFO-2). Deferred out of the Phase 6
-range to keep dependency hygiene separate from the observability/codec hardening (CLAUDE.md scope discipline).
+**Evidence:** Surfaced while resolving LATER-63 (2026-05-29). Deferred to keep that PR's blast
+radius on the *contract* (SPEC/README/CI build version) rather than silently rewriting large,
+cross-referenced planning blocks and dated historical briefs.
 
-**Suggested solution:** (1) a standalone `go get -u golang.org/x/sys@v0.44.0` (or later) + `go mod tidy` commit, verified
-with `govulncheck ./...` reporting clean; (2) add a `govulncheck` step to `.github/workflows/ci.yml` as a (initially
-advisory, then required) gate — coordinate with the Phase 9 CI-gate work (T38).
+**Suggested solution:** When Phase 9 (T42/T150/T151) is picked up, update the matrix floor in
+`tasks/plan.md` + `tasks/todo.md` from `1.23/1.24` to the then-current Go-team-supported minors
+(1.25/1.26 today), and resolve the TV-07 finding against the real matrix. Leave the dated
+`spec-validation/10-*.md` brief intact as a historical artifact (or add a dated addendum noting the
+floor moved), rather than rewriting its review-time observations.
 
-**Prerequisites:** none for the dependency bump (standalone hygiene). The CI gate coordinates with T38 (Phase 9 CI
-required-gates wiring).
+**Prerequisites:** Coordinates with T42/T150/T151 (Phase 9 CI matrix + verification gates). No
+dependency for the doc reconciliation itself.
+
+---
+
+<!-- LATER-63 resolved (LATER-63 — Go 1.25 baseline + govulncheck gate): bumped golang.org/x/sys
+     v0.35.0 → v0.44.0 (the only version carrying the GO-2026-5024 fix), which raised the module's
+     go directive 1.23.0 → 1.25.0; govulncheck ./... now reports "No vulnerabilities found." The
+     1.25 floor cascaded to .github/workflows/ci.yml (go-version 1.23 → 1.25), SPEC §2/§9/§10 dec 6
+     (matrix floor 1.23 → 1.25; "currently 1.25 and 1.26"), README.md, GEMINI.md, CLAUDE.md. Added a
+     pinned `make vuln` target (govulncheck@v1.3.0, GOVULNCHECK_VERSION-overridable) and a
+     "Vulnerability scan" CI job that runs it — anticipating the Phase 9 T38 required-gates wiring.
+     The gate fails only on a vulnerability warren's code actually calls (default symbol scan); an
+     uncalled/transitive advisory is reported but does not break the build. Phase 9 planning-doc
+     reconciliation (T42/T150/T151 still naming the 1.23/1.24 matrix) is tracked as LATER-64. -->
 
 ---
 

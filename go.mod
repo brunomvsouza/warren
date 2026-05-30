@@ -1,6 +1,6 @@
 module github.com/brunomvsouza/warren
 
-go 1.23.0
+go 1.25.0
 
 require (
 	github.com/cloudevents/sdk-go/v2 v2.16.2
@@ -29,6 +29,6 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/sys v0.35.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

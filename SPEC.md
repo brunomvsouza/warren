@@ -108,7 +108,7 @@ Go developers building message-driven systems against RabbitMQ.
 
 | Component       | Choice                                             |
 | --------------- | -------------------------------------------------- |
-| Language        | Go **1.23+**                                       |
+| Language        | Go **1.25+**                                       |
 | Module path     | `github.com/brunomvsouza/warren`                     |
 | Repo            | `github.com/brunomvsouza/warren` (working dir)      |
 | AMQP transport  | `github.com/rabbitmq/amqp091-go` (BSD-2-Clause)    |
@@ -2474,8 +2474,8 @@ Functional:
 - [ ] Every API in §6 compiles, has godoc, is exercised by at least one
       test.
 - [ ] `go test -race ./...` passes on **every Go minor version released
-      and still supported by the Go team from 1.23 onward** (currently
-      1.23 and 1.24; nightly when a new minor lands).
+      and still supported by the Go team from 1.25 onward** (currently
+      1.25 and 1.26; nightly when a new minor lands).
 - [ ] Integration suite passes against RabbitMQ 3.13 LTS and 4.x.
 - [ ] Conformance suite passes (Direct, Fanout, Topic, Headers,
       delayed-message exchanges; Quorum and Classic queues).
@@ -2636,9 +2636,11 @@ the next reader so the rationale survives the conversation:
    all success criteria are checked.
 
 6. **CI Go matrix: every push runs the full matrix of every Go minor
-   version still supported by the Go team, starting at 1.23.**
-   Currently that means 1.23 and 1.24; widens automatically as 1.25+
-   land. No "only minimum on push, matrix nightly" split.
+   version still supported by the Go team, starting at 1.25.**
+   Currently that means 1.25 and 1.26; widens automatically as 1.27+
+   land. No "only minimum on push, matrix nightly" split. The floor
+   moved from 1.23 to 1.25 when the `golang.org/x/sys` bump to v0.44.0
+   (the GO-2026-5024 fix, LATER-63) raised the minimum toolchain.
 
 7. **`internal/` is strictly internal.** No re-export from the root
    package. If a type is genuinely needed by external callers, it
