@@ -2302,7 +2302,15 @@ value.
 
 Integration test that disconnects the broker mid-publish and
 mid-consume, asserts:
-- No message loss with confirms over a 60s outage at 1k msg/s.
+- No message loss with confirms over a **5-minute outage at 10k
+  msg/s** (the nightly/release-candidate intensity; CI runs a scaled
+  duration via `WARREN_CHAOS_DURATION`). "No loss" is measured as the
+  **published-set minus the consumed-set, deduplicated by
+  `MessageID`** — at-least-once **duplicates** (produced by
+  `PublishRetry` and the reconnect barrier) are tolerated; only a
+  message that is never consumed counts as loss. The loss accounting
+  carries a VG-6 injected-drop self-test so a green run cannot mean
+  "the harness can't see loss".
 - No goroutine leak (`goleak.VerifyNone(t)`).
 - Topology re-declared on reconnect when `AttachTo` is used.
 
@@ -2325,8 +2333,10 @@ checks use a test AMQP server stub.
 
 - All tests run with `-race`.
 - `goleak` checks at end of every test that starts goroutines.
-- Nightly 100x stress loop of connect/disconnect cycles to surface
-  goroutine leaks under realistic timing.
+- Nightly **1000-cycle** stress loop of connect/disconnect +
+  confirm churn to surface goroutine leaks under realistic timing
+  (`goleak.VerifyNone`); CI runs a smaller cycle count, dialed up to
+  1000 via `WARREN_CHAOS_CHURN_CYCLES`.
 
 ### Executable examples at checkpoints
 
