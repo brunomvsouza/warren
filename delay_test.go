@@ -1,11 +1,14 @@
 package warren
 
 import (
+	"math"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/brunomvsouza/warren/codec"
 )
 
 // TestDelayedTopic_constructsValidExchangeLiteral asserts the helper builds the
@@ -63,4 +66,33 @@ func TestBuildPublishing_Delay_doesNotMutateCallerHeaders(t *testing.T) {
 	_, leaked := original["x-delay"]
 	assert.False(t, leaked, "x-delay must not leak back into the caller's Headers map")
 	assert.Len(t, original, 1, "the caller's Headers map must be unchanged")
+}
+
+// TestPublisher_encodeMsg_RejectsDelayOverflow asserts a Delay beyond the x-delay
+// ceiling (signed 32-bit milliseconds, ~24.8 days) is rejected client-side with
+// ErrInvalidMessage. Without the guard, int32(Delay.Milliseconds()) wraps to a
+// negative x-delay and the broker would deliver immediately/undefined — a silent
+// correctness footgun (see buildPublishing and Message.Delay).
+func TestPublisher_encodeMsg_RejectsDelayOverflow(t *testing.T) {
+	p := &Publisher[int]{codec: codec.NewJSON()}
+	body := 7
+	overflow := time.Duration(math.MaxInt32+1) * time.Millisecond
+
+	_, _, err := p.encodeMsg(Message[int]{Body: &body, Delay: overflow})
+
+	require.ErrorIs(t, err, ErrInvalidMessage)
+	assert.Contains(t, err.Error(), "Delay", "the error must name the offending field")
+}
+
+// TestPublisher_encodeMsg_AllowsDelayAtCeiling asserts the exact ceiling
+// (math.MaxInt32 ms) is still accepted — the boundary is inclusive, so the largest
+// delay the plugin supports round-trips without tripping the overflow guard.
+func TestPublisher_encodeMsg_AllowsDelayAtCeiling(t *testing.T) {
+	p := &Publisher[int]{codec: codec.NewJSON()}
+	body := 7
+	atCeiling := time.Duration(math.MaxInt32) * time.Millisecond
+
+	_, _, err := p.encodeMsg(Message[int]{Body: &body, Delay: atCeiling})
+
+	require.NoError(t, err)
 }

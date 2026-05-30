@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -564,6 +565,15 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 
 	if msg.Body == nil {
 		return msg, nil, fmt.Errorf("%w: Body must not be nil", ErrInvalidMessage)
+	}
+
+	// Client-side Delay validation: x-delay is a signed 32-bit millisecond count
+	// (see buildPublishing). A Delay beyond that ceiling (~24.8 days, the plugin's
+	// own maximum) would overflow int32 to a negative value and be delivered
+	// immediately/undefined — reject it locally instead of emitting a corrupt header.
+	if msg.Delay.Milliseconds() > math.MaxInt32 {
+		return msg, nil, fmt.Errorf("%w: Delay %s exceeds the x-delay ceiling of %d ms (~24.8 days)",
+			ErrInvalidMessage, msg.Delay, int64(math.MaxInt32))
 	}
 
 	body, ceHeaders, ceContentType, err := safeEncodeBody(p.codec, msg.Body)
