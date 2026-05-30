@@ -177,12 +177,13 @@ Warren is built with "production-first" principles, embedding several reliabilit
 - **Errors** — AMQP reply-code sentinels, `AMQPCode`, transient/permanent classifiers
 - **Observability** — pluggable `log.Logger`, Prometheus metrics (default), OpenTelemetry tracer + W3C propagation helpers; **publisher** spans inject trace context into AMQP headers before the frame is written and **consumer** spans extract it on the other side, so continuity survives DLX bounces (the broker preserves headers verbatim); `BatchConsumer` spans carry one Link per message
 - **Patterns** — RPC over direct reply-to (`CallerFor[Req, Resp]` + `ReplierFor[Req, Resp]`, at-least-once replies deduped by `CorrelationID`, DLX-on-request-queue validation); delayed publish via `Message[M].Delay` + the `DelayedTopic` helper for the `x-delayed-message` plugin
+- **Testing** — [`amqpmock/`](amqpmock/) gomock mocks for the public interfaces (`codec.Codec`, `log.Logger`, the metrics interfaces, `otel.Tracer`/`Span`) plus gomock-free `Delivery[M]`/`Batch[M]` fixtures (`warren.NewDeliveryFixture`/`NewBatchFixture`, re-exported as `amqpmock.NewDelivery`/`NewBatch`); [`amqptest/`](amqptest/README.md) public testcontainers helper — `NewRabbitMQ(t)` with the delayed-message + `auth_mechanism_ssl` plugins, three plugin-enablement modes, opt-in `WithTLS()` + embedded certs. The root package stays free of gomock/testcontainers at runtime
 - **Examples** — [`examples/publish`](examples/publish/main.go), [`examples/consume`](examples/consume/main.go), [`examples/topology`](examples/topology/main.go), [`examples/deadletter`](examples/deadletter/main.go), [`examples/batch_publish`](examples/batch_publish/main.go), [`examples/batch_consume`](examples/batch_consume/main.go), [`examples/rpc`](examples/rpc/main.go), [`examples/delayed`](examples/delayed/main.go)
 
 ### On the roadmap (`v0.1.0`)
 
 - **Production hardening** — TLS / `amqps://`, SASL EXTERNAL (mTLS), remaining connection options, panic isolation for user callbacks
-- **Tooling** — `amqpmock/`, `amqptest/` (testcontainers), conformance suite, chaos/reconnect benchmarks
+- **Tooling** — conformance suite, chaos/reconnect benchmarks
 
 See [`tasks/todo.md`](tasks/todo.md) for the live checklist.
 
