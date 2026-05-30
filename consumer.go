@@ -45,8 +45,10 @@ const (
 // vocabulary (consumeErrorType) rather than err.Error() — which reaches the trace
 // backend verbatim via the span status and the exception event. The recorded error
 // still unwraps to the original so errors.Is-based backends keep the sentinel
-// chain. Publisher spans keep err.Error() because publish errors are framework /
-// broker diagnostics, never handler- or payload-derived (see finishPublishSpan).
+// chain. finishPublishSpan applies the same redaction to its one payload-derived
+// class (the codec-encode ErrInvalidMessage) and keeps err.Error() only for
+// broker/framework diagnostics, which carry no message content (see
+// finishPublishSpan).
 func finishConsumeSpan(span otel.Span, outcome string, err error) {
 	span.SetAttributes(attribute.String("messaging.rabbitmq.outcome", outcome))
 	if err == nil {

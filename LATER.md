@@ -1008,6 +1008,31 @@ phase is tackled first.
 
 ---
 
+### LATER-63 — Bump `golang.org/x/sys` and gate dependencies with `govulncheck` in CI
+
+**Context:** `govulncheck ./...` during the Phase 6 `/ship` security audit (2026-05-29) reported GO-2026-5024 — an
+integer overflow in `NewNTUnicodeString` in `golang.org/x/sys` (current transitive pin `v0.35.0`), fixed in
+`golang.org/x/sys@v0.44.0`. The advisory is **Windows-only** and `govulncheck` confirms warren's code does not call the
+affected symbol (it is an uncalled transitive dependency). There is no `go.mod`/`go.sum` change in the Phase 6 commit
+range, so this pre-dates the change set. Separately, `govulncheck` is not currently wired into the CI lane, so dependency
+CVEs are not gated automatically.
+
+**Impact:** None for warren's own code paths today (uncalled, platform-specific). The risk is latent: a future code path
+(or a downstream consumer on Windows) could reach the affected symbol, and without a CI gate a genuinely-called CVE in a
+future dependency bump would land unnoticed. OWASP A06 (Vulnerable & Outdated Components) — informational.
+
+**Evidence:** Phase 6 `/ship` security audit, 2026-05-29 (security-auditor finding INFO-2). Deferred out of the Phase 6
+range to keep dependency hygiene separate from the observability/codec hardening (CLAUDE.md scope discipline).
+
+**Suggested solution:** (1) a standalone `go get -u golang.org/x/sys@v0.44.0` (or later) + `go mod tidy` commit, verified
+with `govulncheck ./...` reporting clean; (2) add a `govulncheck` step to `.github/workflows/ci.yml` as a (initially
+advisory, then required) gate — coordinate with the Phase 9 CI-gate work (T38).
+
+**Prerequisites:** none for the dependency bump (standalone hygiene). The CI gate coordinates with T38 (Phase 9 CI
+required-gates wiring).
+
+---
+
 <!-- LATER-59 resolved: commit 810adb1 (Phase 6 validation) — finishPublishSpan now redacts the
      codec-encode / client-validation class (errors.Is(err, ErrInvalidMessage)) to the sentinel label
      on both the span status description and the recorded error, via the shared redactedSpanError
