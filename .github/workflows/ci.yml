@@ -12,8 +12,15 @@ concurrency:
 
 jobs:
   unit:
-    name: Unit tests
+    name: Unit tests (Go ${{ matrix.go }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # go.mod declares `go 1.25.0`, so 1.25 is the minimum buildable toolchain;
+        # the plan's 1.23/1.24 row predates that bump. Add newer majors here as
+        # they ship to keep the -race matrix honest (Lens-10 TV-07).
+        go: ["1.25"]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -21,7 +28,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.25"
+          go-version: ${{ matrix.go }}
 
       - name: Build
         run: make build
@@ -39,6 +46,57 @@ jobs:
 
       - name: Test (stress, determinism guard)
         run: make test-stress
+
+  coverage:
+    name: Coverage gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+
+      # Enforced, not reported: scripts/coverage.sh fails the job when any package
+      # is below 80% or a critical-path package/file is below 95% (SPEC §9 / Rev 7,
+      # Lens-10 TV-03). The per-package table is captured for the PR comment.
+      - name: Coverage gate (per-package >=80%, critical-path >=95%)
+        run: |
+          set -o pipefail
+          ./scripts/coverage.sh coverage.out 2>&1 | tee coverage-summary.txt
+
+      - name: Upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-profile
+          path: coverage.out
+          if-no-files-found: warn
+
+      - name: Comment coverage summary on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let summary = 'coverage-summary.txt was not produced';
+            try { summary = fs.readFileSync('coverage-summary.txt', 'utf8'); } catch (e) {}
+            const marker = '<!-- coverage-gate -->';
+            const body = `${marker}\n## Coverage gate\n\n\`\`\`\n${summary.trim()}\n\`\`\``;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
 
   integration:
     name: Integration tests
@@ -64,8 +122,22 @@ jobs:
       - name: Start RabbitMQ (delayed-plugin broker)
         run: make integration-up
 
-      - name: Integration tests (race)
-        run: make test-integration
+      # Mirrors `make test-integration` but with -v + a zero-run guard: if no
+      # integration test (a Test*_integration function) actually executed, the
+      # broker-required lane asserted nothing and the job must FAIL rather than
+      # pass green (Lens-10 TV-13). The integration tests themselves t.Fatal when
+      # AMQP_TEST_URL is unset, so this guards the regression where a test starts
+      # to t.Skip instead.
+      - name: Integration tests (race) + zero-run guard
+        run: |
+          set -o pipefail
+          go test -race -v -tags=integration ./... 2>&1 | tee integration.log
+          ran=$(grep -cE '^[[:space:]]*--- (PASS|FAIL): Test[A-Za-z0-9_/]*_integration' integration.log) || true
+          echo "integration tests executed: ${ran}"
+          if [ "${ran:-0}" -eq 0 ]; then
+            echo "::error::TV-13 guard: zero integration tests executed against the broker."
+            exit 1
+          fi
 
       - name: Examples smoke-run (race)
         run: make examples-smoke
