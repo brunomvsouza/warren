@@ -608,13 +608,15 @@ func TestConsumer_Consume_TimeoutPath_ChannelClose_AbortsWithoutAck(t *testing.T
 
 	ackOrNack := make(chan string, 1)
 	handlerStarted := make(chan struct{})
+	handlerUnblocked := make(chan struct{})
 
 	consumeDone := make(chan struct{})
 	go func() {
 		defer close(consumeDone)
 		_ = consumer.Consume(ctx, func(hCtx context.Context, _ string) error {
 			close(handlerStarted)
-			<-hCtx.Done() // block until ctx is cancelled (by cancelCause(ErrChannelClosed))
+			<-hCtx.Done() // unblocks ONLY via dispatch's cancelCause(ErrChannelClosed)
+			close(handlerUnblocked)
 			return hCtx.Err()
 		})
 	}()
@@ -629,9 +631,15 @@ func TestConsumer_Consume_TimeoutPath_ChannelClose_AbortsWithoutAck(t *testing.T
 
 	<-handlerStarted
 	close(doneCh) // signal channel close; dispatch must pick <-chanDone case
-	// cancel outer ctx and drain ConsumeRaw; wg.Wait ensures dispatch finishes
-	// and writes to channelAborts before consumeDone closes.
-	cancel()
+	// Wait until the handler unblocks. With the outer ctx still live and
+	// HandlerTimeout at 5s, dispatch's handler-ctx can only be cancelled here by the
+	// <-chanDone branch (cancelCause(ErrChannelClosed)), so this deterministically
+	// proves the select committed to <-chanDone (and recorded channelAborts) before
+	// we touch the outer ctx. Cancelling first let the select race <-chanDone against
+	// <-hCtx.Done(), intermittently taking the outer-cancel branch (no metric) — the
+	// CI flake "expected 1, actual 0".
+	<-handlerUnblocked
+	cancel() // now safe: dispatch is past the select; drain ConsumeRaw so Consume returns
 	<-consumeDone
 
 	select {
