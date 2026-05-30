@@ -78,8 +78,13 @@ jobs:
           path: coverage.out
           if-no-files-found: warn
 
+      # Same-repo PRs only: on fork PRs the GITHUB_TOKEN is read-only regardless of
+      # the permissions: block (GitHub's documented behavior for pull_request from
+      # forks), so issues.createComment would 403 and fail the whole coverage job.
+      # The gate step above still runs and enforces on every PR; only the cosmetic
+      # comment is skipped for forks.
       - name: Comment coverage summary on PR
-        if: always() && github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
         with:
           script: |
