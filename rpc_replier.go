@@ -147,9 +147,12 @@ func (r *Replier[Req, Resp]) Health(ctx context.Context) error {
 // pinned publisher-role connection. It lazily opens a confirm-enabled channel and
 // transparently reopens it after a channel close (reconnect).
 type replyPublisher struct {
-	mc             *managedConn
+	// openEntry opens a fresh confirm-enabled publisher entry, waiting out any
+	// reconnect barrier first. The production closure (set in Build) wraps the
+	// pinned publisher-role managedConn; unit tests inject a fake to drive the
+	// reopen-after-close path deterministically.
+	openEntry      func(ctx context.Context) (publisherEntry, error)
 	confirmTimeout time.Duration
-	poolSize       int
 
 	mu    sync.Mutex
 	entry publisherEntry
@@ -197,10 +200,7 @@ func (rp *replyPublisher) ensureEntryLocked(ctx context.Context) (publisherEntry
 			return rp.entry, nil
 		}
 	}
-	if err := rp.mc.waitBarrier(ctx); err != nil {
-		return publisherEntry{}, err
-	}
-	e, err := rp.mc.openPublisherEntry(rp.poolSize, nil)
+	e, err := rp.openEntry(ctx)
 	if err != nil {
 		return publisherEntry{}, err
 	}

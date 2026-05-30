@@ -150,11 +150,19 @@ func (b *ReplierBuilder[Req, Resp]) Build() (*Replier[Req, Resp], error) {
 		return nil, err
 	}
 
-	pubIdx := connIndexForTag(b.queue, b.conn.NumPubConns())
+	pubMC := b.conn.PubConnAt(connIndexForTag(b.queue, b.conn.NumPubConns()))
+	poolSize := b.conn.opts.channelPoolSize
 	replyPub := &replyPublisher{
-		mc:             b.conn.PubConnAt(pubIdx),
 		confirmTimeout: confirmTimeout,
-		poolSize:       b.conn.opts.channelPoolSize,
+		// openEntry waits out any reconnect barrier on the pinned publisher-role
+		// connection, then opens a fresh confirm-enabled channel. Folded into a
+		// closure so replyPublisher stays unit-testable via an injected fake.
+		openEntry: func(ctx context.Context) (publisherEntry, error) {
+			if err := pubMC.waitBarrier(ctx); err != nil {
+				return publisherEntry{}, err
+			}
+			return pubMC.openPublisherEntry(poolSize, nil)
+		},
 	}
 
 	return &Replier[Req, Resp]{
