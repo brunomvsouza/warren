@@ -33,6 +33,8 @@ type fakeCallerChannel struct {
 
 	echo          bool          // when true, every publish produces a matching reply
 	publishSignal chan struct{} // non-blocking notification per publish (nil = ignored)
+	qosPrefetch   int           // records the last basic.qos prefetch count
+	qosCalled     bool          // records whether Qos was invoked at all
 }
 
 type consumeArgs struct {
@@ -86,7 +88,19 @@ func (f *fakeCallerChannel) QueueDeclare(_ string, _, _, _, _ bool, _ amqp091.Ta
 	return amqp091.Queue{Name: "reply-q-fake"}, nil
 }
 
-func (f *fakeCallerChannel) Qos(int, int, bool) error { return nil }
+func (f *fakeCallerChannel) Qos(prefetch, _ int, _ bool) error {
+	f.mu.Lock()
+	f.qosPrefetch = prefetch
+	f.qosCalled = true
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeCallerChannel) snapshotQos() (prefetch int, called bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.qosPrefetch, f.qosCalled
+}
 
 func (f *fakeCallerChannel) NotifyClose(c chan *amqp091.Error) chan *amqp091.Error { return c }
 
@@ -243,4 +257,147 @@ func TestCallerBuilder_Build_Validations(t *testing.T) {
 		_, err := CallerFor[echoPayload, echoPayload](conn).Prefetch(10).Build()
 		assert.ErrorIs(t, err, ErrInvalidOptions)
 	})
+}
+
+// TestCaller_Call_ReopensSessionAfterChannelDeath proves the Caller's reconnect
+// recovery: after a channel death resolves an in-flight call with ErrChannelClosed,
+// the NEXT Call must transparently open a fresh session (re-subscribe) and succeed.
+// This is the entire reconnect story for RPC on the caller side — promised in the
+// Caller type docs but otherwise unverified.
+func TestCaller_Call_ReopensSessionAfterChannelDeath(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	fake1 := newFakeCallerChannel(false /* no echo: this session will die */)
+	fake1.publishSignal = make(chan struct{}, 1)
+	fake2 := newFakeCallerChannel(true /* echo: the reopened session round-trips */)
+	fakes := []*fakeCallerChannel{fake1, fake2}
+
+	var mu sync.Mutex
+	var opens int
+	c := &Caller[echoPayload, echoPayload]{
+		codec:      codec.NewJSON(),
+		routingKey: "rpc.requests",
+		newChannel: func() (callerChannel, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			f := fakes[opens]
+			opens++
+			return f, nil
+		},
+	}
+	defer c.Close(context.Background()) //nolint:errcheck
+
+	// First call establishes session #1; kill its channel so the call resolves with
+	// ErrChannelClosed.
+	resCh := make(chan error, 1)
+	go func() {
+		_, err := c.Call(context.Background(), echoPayload{N: 1})
+		resCh <- err
+	}()
+	select {
+	case <-fake1.publishSignal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first publish never happened")
+	}
+	require.NoError(t, fake1.Close())
+	select {
+	case err := <-resCh:
+		require.ErrorIs(t, err, ErrChannelClosed)
+	case <-time.After(2 * time.Second):
+		t.Fatal("first call did not resolve after channel close")
+	}
+
+	// Second call: ensureSession must detect the dead session and open session #2.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resp, err := c.Call(ctx, echoPayload{N: 7})
+	require.NoError(t, err)
+	assert.Equal(t, 7, resp.N, "the reopened session must round-trip the reply")
+
+	mu.Lock()
+	got := opens
+	mu.Unlock()
+	assert.Equal(t, 2, got, "a dead session must trigger exactly one reopen (2 channels opened)")
+
+	// Both sessions subscribed to the direct reply-to pseudo-queue independently.
+	assert.Len(t, fake2.snapshotConsumed(), 1, "session #2 issues its own subscription")
+}
+
+// TestCaller_Close_IsIdempotent asserts the first Close succeeds and a second
+// returns ErrAlreadyClosed.
+func TestCaller_Close_IsIdempotent(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	fake := newFakeCallerChannel(true /* echo */)
+	c := newTestCaller[echoPayload, echoPayload](fake)
+
+	// Drive one call so a live session/dispatcher exists to be torn down.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := c.Call(ctx, echoPayload{N: 1})
+	require.NoError(t, err)
+
+	require.NoError(t, c.Close(context.Background()), "first Close releases the channel")
+	assert.ErrorIs(t, c.Close(context.Background()), ErrAlreadyClosed, "second Close returns ErrAlreadyClosed")
+}
+
+// TestCaller_Health_NilConnReturnsErrNotConnected covers the unit-construction path
+// where a Caller has no pinned connection.
+func TestCaller_Health_NilConnReturnsErrNotConnected(t *testing.T) {
+	c := newTestCaller[echoPayload, echoPayload](newFakeCallerChannel(false))
+	assert.ErrorIs(t, c.Health(context.Background()), ErrNotConnected,
+		"a Caller with no pinned connection reports ErrNotConnected")
+}
+
+// TestCaller_Call_ExclusiveReplyQueue_DeclaresQueueAndAppliesQos exercises the
+// UseExclusiveReplyQueue branch of openSession in the fast lane: a real exclusive
+// reply queue is declared, basic.qos is applied with the configured prefetch, the
+// reply consumer uses regular (non-auto) acks, and requests carry the declared
+// queue name as ReplyTo (not the direct reply-to pseudo-queue).
+func TestCaller_Call_ExclusiveReplyQueue_DeclaresQueueAndAppliesQos(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	fake := newFakeCallerChannel(true /* echo */)
+	c := &Caller[echoPayload, echoPayload]{
+		codec:             codec.NewJSON(),
+		routingKey:        "rpc.requests",
+		useExclusiveQueue: true,
+		prefetch:          10,
+		newChannel:        func() (callerChannel, error) { return fake, nil },
+	}
+	defer c.Close(context.Background()) //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resp, err := c.Call(ctx, echoPayload{N: 5})
+	require.NoError(t, err)
+	assert.Equal(t, 5, resp.N)
+
+	cons := fake.snapshotConsumed()
+	require.Len(t, cons, 1)
+	assert.Equal(t, "reply-q-fake", cons[0].queue, "exclusive mode consumes the declared queue")
+	assert.False(t, cons[0].autoAck, "an exclusive reply queue uses regular acks")
+
+	prefetch, called := fake.snapshotQos()
+	assert.True(t, called, "basic.qos must be applied in exclusive mode")
+	assert.Equal(t, 10, prefetch, "the configured Prefetch must be passed to basic.qos")
+
+	pubs := fake.snapshotPublished()
+	require.Len(t, pubs, 1)
+	assert.Equal(t, "reply-q-fake", pubs[0].ReplyTo, "ReplyTo must be the declared queue, not amq.rabbitmq.reply-to")
+}
+
+// TestCallerBuilder_OptionsAreLastWins asserts the last-wins option policy that
+// CLAUDE.md lists as a builder invariant (calling a setter twice keeps the final).
+func TestCallerBuilder_OptionsAreLastWins(t *testing.T) {
+	b := CallerFor[echoPayload, echoPayload](nil).
+		Exchange("x1").Exchange("x2").
+		RoutingKey("rk1").RoutingKey("rk2").
+		Prefetch(1).Prefetch(9)
+	assert.Equal(t, "x2", b.exchange)
+	assert.Equal(t, "rk2", b.routingKey)
+	assert.Equal(t, uint16(9), b.prefetch)
+	assert.True(t, b.prefetchSet)
+
+	strict := codec.NewJSONStrict()
+	b2 := CallerFor[echoPayload, echoPayload](nil).Codec(codec.NewJSON()).Codec(strict)
+	assert.Equal(t, strict, b2.c, "the last Codec wins")
 }
