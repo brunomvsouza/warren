@@ -40,8 +40,11 @@ make integration-down                                         # stop and remove 
 The broker is built from `Dockerfile.rabbitmq-delayed` (`rabbitmq:3.13-management`
 plus the `rabbitmq_delayed_message_exchange` community plugin, pinned by SHA-256), so
 the delayed-delivery timing assertions (`TestDelay_DelayedDelivery_integration` and
-`examples/delayed`) actually run instead of skipping. The probe-and-`t.Skip` guard
-stays in place, so the suite still degrades cleanly on a plugin-less broker.
+`examples/delayed`) actually run instead of skipping. The probe-and-`t.Fatal` guard
+(`requireDelayedExchange`) now **fails** the test with the reason when the broker
+lacks the plugin — consistent with the missing-`AMQP_TEST_URL` rule below, since the
+`integration` lane provisions the plugin and a broker without it is a misconfiguration,
+not a reason to silently skip.
 
 `AMQP_TEST_URL` must be exported or prefixed on the command; without it the
 integration tests **fail** (`t.Fatal`) rather than skip — the `integration`

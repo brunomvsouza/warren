@@ -1090,8 +1090,38 @@ dependency for the doc reconciliation itself.
      ci.yml integration job provisions it via `make integration-up`, so
      TestDelay_DelayedDelivery_integration and the examples/delayed smoke test now run
      the 2s–2.5s window assertion on every integration lane instead of skipping. The
-     probe-and-t.Skip guard is retained for plugin-less brokers. Option (a) — folding
+     probe (requireDelayedExchange) now fails fast with the reason when the broker lacks
+     the plugin (was t.Skip), since the lane provisions it and a plugin-less broker is a
+     misconfiguration — consistent with the missing-AMQP_TEST_URL rule. Option (a) — folding
      the duplicated requireDelayedExchange helper into amqptest.RequireDelayedExchange —
      stays deferred to T37 and is tracked by the inline TODO in both test files; it is a
      code-dedup nicety, not a coverage gap, now that (b) makes the assertion run. -->
+
+---
+
+### LATER-66 — `requireDelayedExchange` probe blames every declare error on the missing plugin and prints the raw broker URL
+
+**Context:** `delay_integration_test.go:42-49` and `examples/delayed/example_integration_test.go:47-54` — the `requireDelayedExchange` helper (duplicated in both files, behind `//go:build integration`) probes for the `rabbitmq_delayed_message_exchange` plugin by declaring a throwaway `x-delayed-message` exchange. It treats *any* non-nil `ExchangeDeclare` error as "plugin unavailable" and now (since the Skip→Fatal flip) `t.Fatalf`s with that diagnosis. The genuine plugin-absent signal is a specific AMQP reply code (observed: `406 PRECONDITION_FAILED - unknown exchange type 'x-delayed-message'`); the helper never inspects `*amqp091.Error.Code`. The same `t.Fatalf` interpolates the raw `url` (`amqp://guest:guest@localhost:5672/`), printing userinfo to test output — inconsistent with the `internal/redact` choke-point (SPEC §8) and with `topology_integration_test.go`, which prints scheme+host only.
+
+**Impact:** A non-plugin channel error (access-refused under a restrictive vhost, a precondition failure, a name collision) would fail with a misleading "enable the plugin / `make integration-up`" remediation that does not match the real cause. Credentials in the broker URL surface in CI failure logs (currently only the well-known `guest:guest` default, so no real secret — but the pattern violates the always-redact invariant).
+
+**Evidence:** `/ship` review — code-reviewer (Suggestion ×2), security-auditor (LOW), test-engineer (Medium); all three converge on folding the fix into the planned T37 `amqptest.RequireDelayedExchange(t)` consolidation. Note: the reviewers assumed reply code `503 COMMAND_INVALID`, but the actual RED evidence is `406 PRECONDITION_FAILED` — which is exactly why hard-coding a single literal code is fragile and the classification belongs in `internal/amqperror`.
+
+**Suggested solution:** When the helper consolidates into `amqptest.RequireDelayedExchange(t)` (T37): (a) discriminate plugin-absence by routing `derr` through `internal/amqperror`/`AMQPCode` (via `errors.As`, per the `errorlint` contract) and emit the plugin-specific remediation only for the unknown-exchange-type reply code, failing other errors with a generic "probe failed" message; (b) wrap `url` (and the error) through `internal/redact` so no userinfo reaches test output. Both land in one place once the duplication is removed.
+
+**Prerequisites:** T37 (`amqptest/` package + `amqptest.RequireDelayedExchange(t)` consolidation). Do not hand-roll reply-code discrimination inline before then — the choke-point belongs in the shared helper.
+
+---
+
+### LATER-67 — Delayed-delivery timing assertion's 2.5s upper bound may flake under CI load
+
+**Context:** `delay_integration_test.go:104-107` — `TestDelay_DelayedDelivery_integration` publishes a 2s-delayed message and asserts `elapsed >= 2s && elapsed < 2.5s`. The `>= 2s` lower bound is robust (the broker cannot deliver early). The `< 2.5s` upper bound is a 500ms budget for broker scheduling + network + consumer dispatch + goroutine wakeup. The Skip→Fatal flip (and LATER-65 before it) is what makes this assertion actually execute on CI runners for the first time.
+
+**Impact:** On a loaded/shared CI runner the 500ms ceiling could be exceeded by scheduling jitter, producing a flaky FAIL on a correct implementation. The 10s overall arrival timeout is a separate, safe net and is unaffected.
+
+**Evidence:** `/ship` review — test-engineer (Medium). Pre-existing assertion; this change activates the risk by making it run in CI for the first time.
+
+**Suggested solution:** Only if a flake is actually observed (do not pre-emptively weaken a sharp assertion): widen the upper bound (e.g. `< 3s`) or read a CI-tunable budget from an env var, keeping the `>= 2s` lower bound strict. Prefer the env-tunable form so local runs keep the tight window and only CI relaxes it.
+
+**Prerequisites:** None. Independent of T37; act on the first observed flake.
 

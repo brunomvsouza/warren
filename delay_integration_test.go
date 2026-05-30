@@ -21,12 +21,14 @@ type delayPayload struct {
 	N int `json:"n"`
 }
 
-// requireDelayedExchange skips the test cleanly when the broker at url lacks the
+// requireDelayedExchange fails the test loudly when the broker at url lacks the
 // rabbitmq_delayed_message_exchange plugin. It probes by declaring a throwaway
 // x-delayed-message exchange: a plugin-less broker answers with a command-invalid
-// channel error, which becomes a t.Skip rather than a failure (the default
-// rabbitmq:3-management image ships without the plugin). Once amqptest/ (T37)
-// lands this migrates to amqptest.RequireDelayedExchange(t).
+// channel error. The integration lane provisions the plugin itself — the broker is
+// built from Dockerfile.rabbitmq-delayed and started by `make integration-up` — so a
+// broker without it is a misconfiguration, not a reason to silently skip. Fail fast
+// with the reason, mirroring how a missing AMQP_TEST_URL fails rather than skips.
+// Once amqptest/ (T37) lands this migrates to amqptest.RequireDelayedExchange(t).
 func requireDelayedExchange(t *testing.T, url string) {
 	t.Helper()
 	rc, err := amqp091.Dial(url)
@@ -40,8 +42,10 @@ func requireDelayedExchange(t *testing.T, url string) {
 	derr := ch.ExchangeDeclare(probe, "x-delayed-message", false, true, false, false,
 		amqp091.Table{"x-delayed-type": "topic"})
 	if derr != nil {
-		t.Skipf("rabbitmq_delayed_message_exchange plugin unavailable at %s (%v); "+
-			"enable the plugin to run delayed-delivery tests", url, derr)
+		t.Fatalf("rabbitmq_delayed_message_exchange plugin unavailable at %s (%v); "+
+			"the integration lane requires it — start the broker with `make integration-up` "+
+			"(built from Dockerfile.rabbitmq-delayed, which bakes the plugin in) or enable "+
+			"the plugin on your own broker", url, derr)
 	}
 	_ = ch.ExchangeDelete(probe, false, false)
 }
