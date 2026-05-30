@@ -49,12 +49,17 @@ go get github.com/brunomvsouza/warren@main
 
 ### Publish and Consume
 
+The whole path — dial, declare, publish, consume — with every error handled. The
+handler takes the **decoded value** (`Order`), not a pointer: `nil` → `Ack`, an
+error → `Nack(no-requeue)`, wrap `ErrRequeue` to requeue. Consumers must dedupe
+by `MessageID` (at-least-once; see [`examples/idempotent_consume`](examples/idempotent_consume/main.go)).
+
 ```go
 package main
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"log"
 	"time"
 
@@ -69,44 +74,115 @@ type Order struct {
 func main() {
 	ctx := context.Background()
 
-	// 1. Dial with role-split connection pool (default: 2 pub, 2 con)
+	// 1. Dial with role-split connection pool (default: 2 publisher, 2 consumer).
 	conn, err := warren.Dial(ctx, warren.WithAddr("amqp://guest:guest@localhost:5672/"))
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("dial: %v", err)
 	}
-	defer conn.Close(context.Background())
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := conn.Close(closeCtx); err != nil {
+			log.Printf("close: %v", err)
+		}
+	}()
 
-	// 2. Declare topology (idempotent; redeclared automatically on reconnect)
+	// 2. Declare topology (idempotent; redeclared automatically on reconnect).
 	topo := &warren.Topology{
 		Exchanges: []warren.Exchange{{Name: "orders", Kind: warren.ExchangeTopic, Durable: true}},
 		Queues:    []warren.Queue{{Name: "orders.created", Durable: true}},
 		Bindings:  []warren.Binding{{Exchange: "orders", Queue: "orders.created", RoutingKey: "order.#"}},
 	}
 	if err := topo.Declare(ctx, conn); err != nil {
-		log.Fatal(err)
+		log.Fatalf("declare topology: %v", err)
 	}
-	topo.AttachTo(conn) // Ensure it redeclares on every reconnect barrier
+	if err := topo.AttachTo(conn); err != nil { // redeclare on every reconnect barrier
+		log.Fatalf("attach topology: %v", err)
+	}
 
-	// 3. Publish a typed message
-	pub, _ := warren.PublisherFor[Order](conn).
+	// 3. Publish a typed message.
+	pub, err := warren.PublisherFor[Order](conn).
 		Exchange("orders").
 		RoutingKey("order.created").
 		Build()
-	
-	_ = pub.Publish(ctx, warren.Message[Order]{Body: &Order{ID: "ord-001", Amount: 42}})
+	if err != nil {
+		log.Fatalf("build publisher: %v", err)
+	}
+	if err := pub.Publish(ctx, warren.Message[Order]{Body: &Order{ID: "ord-001", Amount: 42}}); err != nil {
+		log.Fatalf("publish: %v", err)
+	}
 
-	// 4. Consume typed messages
-	con, _ := warren.ConsumerFor[Order](conn).
+	// 4. Consume typed messages (blocks until ctx is cancelled).
+	con, err := warren.ConsumerFor[Order](conn).
 		Queue("orders.created").
 		Concurrency(4).
 		Build()
-
-	con.Consume(ctx, func(ctx context.Context, o *Order) error {
-		fmt.Printf("Processing order %s\n", o.ID)
-		return nil // Ack
+	if err != nil {
+		log.Fatalf("build consumer: %v", err)
+	}
+	err = con.Consume(ctx, func(ctx context.Context, o Order) error {
+		log.Printf("processing order %s (amount %d)", o.ID, o.Amount)
+		return nil // nil → Ack
 	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		log.Fatalf("consume: %v", err)
+	}
 }
 ```
+
+### Production setup (TLS, multi-node HA, OpenTelemetry, dead-letters)
+
+The four knobs a production deployment turns on, all on one `Dial` plus a
+dead-letter topology:
+
+```go
+import (
+	"context"
+	"crypto/tls"
+
+	"github.com/brunomvsouza/warren"
+	"github.com/brunomvsouza/warren/otel"
+)
+
+func dialProduction(ctx context.Context, tracer otel.Tracer) (*warren.Connection, error) {
+	return warren.Dial(ctx,
+		// Multi-node HA: round-robin failover across cluster nodes on (re)connect.
+		warren.WithAddrs([]string{
+			"amqps://app:secret@rabbit-1.internal:5671/prod",
+			"amqps://app:secret@rabbit-2.internal:5671/prod",
+			"amqps://app:secret@rabbit-3.internal:5671/prod",
+		}),
+		// TLS: amqps:// URIs use this config (mTLS-ready; SASL EXTERNAL is also supported).
+		warren.WithTLSConfig(&tls.Config{ServerName: "rabbit.internal", MinVersion: tls.VersionTLS12}),
+		// OpenTelemetry: publisher injects W3C trace context into headers; consumer extracts it.
+		warren.WithTracer(tracer),
+	)
+}
+
+// Dead-letter exchange: messages that are Nacked without requeue, exceed
+// MaxRedeliveries, or expire (TTL) route to a DLQ instead of vanishing.
+var prodTopology = &warren.Topology{
+	Exchanges: []warren.Exchange{
+		{Name: "orders", Kind: warren.ExchangeTopic, Durable: true},
+		{Name: "orders.dlx", Kind: warren.ExchangeTopic, Durable: true},
+	},
+	Queues: []warren.Queue{
+		{Name: "orders.created", Durable: true},
+		{Name: "orders.dlq", Durable: true},
+	},
+	Bindings: []warren.Binding{
+		{Exchange: "orders", Queue: "orders.created", RoutingKey: "order.#"},
+		{Exchange: "orders.dlx", Queue: "orders.dlq", RoutingKey: "#"},
+	},
+	DeadLetters: []warren.DeadLetter{
+		{Source: "orders.created", Exchange: "orders.dlx", RoutingKey: "#"},
+	},
+}
+```
+
+See the [examples table](#examples) for runnable, broker-tested versions of each
+of these — including [`examples/otel`](examples/otel/main.go) (trace continuity)
+and [`examples/deadletter`](examples/deadletter/main.go) (DLX wiring).
 
 ---
 
