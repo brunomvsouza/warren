@@ -64,7 +64,7 @@ type managedConn struct {
 	done             chan struct{}
 	forceReconnectCh chan struct{} // signals supervisor to reconnect without returning
 
-	// tracks in-flight onTopoDegraded callback goroutines; drained in close
+	// tracks in-flight onTopoDegraded and onBlocked callback goroutines; drained in close
 	wg sync.WaitGroup
 
 	opts *connOptions // shared with parent Connection; read-only after Dial
@@ -283,13 +283,13 @@ func (c *Connection) Close(ctx context.Context) error {
 		}
 	}
 
-	// drain in-flight onTopoDegraded callback goroutines.
+	// drain in-flight onTopoDegraded / onBlocked callback goroutines.
 	// The goroutine below runs to completion regardless of ctx; if ctx expires
 	// before all callbacks finish we return a timeout error but the goroutine
-	// continues until the callbacks return naturally. onTopoDegraded has no
-	// context parameter so it cannot be signalled to stop early — callers that
-	// need bounded shutdown should ensure their onTopoDegraded implementation
-	// respects an externally managed deadline.
+	// continues until the callbacks return naturally. Neither onTopoDegraded nor
+	// onBlocked has a context parameter so it cannot be signalled to stop early —
+	// callers that need bounded shutdown should ensure their callback
+	// implementation respects an externally managed deadline.
 	doneCh := make(chan struct{})
 	go func() {
 		for _, mc := range append(c.pubConns, c.conConns...) {
@@ -528,9 +528,7 @@ func (mc *managedConn) supervisor(ctx context.Context) {
 					mc.barrierMu.Lock()
 					mc.blocked = true
 					mc.barrierMu.Unlock()
-					if mc.opts.onBlocked != nil {
-						mc.opts.onBlocked(b.Reason)
-					}
+					mc.safeOnBlocked(b.Reason)
 				} else if !blockedStart.IsZero() {
 					elapsed := time.Since(blockedStart)
 					blockedStart = time.Time{}
@@ -625,6 +623,10 @@ func (mc *managedConn) runBarrier(ctx context.Context) {
 			mc.wg.Add(1)
 			go func() {
 				defer mc.wg.Done()
+				// recover runs before wg.Done (LIFO): a panic degrades to a
+				// logged error instead of crashing the process, and Close's
+				// wg.Wait still returns.
+				defer mc.recoverCallback("WithOnTopologyDegraded")
 				mc.opts.onTopoDegraded(degradedErr)
 			}()
 		}
@@ -641,7 +643,13 @@ func (mc *managedConn) runBarrier(ctx context.Context) {
 		}
 
 		if mc.opts.onReconnect != nil {
-			mc.opts.onReconnect()
+			// Inline (the callback runs inside the barrier, before delivery
+			// resumes — SPEC §6.1), but recover-guarded so a panic cannot skip
+			// the barrierCond.Broadcast() below and deadlock every Publisher.
+			func() {
+				defer mc.recoverCallback("WithOnReconnect")
+				mc.opts.onReconnect()
+			}()
 		}
 	}
 
@@ -694,6 +702,40 @@ func (mc *managedConn) waitBarrier(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// recoverCallback recovers a panic from a user-supplied callback, logging it with
+// a stack trace at error level. Call it deferred so a panicking callback degrades
+// to a logged error instead of crashing the process or deadlocking an internal
+// loop (T34c). The panic value is rendered with %v and a full stack is attached;
+// no message content flows through this path, so credential/payload leakage is not
+// a concern here.
+func (mc *managedConn) recoverCallback(name string) {
+	if r := recover(); r != nil {
+		mc.opts.logger.Errorf("warren: %s connection[%d] %s callback panicked: %v\n%s",
+			mc.role, mc.idx, name, r, debug.Stack())
+	}
+}
+
+// safeOnBlocked runs the user WithOnBlocked callback in a dedicated, recover-guarded
+// goroutine. Running it off the supervisor select loop keeps that loop responsive to
+// unblock / close / force-reconnect events even if the callback is slow, and the
+// recover ensures a panicking callback degrades to a logged error instead of
+// crashing the process. The goroutine is tracked by mc.wg so Close drains it,
+// subject to the same "the callback must return" caveat as WithOnTopologyDegraded.
+func (mc *managedConn) safeOnBlocked(reason string) {
+	fn := mc.opts.onBlocked
+	if fn == nil {
+		return
+	}
+	mc.wg.Add(1)
+	go func() {
+		defer mc.wg.Done()
+		// recover runs before wg.Done (LIFO) so the log is emitted before Close's
+		// wg.Wait returns.
+		defer mc.recoverCallback("WithOnBlocked")
+		fn(reason)
+	}()
 }
 
 // — option defaults and validation ————————————————————————————————————————
