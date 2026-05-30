@@ -995,10 +995,10 @@ would be misleading API surface.
 Rev 5 promotes the testcontainers helper to a public `amqptest/`
 subpackage so downstream applications can reuse the fixture.
 - **Acceptance:**
-  - [ ] `go generate ./...` produces gomock mocks for `codec.Codec`, `log.Logger`, all three metrics interfaces, `otel.Tracer`.
-  - [ ] Hand-written `amqpmock.NewDelivery[M](Fixture)` and `amqpmock.NewBatch[M](Fixture)` constructors that produce usable `*Delivery[M]` / `*Batch[M]` values for tests.
-  - [ ] Root package has zero gomock imports at runtime (only in `amqpmock/` and `*_test.go`).
-  - [ ] **Lens-06 (GA-09):** a **lightweight `Delivery[M]`/`Batch[M]` fixture path with no `go.uber.org/mock` dependency** (e.g. `DeliveryFixture`/`BatchFixture` constructors, guarded against unkeyed struct literals) lets consumer/raw/batch unit tests fabricate deliveries without importing the gomock-heavy mock subpackage.
+  - [x] `go generate ./...` produces gomock mocks for `codec.Codec`, `log.Logger`, all three metrics interfaces, `otel.Tracer`. (Also `codec.HeaderCodec`, `otel.Span`, `otel.LinkingTracer` — the full public-interface set. Directives in `amqpmock/generate.go`; gomock package mode; generated `amqpmock/{codec,logger,metrics,tracer}.go` carry the `DO NOT EDIT` header so golangci-lint skips them.)
+  - [x] Hand-written `amqpmock.NewDelivery[M](Fixture)` and `amqpmock.NewBatch[M](Fixture)` constructors that produce usable `*Delivery[M]` / `*Batch[M]` values for tests. (Thin re-exports of the root `warren.NewDeliveryFixture`/`NewBatchFixture`; `amqpmock.DeliveryFixture`/`BatchFixture` are generic type aliases of the root types.)
+  - [x] Root package has zero gomock imports at runtime (only in `amqpmock/` and `*_test.go`). Verified: `go list -deps github.com/brunomvsouza/warren | grep go.uber.org/mock` is empty; no non-test root `.go` imports gomock or `amqpmock`.
+  - [x] **Lens-06 (GA-09):** a **lightweight `Delivery[M]`/`Batch[M]` fixture path with no `go.uber.org/mock` dependency** (e.g. `DeliveryFixture`/`BatchFixture` constructors, guarded against unkeyed struct literals) lets consumer/raw/batch unit tests fabricate deliveries without importing the gomock-heavy mock subpackage. (Implemented as `warren.DeliveryFixture[M]`/`BatchFixture[M]` + `warren.NewDeliveryFixture`/`NewBatchFixture` in the root package; both fixture structs carry an unexported `noUnkeyedFixtureLiterals` guard field so positional literals from other packages fail to compile, making new fields non-breaking.)
   - [ ] **`amqptest/` public package**: `amqptest.NewRabbitMQ(t *testing.T, opts ...Option) *RabbitMQ` spins up a `rabbitmq:3.13.x-management` or `rabbitmq:4.0.x-management` testcontainer with:
     - `rabbitmq_delayed_message_exchange` plugin (for T31).
     - `rabbitmq_auth_mechanism_ssl` plugin + `external_auth` user (for T34b).
