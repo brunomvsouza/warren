@@ -225,20 +225,28 @@ func TestConsumer_processSpan_channelClosed(t *testing.T) {
 	defer cancel()
 
 	handlerStarted := make(chan struct{})
+	handlerCause := make(chan error, 1)
 	consumeDone := make(chan struct{})
 	go func() {
 		defer close(consumeDone)
 		_ = c.Consume(ctx, func(hCtx context.Context, _ string) error {
 			close(handlerStarted)
 			<-hCtx.Done() // cancelled by cancelCause(ErrChannelClosed)
+			handlerCause <- context.Cause(hCtx)
 			return hCtx.Err()
 		})
 	}()
 
 	deliveryCh <- jsonDelivery("x")
 	<-handlerStarted
-	close(doneCh) // signal channel close → dispatch picks the <-chanDone case
-	cancel()
+	close(doneCh) // signal channel close → dispatch's only ready select case is <-chanDone
+	// The <-chanDone case calls cancelCause(ErrChannelClosed), which unblocks the handler.
+	// Waiting for that cause proves dispatch committed to the channel-closed path BEFORE we
+	// cancel the outer ctx. Cancelling first would make close(doneCh) and cancel() race for
+	// the dispatch select: once both <-chanDone and <-hCtx.Done() are ready, Go picks one at
+	// random, and the <-hCtx.Done() branch ends the span with no outcome (flaky failure).
+	require.ErrorIs(t, <-handlerCause, ErrChannelClosed)
+	cancel() // safe now: dispatch is past the select; let Consume return
 	<-consumeDone
 
 	span := tr.only()
