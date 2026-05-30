@@ -10,6 +10,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege default: jobs get a read-only GITHUB_TOKEN regardless of the
+# repo/org default token scope. The one job that needs to write (the coverage
+# PR comment) widens it locally. Mirrors release.yml and bench.yml.
+permissions:
+  contents: read
+
 jobs:
   unit:
     name: Unit tests (Go ${{ matrix.go }})

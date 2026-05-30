@@ -1006,9 +1006,7 @@ func buildPublishing[M any](msg Message[M], body []byte) amqp091.Publishing {
 		// the header table first so a caller reusing Message.Headers across publishes
 		// never sees x-delay smuggled into their own map.
 		h := make(amqp091.Table, len(pub.Headers)+1)
-		for k, v := range pub.Headers {
-			h[k] = v
-		}
+		maps.Copy(h, pub.Headers)
 		h["x-delay"] = int32(msg.Delay.Milliseconds())
 		pub.Headers = h
 	}

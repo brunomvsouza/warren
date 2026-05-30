@@ -37,8 +37,7 @@ func TestConsumer_BasicCancel_FiresOnCancelWithTag(t *testing.T) {
 	consumer.deliveryCh = make(chan amqp091.Delivery)
 	consumer.cancelReasonCh = cancelCh
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -77,8 +76,7 @@ func TestConsumer_BasicCancel_NoOnCancel_LogsWarning(t *testing.T) {
 	consumer.deliveryCh = make(chan amqp091.Delivery)
 	consumer.cancelReasonCh = cancelCh
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -122,8 +120,7 @@ func TestBatchConsumer_BasicCancel_ReturnsErrConsumerCancelled(t *testing.T) {
 	bc.deliveryCh = make(chan amqp091.Delivery)
 	bc.cancelReasonCh = cancelCh
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -180,8 +177,7 @@ func TestConsumer_BasicCancel_BufferedAtChannelClose_ReturnsErrConsumerCancelled
 	// cancelReasonCh case — must service it.
 	consumer.testHookChannelClosed = func() { cancelCh <- consumer.tag }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -224,8 +220,7 @@ func TestBatchConsumer_BasicCancel_BufferedAtChannelClose_ReturnsErrConsumerCanc
 	bc.cancelReasonCh = cancelCh
 	bc.testHookChannelClosed = func() { cancelCh <- bc.tag }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	errCh := make(chan error, 1)
 	go func() {

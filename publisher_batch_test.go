@@ -833,15 +833,13 @@ func TestPublishBatch_Race(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			msgs := make([]Message[testPayload], batchSize)
 			for i := range msgs {
 				msgs[i] = Message[testPayload]{Body: &testPayload{Value: "race"}}
 			}
 			_, _ = pub.PublishBatch(context.Background(), msgs)
-		}()
+		})
 	}
 	wg.Wait()
 }

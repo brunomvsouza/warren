@@ -70,7 +70,10 @@ func dropTopology(url string, queues, exchanges []string) {
 // returned to the publisher (basic.return, NO_ROUTE 312) AND confirmed
 // (basic.ack) — warren's Publish returns nil while OnReturn fires.
 func TestConformance_MandatoryReturn_AckedAndReturned(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	// Registered before dialConf's conn-close cleanup so it runs LAST (t.Cleanup is
+	// LIFO): goleak must verify AFTER the connection is closed and its supervisor
+	// goroutines are joined, otherwise it sees the still-open connection's pool.
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 	url := brokerURL(t)
 	ctx := context.Background()
 
@@ -102,9 +105,13 @@ func TestConformance_MandatoryReturn_AckedAndReturned(t *testing.T) {
 		_ = pub.Close(closeCtx)
 	})
 
-	// The broker returns the unroutable message THEN acks it: Publish returns nil.
-	require.NoError(t, pub.Publish(ctx, warren.Message[confMsg]{Body: &confMsg{N: 1}}),
-		"an unroutable mandatory publish is still confirmed (acked) by the broker")
+	// An unroutable mandatory publish is returned by the broker (basic.return,
+	// NO_ROUTE 312). warren surfaces that to the publisher as ErrUnroutable (with
+	// OnReturn firing first); the broker also acks it under publisher confirms, but
+	// warren reports the return as the terminal outcome of Publish.
+	err = pub.Publish(ctx, warren.Message[confMsg]{Body: &confMsg{N: 1}})
+	require.ErrorIs(t, err, warren.ErrUnroutable,
+		"an unroutable mandatory publish must surface as ErrUnroutable")
 
 	select {
 	case r := <-returned:
@@ -120,7 +127,10 @@ func TestConformance_MandatoryReturn_AckedAndReturned(t *testing.T) {
 // a queue at its x-max-length with x-overflow=reject-publish causes the broker to
 // basic.nack the overflowing publish, which warren surfaces as ErrPublishNacked.
 func TestConformance_BrokerNack_RejectPublishOverflow(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	// Registered before dialConf's conn-close cleanup so it runs LAST (t.Cleanup is
+	// LIFO): goleak must verify AFTER the connection is closed and its supervisor
+	// goroutines are joined, otherwise it sees the still-open connection's pool.
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 	url := brokerURL(t)
 	ctx := context.Background()
 
@@ -179,7 +189,10 @@ func TestConformance_BrokerNack_RejectPublishOverflow(t *testing.T) {
 // broker-initiated basic.cancel (here, deleting the queue under an active
 // consumer) causes Consume to return ErrConsumerCancelled.
 func TestConformance_BasicCancel_SurfacesErrConsumerCancelled(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	// Registered before dialConf's conn-close cleanup so it runs LAST (t.Cleanup is
+	// LIFO): goleak must verify AFTER the connection is closed and its supervisor
+	// goroutines are joined, otherwise it sees the still-open connection's pool.
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 	url := brokerURL(t)
 	ctx := context.Background()
 
@@ -255,7 +268,10 @@ func TestConformance_BasicCancel_SurfacesErrConsumerCancelled(t *testing.T) {
 // broker's x-delivery-limit is what is under test. Requires a RabbitMQ that
 // honours x-delivery-limit (>= 3.13 / 4.x; the exact-version matrix is T151).
 func TestConformance_QuorumDeliveryLimit_PoisonBoundedByLimitPlusOne(t *testing.T) {
-	defer goleak.VerifyNone(t)
+	// Registered before dialConf's conn-close cleanup so it runs LAST (t.Cleanup is
+	// LIFO): goleak must verify AFTER the connection is closed and its supervisor
+	// goroutines are joined, otherwise it sees the still-open connection's pool.
+	t.Cleanup(func() { goleak.VerifyNone(t) })
 	url := brokerURL(t)
 	ctx := context.Background()
 

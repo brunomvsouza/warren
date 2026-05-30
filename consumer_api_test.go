@@ -16,12 +16,12 @@ import (
 // turning the design decision into an enforced contract rather than a comment.
 
 func TestConsumerBuilder_NoLocal_IsAbsent(t *testing.T) {
-	_, ok := reflect.TypeOf(&ConsumerBuilder[string]{}).MethodByName("NoLocal")
+	_, ok := reflect.TypeFor[*ConsumerBuilder[string]]().MethodByName("NoLocal")
 	assert.False(t, ok, "ConsumerBuilder must not expose a NoLocal method (RabbitMQ ignores no-local)")
 }
 
 func TestBatchConsumerBuilder_NoLocal_IsAbsent(t *testing.T) {
-	_, ok := reflect.TypeOf(&BatchConsumerBuilder[string]{}).MethodByName("NoLocal")
+	_, ok := reflect.TypeFor[*BatchConsumerBuilder[string]]().MethodByName("NoLocal")
 	assert.False(t, ok, "BatchConsumerBuilder must not expose a NoLocal method (RabbitMQ ignores no-local)")
 }
 

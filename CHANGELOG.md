@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-First public release line (`v0.1.0`). Everything below is new.
+## [0.1.0] - 2026-05-30
+
+First public release line. Everything below is new.
 
 ### Added
 
@@ -111,4 +113,5 @@ First public release line (`v0.1.0`). Everything below is new.
   `examples/ordered_consume`, `examples/otel` — each builds on the unit CI lane
   and smoke-runs end-to-end on the integration lane.
 
-[Unreleased]: https://github.com/brunomvsouza/warren/commits/main
+[Unreleased]: https://github.com/brunomvsouza/warren/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/brunomvsouza/warren/releases/tag/v0.1.0

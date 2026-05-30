@@ -998,8 +998,7 @@ func TestBatchConsumer_AlreadyStarted_Error(t *testing.T) {
 	require.NoError(t, err)
 	bc.started.Store(true)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	err = bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error { return nil })
 	require.Error(t, err)

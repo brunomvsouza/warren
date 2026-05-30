@@ -21,8 +21,9 @@ parallelizes within the active consumer.
 ## What this example does
 
 1. Declares a queue with `SingleActiveConsumer = true`.
-2. Starts **two** consumer instances (`consumer-a`, `consumer-b`), each with
-   `Concurrency(1)`. `consumer-a` gets a head start and becomes active.
+2. Starts `consumer-a`, then publishes a **readiness probe** and blocks until
+   `consumer-a` handles it — proving it is the active consumer before adding the
+   standby `consumer-b` (no `time.Sleep` guessing). Both use `Concurrency(1)`.
 3. Publishes `0..19` in order. The active consumer prints them in order.
 4. After the active consumer accepts seq `9`, the example **cancels it**
    (simulating a crash/deploy). The broker promotes the standby, which continues

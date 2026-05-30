@@ -180,8 +180,7 @@ func TestConsumer_ConsumeRaw_AlreadyStarted_ReturnsError(t *testing.T) {
 	// Simulate "already started" by setting the guard directly.
 	consumer.started.Store(true)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	err = consumer.Consume(ctx, func(_ context.Context, _ string) error { return nil })
 	require.Error(t, err)
@@ -878,8 +877,7 @@ func TestConsumer_Consume_BasicCancel_RecordsCancelledAndReturns(t *testing.T) {
 	consumer.deliveryCh = deliveryCh
 	consumer.cancelReasonCh = cancelCh
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	errCh := make(chan error, 1)
 	go func() {

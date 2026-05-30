@@ -20,7 +20,7 @@ func ceBinaryHeadersWithExtensions(n int) map[string]any {
 		ceAMQPPrefix + "source":      "/cap",
 		ceAMQPPrefix + "type":        "t",
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		h[ceAMQPPrefix+"ext"+strconv.Itoa(i)] = "v"
 	}
 	return h

@@ -6,9 +6,11 @@
 //   - Adapting a real OpenTelemetry SDK trace.Tracer to warren/otel.Tracer (the
 //     small interface Warren depends on, so it never imports the OTel SDK
 //     itself). The adapter is ~20 lines and is the only wiring you write.
-//   - WithTracer(adapter): the Publisher then emits a "<exchange> publish" span
-//     and injects the trace context into the AMQP headers; the Consumer extracts
-//     it and emits a "<queue> process" span as a CHILD of the publish span.
+//   - Attaching the adapter to the Publisher and Consumer builders via
+//     .Tracer(adapter): the Publisher then emits a "<exchange> publish" span and
+//     injects the trace context into the AMQP headers; the Consumer extracts it
+//     and emits a "<queue> process" span as a CHILD of the publish span. (The
+//     tracer is set per builder — that is what drives publish/consume spans.)
 //   - Trace continuity: the example reads the two recorded spans back and proves
 //     they share a trace-id and that the consume span's parent is the publish
 //     span's span-id — i.e. one distributed trace end to end.
@@ -115,9 +117,14 @@ func run() error {
 		return fmt.Errorf("declare topology: %w", err)
 	}
 
+	// .Tracer(tracer) is the load-bearing wiring: it attaches the adapter to the
+	// publisher so it emits the "<exchange> publish" span. (The connection-level
+	// WithTracer above is reserved for connection spans and does not drive
+	// publish/consume spans.)
 	pub, err := warren.PublisherFor[Event](conn).
 		Exchange(exchange).
 		RoutingKey(routingKey).
+		Tracer(tracer).
 		ConfirmTimeout(10 * time.Second).
 		Build()
 	if err != nil {
@@ -130,8 +137,11 @@ func run() error {
 	}()
 
 	// — Consume one message, then stop ————————————————————————————————————————
+	// .Tracer(tracer) attaches the adapter to the consumer so it emits the
+	// "<queue> process" span and extracts the trace context from the headers.
 	consumer, err := warren.ConsumerFor[Event](conn).
 		Queue(queue).
+		Tracer(tracer).
 		Concurrency(1).
 		Prefetch(1).
 		Build()
