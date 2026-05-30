@@ -350,6 +350,7 @@ Pre-commit hook (opt-in): `make hooks` installs `lint` + `test` on commit.
 | Document | Purpose |
 | --- | --- |
 | [`SPEC.md`](SPEC.md) | Full v1 public API, semantics, and success criteria |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release notes (Keep a Changelog) |
 | [`tasks/plan.md`](tasks/plan.md) | Phased implementation plan |
 | [pkg.go.dev](https://pkg.go.dev/github.com/brunomvsouza/warren) | Generated API reference |
 | [`doc.go`](doc.go) | Package overview godoc |
