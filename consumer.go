@@ -303,6 +303,15 @@ type Consumer[M any] struct {
 	// handlerDone vs hCtx.Done().
 	testHookBeforeTimeoutDrain func()
 
+	// testHookChannelClosed, when non-nil, is invoked inside runConsume's main loop
+	// the instant cur.ch reports closed (!ok), before the inner select waits for a
+	// re-subscribe, a pending basic.cancel, or ctx cancel. It is a test-only seam
+	// (nil in production, a no-op): because it fires only after the outer select has
+	// already taken the !ok branch, a test can buffer a basic.cancel reason at that
+	// exact point to deterministically exercise the "channel closed with a cancel
+	// already pending" inner-select branch without a fixed sleep.
+	testHookChannelClosed func()
+
 	// closedCh is closed when Close is called; signals Delivery.Ack/Nack to refuse.
 	closedCh  chan struct{}
 	closeOnce sync.Once
@@ -393,12 +402,13 @@ func buildConsumeArgs(consumeArgs Headers, prioritySet bool, priority int) amqp0
 	return args
 }
 
-// forwardCancel relays a broker basic.cancel reason (the consumer tag) to
-// runConsume's loop without blocking the delivery pump. cancelReasonCh is buffered
-// (size 1); a full buffer means a cancel is already pending, so the first one wins.
-func (c *Consumer[M]) forwardCancel(reason string) {
+// forwardCancelReason relays a broker basic.cancel reason (the consumer tag) onto a
+// buffered (size-1) cancel channel without blocking the delivery pump. A full buffer
+// means a cancel is already pending, so the first one wins. Shared by Consumer and
+// BatchConsumer.
+func forwardCancelReason(ch chan<- string, reason string) {
 	select {
-	case c.cancelReasonCh <- reason:
+	case ch <- reason:
 	default:
 	}
 }
@@ -528,6 +538,9 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 
 		case d, ok := <-cur.ch:
 			if !ok {
+				if c.testHookChannelClosed != nil {
+					c.testHookChannelClosed()
+				}
 				// AMQP channel closed; wait for re-subscribe, a pending basic.cancel,
 				// or ctx cancel. basic.cancel also closes the delivery stream, so the
 				// cancel reason may already be buffered when this !ok fires.
@@ -633,7 +646,7 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 					select {
 					case tag, ok := <-cancelCh:
 						if ok {
-							c.forwardCancel(tag)
+							forwardCancelReason(c.cancelReasonCh, tag)
 						}
 					default:
 					}
@@ -652,7 +665,7 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 				// (ok=false) is just the channel shutting down on reconnect — treat it
 				// like a NotifyClose so the consumer re-subscribes instead of dying.
 				if ok {
-					c.forwardCancel(tag)
+					forwardCancelReason(c.cancelReasonCh, tag)
 				}
 				closeChannelDone()
 				return

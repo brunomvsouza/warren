@@ -11,6 +11,16 @@ import (
 	"github.com/brunomvsouza/warren/otel"
 )
 
+// idTracer is a distinguishable otel.Tracer for last-wins assertions: it embeds
+// NoOpTracer (so Start is satisfied) and carries an id so a test can tell which
+// instance the builder actually stored. Plain NoOpTracer{} values are
+// indistinguishable, which is why the previous last-wins test could not observe a
+// winner.
+type idTracer struct {
+	otel.NoOpTracer
+	id int
+}
+
 // — ConsumerBuilder option methods ——————————————————————————————————————
 
 func TestConsumerBuilder_ChannelQoS_Stored(t *testing.T) {
@@ -58,12 +68,14 @@ func TestConsumerBuilder_Tracer_Stored(t *testing.T) {
 
 func TestConsumerBuilder_Tracer_LastWins(t *testing.T) {
 	conn := newFakeConsumerConn(t)
-	first := otel.NoOpTracer{}
-	second := otel.NoOpTracer{}
-	// Both calls return builder; second call wins. Just verify no panic and build succeeds.
-	c, err := ConsumerFor[string](conn).Queue("q").Tracer(first).Tracer(second).Build()
+	c, err := ConsumerFor[string](conn).Queue("q").
+		Tracer(idTracer{id: 1}).
+		Tracer(idTracer{id: 2}).
+		Build()
 	require.NoError(t, err)
-	assert.NotNil(t, c.tracer)
+	got, ok := c.tracer.(idTracer)
+	require.True(t, ok, "the stored tracer must be the distinguishable last one set")
+	assert.Equal(t, 2, got.id, "the last Tracer() call must win")
 }
 
 func TestConsumerBuilder_PrefetchBytes_IsNoOp(t *testing.T) {
@@ -140,18 +152,15 @@ func TestConsumerBuilder_TopologyHint_LastWins_Reset(t *testing.T) {
 
 // — Consumer.Health ————————————————————————————————————————————————
 
-func TestConsumer_Health_ReturnsNoError_WhenConnectionHealthy(t *testing.T) {
+func TestConsumer_Health_ReturnsErrNotConnected_OnFakeConn(t *testing.T) {
 	conn := newFakeConsumerConn(t)
 	c, err := ConsumerFor[string](conn).Queue("q").Build()
 	require.NoError(t, err)
 
-	ctx := context.Background()
-	// The fake consumer conn has no real TCP connection; health delegates to
-	// managedConn.health which returns nil when no broker connection is expected.
-	err = c.Health(ctx)
-	// We assert no panic; the return value depends on the fake conn's health state.
-	// The important thing is Health is exercised and the method exists.
-	_ = err // nil or connection-not-established — both valid for a fake conn
+	// The fake conn has no live socket (raw == nil) and is not reconnecting, so
+	// Health delegates to managedConn.health and reports ErrNotConnected — a
+	// concrete, asserted outcome rather than "did not panic".
+	require.ErrorIs(t, c.Health(context.Background()), ErrNotConnected)
 }
 
 // — Compile-time interface assertion ————————————————————————————————
