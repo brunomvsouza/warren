@@ -58,6 +58,10 @@ const (
 	cacheCapacity  = 10_000           // bounded entry count (LRU eviction past this)
 	cacheTTL       = 15 * time.Minute // per-entry expiry
 	exampleTimeout = 60 * time.Second
+
+	// numDistinct is the number of unique MessageIDs the publisher emits (the
+	// duplicate shares an ID with ord-2, so 4 publishes carry 3 distinct IDs).
+	numDistinct = 3
 )
 
 func main() {
@@ -126,6 +130,12 @@ func run() error {
 	// distinctHandled signals each ID the first (and only) time it is processed.
 	distinctHandled := make(chan string, numDistinct)
 
+	// dedupeObserved fires once the first duplicate is suppressed, so teardown can
+	// wait on the actual event instead of sleeping a fixed interval (the project
+	// bans magic sleeps; this also makes the example *prove* the duplicate was
+	// deduped rather than hope it arrived in time).
+	dedupeObserved := make(chan string, 1)
+
 	rawHandler := func(_ context.Context, d *warren.Delivery[Order]) error {
 		id := d.MessageID()
 
@@ -133,6 +143,10 @@ func run() error {
 		// duplicate: ack it without re-running the business handler.
 		if !dedupe.markSeen(id) {
 			log.Printf("dedupe: messageID=%s already processed → ack & skip handler", id)
+			select {
+			case dedupeObserved <- id:
+			default:
+			}
 			return d.Ack()
 		}
 
@@ -199,8 +213,16 @@ func run() error {
 		}
 	}
 
-	// Give the duplicate a moment to arrive and be deduped before we tear down.
-	time.Sleep(500 * time.Millisecond)
+	// Wait until the duplicate has actually been observed and suppressed by the
+	// dedupe cache before tearing down — no fixed sleep, so a slow broker cannot
+	// race the assertion that the "already processed" path ran.
+	select {
+	case <-dedupeObserved:
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("timed out: the duplicate MessageID %s was never deduped", dupID)
+	case <-ctx.Done():
+		return fmt.Errorf("context cancelled before the duplicate was deduped: %w", ctx.Err())
+	}
 
 	cancelConsumer()
 	if err := <-consumerErr; err != nil {
@@ -222,10 +244,6 @@ func run() error {
 	log.Printf("idempotent_consume example complete — duplicate MessageID %s handled exactly once", dupID)
 	return nil
 }
-
-// numDistinct is the number of unique MessageIDs the publisher emits (the
-// duplicate shares an ID with ord-2, so 4 publishes carry 3 distinct IDs).
-const numDistinct = 3
 
 // seenCache is a bounded, TTL-expiring LRU set of MessageIDs. It is the
 // in-memory form of the SPEC §6.2.1 dedupe window. For cross-process dedupe
