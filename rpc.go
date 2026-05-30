@@ -126,7 +126,7 @@ func (c *Caller[Req, Resp]) Call(ctx context.Context, req Req) (Resp, error) {
 		CorrelationID: correlationID,
 		ReplyTo:       s.replyTo,
 	}
-	body, err := c.encodeRequest(&msg)
+	body, err := encodeMessageBody(c.codec, &msg)
 	if err != nil {
 		return zero, err
 	}
@@ -158,11 +158,12 @@ func (c *Caller[Req, Resp]) Call(ctx context.Context, req Req) (Resp, error) {
 	}
 }
 
-// encodeRequest applies Message defaults, validates headers, and encodes the body
-// (honouring a HeaderCodec). The Caller constructs the Message itself, so there are
-// no caller-supplied headers to merge — codec headers become the header set.
-func (c *Caller[Req, Resp]) encodeRequest(msg *Message[Req]) ([]byte, error) {
-	if err := msg.applyDefaults(c.codec); err != nil {
+// encodeMessageBody applies Message defaults, validates headers, and encodes the
+// body (honouring a HeaderCodec). Shared by the Caller (request) and the Replier
+// (reply): both construct the Message themselves, so there are no caller-supplied
+// headers to merge — a HeaderCodec's headers become the header set.
+func encodeMessageBody[M any](c codec.Codec, msg *Message[M]) ([]byte, error) {
+	if err := msg.applyDefaults(c); err != nil {
 		return nil, err
 	}
 	if err := msg.validateHeaders(); err != nil {
@@ -171,7 +172,7 @@ func (c *Caller[Req, Resp]) encodeRequest(msg *Message[Req]) ([]byte, error) {
 	if msg.Body == nil {
 		return nil, fmt.Errorf("%w: Body must not be nil", ErrInvalidMessage)
 	}
-	body, ceHeaders, ceContentType, err := safeEncodeBody(c.codec, msg.Body)
+	body, ceHeaders, ceContentType, err := safeEncodeBody(c, msg.Body)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMessage, err)
 	}

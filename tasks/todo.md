@@ -779,7 +779,7 @@ Per SPEC §6.9 "Tracing continuity post-mortem" + §10 #51 (Rev 8 item M).
 - **Files:** `rpc.go`, `rpc_caller_builder.go`, `rpc_caller_integration_test.go`.
 - **Deps:** T12, T18.
 
-### [ ] T30 — RPC `Replier[Req,Resp]` + at-least-once ordering · S
+### [x] T30 — RPC `Replier[Req,Resp]` + at-least-once ordering · S
 SPEC compliance: handler errors do **not** send an error envelope to
 the `Caller` — the caller observes `ErrCallTimeout` on `ctx` deadline.
 Failed requests are `Nack(requeue=false)`; without a DLX configured
@@ -787,16 +787,17 @@ on the request queue, **this is a silent drop**. The `OnError` hook
 is the only client-side signal; treat it as load-bearing. Rev 5
 adds the at-least-once reply ordering contract.
 - **Acceptance:**
-  - [ ] `ReplierFor[Req,Resp](conn).Build()` returns a configured replier.
-  - [ ] `Serve(ctx, ReplyHandler)` consumes requests and publishes responses to `ReplyTo` with matching `CorrelationID`.
-  - [ ] **At-least-once reply ordering**: for a successful handler, the replier publishes the reply, **awaits its confirm** (subject to `PublishTimeout`/`ConfirmTimeout` of the internal reply publisher), and **then** acks the request. If the reply publish fails (`ErrPublishNacked`, `ErrConfirmTimeout`, `ErrChannelClosed`), the request is `Nack(false)` so it goes to the request queue's DLX (if configured); the caller observes `ErrCallTimeout` on `ctx` deadline.
-  - [ ] **Crash-between-confirm-and-ack contract** documented: broker redelivers the request, replier sends a second reply. Callers MUST dedupe by `CorrelationID`. Godoc on `Serve` carries this verbatim.
-  - [ ] `OnError(func(ctx, req, err))` builder hook: handler error is reported via the hook; the request is `Nack`'d without requeue (so it goes to a DLX if configured, or is dropped if not); the caller observes `ErrCallTimeout` once its `ctx` expires.
-  - [ ] **Godoc on `OnError` and `Build` documents the silent-drop failure mode in full**, with explicit guidance: "Configure a DLX on the request queue if you need failed requests preserved for forensics. Without a DLX, `Nack(requeue=false)` is a drop and `OnError` is the only signal."
-  - [ ] **`ReplierBuilder.Topology(t)` auto-validates DLX presence** when the request queue was declared via this library's `Topology` on the same connection: inspects `t.DeadLetters` for an entry matching the request queue; if missing, `Build()` returns `ErrInvalidOptions` with the message `"Replier request queue <name> has no DeadLetter entry in Topology; Nack(false) drops will be silent. Add a DeadLetter or use AllowMissingDLX() to acknowledge."`. (Rev 6)
-  - [ ] **`AllowMissingDLX()` escape hatch** opts out of the validation when the request queue is declared out-of-band; the godoc documents the trade-off.
-  - [ ] **Mandatory metric `replier_drop_no_dlx_total{queue}`** increments every time the framework `Nack(false)`s a request whose source queue has no declared DLX (regardless of whether `Topology(t)` was wired) — drops are never invisible. (Rev 6)
-  - [ ] No broker-side validation of DLX presence at `Build()` time (would require management-plugin access and an extra round-trip). Static validation via `Topology(t)` plus the runtime metric is the contract.
+  - [x] `ReplierFor[Req,Resp](conn).Build()` returns a configured replier.
+  - [x] `Serve(ctx, ReplyHandler)` consumes requests and publishes responses to `ReplyTo` with matching `CorrelationID`.
+  - [x] **At-least-once reply ordering**: for a successful handler, the replier publishes the reply, **awaits its confirm** (subject to `PublishTimeout`/`ConfirmTimeout` of the internal reply publisher), and **then** acks the request. If the reply publish fails (`ErrPublishNacked`, `ErrConfirmTimeout`, `ErrChannelClosed`), the request is `Nack(false)` so it goes to the request queue's DLX (if configured); the caller observes `ErrCallTimeout` on `ctx` deadline.
+  - [x] **Crash-between-confirm-and-ack contract** documented: broker redelivers the request, replier sends a second reply. Callers MUST dedupe by `CorrelationID`. Godoc on `Serve` carries this verbatim.
+  - [x] `OnError(func(ctx, req, err))` builder hook: handler error is reported via the hook; the request is `Nack`'d without requeue (so it goes to a DLX if configured, or is dropped if not); the caller observes `ErrCallTimeout` once its `ctx` expires.
+  - [x] **Godoc on `OnError` and `Build` documents the silent-drop failure mode in full**, with explicit guidance: "Configure a DLX on the request queue if you need failed requests preserved for forensics. Without a DLX, `Nack(requeue=false)` is a drop and `OnError` is the only signal."
+  - [x] **`ReplierBuilder.Topology(t)` auto-validates DLX presence** when the request queue was declared via this library's `Topology` on the same connection: inspects `t.DeadLetters` for an entry matching the request queue; if missing, `Build()` returns `ErrInvalidOptions` with the message `"Replier request queue <name> has no DeadLetter entry in Topology; Nack(false) drops will be silent. Add a DeadLetter or use AllowMissingDLX() to acknowledge."`. (Rev 6)
+  - [x] **`AllowMissingDLX()` escape hatch** opts out of the validation when the request queue is declared out-of-band; the godoc documents the trade-off.
+  - [x] **Mandatory metric `replier_drop_no_dlx_total{queue}`** increments every time the framework `Nack(false)`s a request whose source queue has no declared DLX (regardless of whether `Topology(t)` was wired) — drops are never invisible. (Rev 6)
+  - [x] No broker-side validation of DLX presence at `Build()` time (would require management-plugin access and an extra round-trip). Static validation via `Topology(t)` plus the runtime metric is the contract.
+  - Note (test level): DLX-presence validation and the reply-publish-failure verdict are covered by deterministic **unit** tests in `rpc_replier_test.go` (fake reply publisher + fabricated delivery) rather than the separately-suggested `rpc_replier_reply_failure_integration_test.go` / `rpc_replier_dlx_validation_test.go`; the broker round-trips (happy path, handler-error+DLX→DLQ, handler-error+no-DLX drop+metric) live in `rpc_replier_integration_test.go`.
 - **Verify:** Integration tests:
   - Happy path round-trip Caller↔Replier with success.
   - **Reply-publish-failure path:** simulate a forced reply-publisher channel close immediately after the handler returns; assert the request is `Nack(false)`, lands in the DLQ if configured, and the caller times out with `ErrCallTimeout`.
