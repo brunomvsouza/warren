@@ -18,7 +18,7 @@ GOTOOLCHAIN     ?= go$(GO_MOD_VERSION)
 # so membership stays next to the code and a rename breaks the build instead of going stale.
 STRESS_COUNT ?= 200
 
-.PHONY: help build test test-stress test-integration test-conformance test-all lint vuln tidy doc hooks clean examples-build examples-smoke integration-up integration-down
+.PHONY: help build test test-stress test-integration test-conformance test-all lint vuln tidy doc hooks clean examples-build examples-smoke integration-up integration-down cover
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -28,6 +28,9 @@ build: ## Compile every package.
 
 test: ## Run unit tests with race detector and coverage.
 	$(GO) test -race -cover $(PKG)
+
+cover: ## Generate coverage.out and enforce per-package (>=80%) + critical-path (>=95%) floors (CI gate).
+	GO=$(GO) ./scripts/coverage.sh coverage.out
 
 integration-up: ## Start RabbitMQ broker locally via Docker Compose (waits for healthy).
 	docker compose -f docker-compose.integration.yml up -d --wait

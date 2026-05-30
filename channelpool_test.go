@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -236,6 +237,70 @@ func TestErrChannelPoolExhausted_IsTransient(t *testing.T) {
 	assert.True(t, IsTransient(ErrChannelPoolExhausted))
 }
 
+// — Drain ————————————————————————————————————————————————————————————————
+
+// TestChannelPool_Drain_DiscardsIdleChannels asserts that Drain (called by the
+// reconnect supervisor after a TCP reconnect) closes every idle channel and
+// empties the free list, while leaving the pool usable for fresh acquires.
+func TestChannelPool_Drain_DiscardsIdleChannels(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	openFn := func() (amqpChannel, error) { return &fakeChannel{}, nil }
+	p := newChannelPool(3, openFn)
+
+	ctx := context.Background()
+	ch1, rel1, err := p.Acquire(ctx)
+	require.NoError(t, err)
+	ch2, rel2, err := p.Acquire(ctx)
+	require.NoError(t, err)
+	rel1()
+	rel2()
+	require.Len(t, p.free, 2, "two idle channels expected before drain")
+
+	p.Drain()
+
+	assert.Empty(t, p.free, "free list must be empty after Drain")
+	assert.Equal(t, int32(1), ch1.(*fakeChannel).closeCount(), "idle channel 1 must be closed by Drain")
+	assert.Equal(t, int32(1), ch2.(*fakeChannel).closeCount(), "idle channel 2 must be closed by Drain")
+
+	// Drain on an already-empty free list is a no-op (covers the default branch).
+	p.Drain()
+	assert.Empty(t, p.free)
+
+	// Pool remains usable: a fresh Acquire opens a new channel.
+	ch3, rel3, err := p.Acquire(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, ch3)
+	rel3()
+}
+
+// — release safety valve ——————————————————————————————————————————————————
+
+// TestChannelPool_Release_FreeListFull_DiscardsEntry exercises the safety-valve
+// default branch in release: when the idle list is already at capacity, the
+// released entry is closed and discarded rather than blocking. This cannot
+// happen under correct usage (free and tokens share a capacity), so it is
+// constructed white-box.
+func TestChannelPool_Release_FreeListFull_DiscardsEntry(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	openFn := func() (amqpChannel, error) { return &fakeChannel{}, nil }
+	p := newChannelPool(1, openFn)
+
+	// Fill the free list (cap 1) so the next release cannot enqueue.
+	p.free <- pooledEntry{ch: &fakeChannel{}, closeCh: make(chan *amqp091.Error, 1)}
+
+	// Drain one token so release's deferred token return does not block (the
+	// semaphore is also cap 1 and currently full).
+	<-p.tokens
+
+	overflow := &fakeChannel{}
+	p.release(pooledEntry{ch: overflow, closeCh: make(chan *amqp091.Error, 1)})
+
+	assert.Equal(t, int32(1), overflow.closeCount(), "overflow entry must be closed when the free list is full")
+	assert.Len(t, p.tokens, 1, "the semaphore token must still be returned")
+}
+
 // — fakeChannel helper ——————————————————————————————————————————————————
 
 // fakeChannel is a test double for amqpChannel that allows simulating a
@@ -244,6 +309,7 @@ type fakeChannel struct {
 	mu       sync.Mutex
 	notifyCh chan *amqp091.Error // registered via NotifyClose
 	once     sync.Once
+	closes   atomic.Int32 // number of Close() calls, for Drain/release assertions
 }
 
 func (f *fakeChannel) NotifyClose(c chan *amqp091.Error) chan *amqp091.Error {
@@ -253,7 +319,10 @@ func (f *fakeChannel) NotifyClose(c chan *amqp091.Error) chan *amqp091.Error {
 	return c
 }
 
-func (f *fakeChannel) Close() error { return nil }
+func (f *fakeChannel) Close() error { f.closes.Add(1); return nil }
+
+// closeCount returns how many times Close has been called on this channel.
+func (f *fakeChannel) closeCount() int32 { return f.closes.Load() }
 
 // simulateClose fires the close notification, mirroring a broker-side close.
 // The notification is written to the buffered channel synchronously; no sleep

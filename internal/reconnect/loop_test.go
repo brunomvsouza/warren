@@ -88,6 +88,43 @@ func TestLoop_cancelMidBackoff(t *testing.T) {
 	require.NoError(t, err, "loop must exit within 1 second after context cancel")
 }
 
+// — Cancel while parked in the backoff timer (deterministic) ——————————————
+//
+// TestLoop_cancelMidBackoff above is racy: it cancels immediately after New, so
+// the loop usually returns via the post-connect ctx.Err() check (loop.go:73)
+// before it ever reaches the backoff select. This test forces the loop to PARK
+// in the select first, then cancels, so the select's <-ctx.Done() branch
+// (loop.go:89-91) is the one exercised.
+func TestLoop_cancelDuringBackoffTimer(t *testing.T) {
+	connectStarted := make(chan struct{}, 1)
+	connect := func(_ context.Context) error {
+		select {
+		case connectStarted <- struct{}{}:
+		default:
+		}
+		return errors.New("always fails")
+	}
+
+	// A long backoff guarantees the loop blocks in the select rather than looping
+	// back to connect before the test can cancel.
+	longBackoff := func(_ int) time.Duration { return 10 * time.Second }
+
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+	loop := reconnect.New(ctx, connect, longBackoff, 0)
+
+	// connect has been called and returned with ctx still live; give the
+	// goroutine a beat to clear the post-connect ctx.Err() check and block in the
+	// select, then cancel so the select's ctx.Done() case fires.
+	waitOrFail(t, connectStarted, "connect to be called")
+	time.Sleep(50 * time.Millisecond)
+	cancelCtx()
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	require.NoError(t, loop.Stop(stopCtx), "loop must exit promptly via the backoff-select cancel")
+}
+
 // — Max retries stops the loop ————————————————————————————————————————————
 
 func TestLoop_maxRetriesExhausted(t *testing.T) {
