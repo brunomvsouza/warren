@@ -208,3 +208,66 @@ func TestReplier_HandlerError_NoDLX_integration(t *testing.T) {
 		return passiveDepth(t, url, queue) == 0
 	}, 5*time.Second, 100*time.Millisecond, "the dropped request must leave the source queue")
 }
+
+// TestReplier_ReconnectRecovery_integration proves the at-least-once reply transport
+// seam end-to-end: a Call round-trips, the whole connection is force-reconnected
+// mid-Serve, and a subsequent Call still round-trips. The Replier's reply publisher
+// must lazily reopen its closed confirm channel (replyPublisher.ensureEntryLocked's
+// reopen path) for the second reply to land.
+func TestReplier_ReconnectRecovery_integration(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	url := amqpTestURL(t)
+	queue := fmt.Sprintf("warren.rpc.replier.reconnect.%d", time.Now().UnixNano())
+	defer deleteQueues(url, queue)
+	declareQueue(t, url, queue)
+
+	ctx := context.Background()
+	conn, err := warren.Dial(ctx, warren.WithAddr(url))
+	require.NoError(t, err)
+	defer conn.Close(ctx) //nolint:errcheck
+
+	replier, err := warren.ReplierFor[rpcEcho, rpcEcho](conn).Queue(queue).Build()
+	require.NoError(t, err)
+	stop := serveReplier(replier, func(_ context.Context, req rpcEcho) (rpcEcho, error) {
+		return rpcEcho{N: req.N + 1}, nil
+	})
+	defer stop()
+
+	caller, err := warren.CallerFor[rpcEcho, rpcEcho](conn).RoutingKey(queue).Build()
+	require.NoError(t, err)
+	defer caller.Close(ctx) //nolint:errcheck
+
+	call := func(n int) (rpcEcho, error) {
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return caller.Call(cctx, rpcEcho{N: n})
+	}
+
+	// First call opens the reply publisher's confirm channel.
+	resp, err := call(1)
+	require.NoError(t, err)
+	require.Equal(t, 2, resp.N)
+
+	// Drop every TCP connection (publisher + consumer roles). The replier's consumer
+	// re-subscribes via the reconnect barrier; its reply publisher's confirm channel
+	// is now dead and must be reopened on the next reply.
+	require.NoError(t, conn.ForceReconnect())
+
+	// A subsequent call must still round-trip. Retry in the test goroutine (no
+	// background goroutine, so -race sees no shared-variable race) to ride out the
+	// reconnect barrier window on both sides.
+	deadline := time.Now().Add(20 * time.Second)
+	var got rpcEcho
+	for {
+		got, err = call(2)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a call after reconnect never succeeded: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	assert.Equal(t, 3, got.N, "the reply must be correct after the replier reopened its channel")
+}

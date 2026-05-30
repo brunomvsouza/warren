@@ -6,12 +6,14 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/brunomvsouza/warren/codec"
+	"github.com/brunomvsouza/warren/internal/confirms"
 	"github.com/brunomvsouza/warren/metrics"
 )
 
@@ -364,4 +366,78 @@ func TestReplierBuilder_Build_DLXValidation(t *testing.T) {
 		_, err = ReplierFor[echoPayload, echoPayload](conn).Build()
 		assert.ErrorIs(t, err, ErrInvalidOptions)
 	})
+}
+
+// TestReplierBuilder_OptionsAreLastWins asserts the last-wins option policy that
+// CLAUDE.md lists as a builder invariant (calling a setter twice keeps the final).
+func TestReplierBuilder_OptionsAreLastWins(t *testing.T) {
+	t1, t2 := &Topology{}, &Topology{}
+	b := ReplierFor[echoPayload, echoPayload](nil).
+		Queue("q1").Queue("q2").
+		Topology(t1).Topology(t2).
+		ConfirmTimeout(time.Second).ConfirmTimeout(5 * time.Second)
+	assert.Equal(t, "q2", b.queue)
+	assert.Same(t, t2, b.topology, "the last Topology wins")
+	assert.Equal(t, 5*time.Second, b.confirmTimeout)
+	assert.True(t, b.confirmTimeoutSet)
+
+	strict := codec.NewJSONStrict()
+	b2 := ReplierFor[echoPayload, echoPayload](nil).Codec(codec.NewJSON()).Codec(strict)
+	assert.Equal(t, strict, b2.c, "the last Codec wins")
+}
+
+// TestReplyPublisher_ensureEntryLocked_ReusesLiveEntryAndReopensAfterClose drives
+// the lazy-reopen seam directly. This is the load-bearing transport seam of the
+// at-least-once reply path: after a reconnect closes the confirm channel, the
+// Replier MUST transparently reopen it, or every subsequent reply fails. A live
+// entry is reused without reopening; a closed channel (closeCh fired) triggers
+// exactly one reopen with a fresh entry.
+func TestReplyPublisher_ensureEntryLocked_ReusesLiveEntryAndReopensAfterClose(t *testing.T) {
+	fake1 := newFakePubCh(false)
+	fake2 := newFakePubCh(false)
+	entries := []publisherEntry{
+		{ch: fake1, tracker: confirms.New(), closeCh: fake1.closedCh, returnTagMap: &sync.Map{}},
+		{ch: fake2, tracker: confirms.New(), closeCh: fake2.closedCh, returnTagMap: &sync.Map{}},
+	}
+	var opens int
+	rp := &replyPublisher{
+		confirmTimeout: time.Second,
+		openEntry: func(context.Context) (publisherEntry, error) {
+			e := entries[opens]
+			opens++
+			return e, nil
+		},
+	}
+	ctx := context.Background()
+
+	// First acquire opens entry #1.
+	e1, err := rp.ensureEntryLocked(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, opens)
+	assert.True(t, e1.ch == pubChannel(fake1), "first acquire returns entry #1")
+
+	// A live entry is reused — the default select branch returns it, no reopen.
+	e1b, err := rp.ensureEntryLocked(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, opens, "a live entry must be reused, not reopened")
+	assert.True(t, e1b.ch == pubChannel(fake1), "reuse returns the same entry")
+
+	// Fire entry #1's close notification: the next acquire detects the dead
+	// channel, closes the stale entry, and reopens entry #2 exactly once.
+	fake1.closedCh <- &amqp091.Error{Code: 504, Reason: "CHANNEL_ERROR"}
+	e2, err := rp.ensureEntryLocked(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2, opens, "a closed channel must trigger exactly one reopen")
+	assert.True(t, e2.ch == pubChannel(fake2), "reopen swaps in the fresh entry")
+}
+
+// TestMapConfirmSentinel asserts the internal confirms sentinels are translated to
+// the public reply errors (and an unrecognised error passes through unchanged).
+func TestMapConfirmSentinel(t *testing.T) {
+	assert.ErrorIs(t, mapConfirmSentinel(confirms.ErrTimeout), ErrConfirmTimeout)
+	assert.ErrorIs(t, mapConfirmSentinel(confirms.ErrNacked), ErrPublishNacked)
+	assert.ErrorIs(t, mapConfirmSentinel(confirms.ErrClosed), ErrChannelClosed)
+
+	other := errors.New("some other error")
+	assert.Equal(t, other, mapConfirmSentinel(other), "an unrecognised error is returned unchanged")
 }
