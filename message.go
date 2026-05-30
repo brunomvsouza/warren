@@ -90,10 +90,12 @@ type Message[M any] struct {
 	// RabbitMQ extensions.
 	//
 	// Delay schedules the message for future delivery via the
-	// rabbitmq_delayed_message_exchange plugin: a non-zero value is emitted as the
+	// rabbitmq_delayed_message_exchange plugin: a positive value is emitted as the
 	// x-delay header (milliseconds, signed 32-bit) and is honored only when the
-	// message is published to an ExchangeDelayed exchange (see DelayedTopic).
-	// Sub-millisecond values round down; the plugin's ceiling is ~24.8 days.
+	// message is published to an ExchangeDelayed exchange (see DelayedTopic). A zero
+	// Delay means no delay; a negative Delay (≤ -1 ms) or one above the ~24.8-day
+	// ceiling is rejected at publish time with ErrInvalidMessage. Sub-millisecond
+	// magnitudes round to zero.
 	//
 	// Durability caveat (load-bearing): the plugin stores scheduled messages in a
 	// node-local, non-replicated table, so a confirmed delayed publish can still be

@@ -568,11 +568,14 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 	}
 
 	// Client-side Delay validation: x-delay is a signed 32-bit millisecond count
-	// (see buildPublishing). A Delay beyond that ceiling (~24.8 days, the plugin's
-	// own maximum) would overflow int32 to a negative value and be delivered
-	// immediately/undefined — reject it locally instead of emitting a corrupt header.
-	if msg.Delay.Milliseconds() > math.MaxInt32 {
-		return msg, nil, fmt.Errorf("%w: Delay %s exceeds the x-delay ceiling of %d ms (~24.8 days)",
+	// (see buildPublishing). A Delay above that ceiling (~24.8 days, the plugin's
+	// own maximum) would overflow int32 to a negative value; a negative Delay would
+	// otherwise be dropped silently by buildPublishing's `Delay > 0` gate and
+	// published immediately. Reject both ends so the range is enforced symmetrically
+	// rather than emitting a corrupt header or surprising the caller. A sub-ms
+	// magnitude rounds to 0 (no delay) and passes.
+	if d := msg.Delay.Milliseconds(); d < 0 || d > math.MaxInt32 {
+		return msg, nil, fmt.Errorf("%w: Delay %s is out of the x-delay range [0, %d] ms (~24.8 days)",
 			ErrInvalidMessage, msg.Delay, int64(math.MaxInt32))
 	}
 
