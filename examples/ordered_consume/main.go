@@ -7,13 +7,25 @@
 //     The others are hot standbys.
 //   - Concurrency(1): a single handler goroutine processes deliveries serially,
 //     so within the active consumer order is preserved end to end.
-//   - Failover: two consumer instances subscribe; the active one processes a
-//     prefix of a numbered sequence in order, then is cancelled ("killed"); the
-//     broker promotes the standby, which continues the sequence in order.
-//   - At-least-once at the handoff: a message in flight when the active consumer
-//     drops may be redelivered to the standby. The example dedupes by sequence
-//     number and asserts the DEDUPED accepted stream is exactly 0..N-1 — i.e.
-//     publish order == handler order across the failover.
+//   - REAL failover: two consumer instances subscribe, each on its OWN warren
+//     connection (modelling two service processes). The active consumer (a)
+//     handles a prefix of a numbered sequence in order; then its connection is
+//     CLOSED — the realistic "the instance died" event. Closing the connection
+//     drops the broker-side basic.consume registration, so the broker promotes
+//     the standby (b), which continues the sequence in order.
+//   - Why a whole connection and not just a cancelled context: cancelling the
+//     Consume context stops local dispatch but does NOT send basic.cancel or
+//     close the AMQP channel, so the broker still sees the consumer as active and
+//     never promotes the standby. Closing the connection is what triggers SAC
+//     failover (and requeues any in-flight unacked message to the standby).
+//   - Determinism without magic sleeps: each promotion is made OBSERVABLE with a
+//     readiness probe (an out-of-band seq=-1 message); the suffix is published
+//     only after the probe proves the standby is now the active consumer, so the
+//     standby provably handles it.
+//   - At-least-once at the handoff: a message in flight when the active
+//     consumer's connection dropped is requeued to the standby. The example
+//     dedupes by sequence number and asserts the DEDUPED accepted stream is
+//     exactly 0..N-1 — i.e. publish order == handler order across the failover.
 //
 // How to run:
 //
@@ -29,8 +41,8 @@
 //   - Binds the queue to the exchange with routing key "event.#"
 //
 // The example exits 0 once every sequence number 0..N-1 has been handled exactly
-// once, in order, across the active-consumer kill; non-zero on any out-of-order
-// delivery or timeout.
+// once, in order, across a real active-consumer failover; non-zero on any
+// out-of-order delivery or timeout.
 package main
 
 import (
@@ -54,7 +66,7 @@ const (
 	queue          = "warren.examples.ordered.events"
 	routingKey     = "event.created"
 	numEvents      = 20
-	handoffAt      = 9  // kill the active consumer after it accepts this sequence number
+	handoffAt      = 9  // consumer-a handles 0..handoffAt; the promoted standby handles the rest
 	probeSeq       = -1 // readiness probe: out-of-band sequence number, never part of 0..N-1
 	exampleTimeout = 60 * time.Second
 )
@@ -75,15 +87,37 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), exampleTimeout)
 	defer cancel()
 
-	conn, err := warren.Dial(ctx, warren.WithAddr(url))
+	// Two connections model two service instances consuming the same queue. The
+	// active consumer lives on its OWN connection (connActive) so that "killing"
+	// it is a REAL broker-side event: closing the connection drops its
+	// basic.consume registration and the broker promotes the standby. The
+	// publisher, topology and the standby live on connMain, which survives the
+	// failover.
+	connMain, err := warren.Dial(ctx, warren.WithAddr(url))
 	if err != nil {
-		return fmt.Errorf("dial: %w", err)
+		return fmt.Errorf("dial main: %w", err)
 	}
 	defer func() {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer closeCancel()
-		_ = conn.Close(closeCtx)
+		_ = connMain.Close(closeCtx)
 	}()
+
+	connActive, err := warren.Dial(ctx, warren.WithAddr(url))
+	if err != nil {
+		return fmt.Errorf("dial active: %w", err)
+	}
+	// connActive is closed mid-run to trigger the failover; guard the double close
+	// (the deferred cleanup and the explicit failover both call it).
+	var closeActiveOnce sync.Once
+	closeActive := func() {
+		closeActiveOnce.Do(func() {
+			closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer closeCancel()
+			_ = connActive.Close(closeCtx)
+		})
+	}
+	defer closeActive()
 
 	// SingleActiveConsumer is the load-bearing topology flag: it tells the broker
 	// to deliver to one consumer at a time across the whole queue.
@@ -98,11 +132,11 @@ func run() error {
 			{Exchange: exchange, Queue: queue, RoutingKey: "event.#"},
 		},
 	}
-	if err := topo.Declare(ctx, conn); err != nil {
+	if err := topo.Declare(ctx, connMain); err != nil {
 		return fmt.Errorf("declare topology: %w", err)
 	}
 
-	pub, err := warren.PublisherFor[Event](conn).
+	pub, err := warren.PublisherFor[Event](connMain).
 		Exchange(exchange).
 		RoutingKey(routingKey).
 		ConfirmTimeout(10 * time.Second).
@@ -121,25 +155,25 @@ func run() error {
 		seen:     make(map[int]struct{}, numEvents),
 		nextWant: 0,
 	}
-	allDone := make(chan struct{})       // closed when every sequence number is accepted
-	handoffOnce := make(chan string, 1)  // receives the active consumer's name once at handoffAt
-	probeReady := make(chan struct{}, 1) // signalled once consumer-a processes the readiness probe
+	allDone := make(chan struct{})           // closed when every sequence number is accepted
+	handoffReached := make(chan struct{}, 1) // signalled once consumer-a accepts seq=handoffAt
+	probeReady := make(chan string, 2)       // receives the name of the consumer that handled a probe
 
 	// makeHandler builds a Concurrency(1) handler for a named consumer instance.
 	makeHandler := func(name string) warren.Handler[Event] {
 		return func(_ context.Context, e Event) error {
 			if e.Seq == probeSeq {
-				// The readiness probe: receiving it proves this consumer's
-				// basic.consume is registered and it is the active consumer.
+				// The readiness probe: receiving it proves THIS consumer is the
+				// active one (the broker only delivers to the active consumer of a
+				// SAC queue).
 				log.Printf("%s: readiness probe handled → ack (active consumer confirmed)", name)
 				select {
-				case probeReady <- struct{}{}:
+				case probeReady <- name:
 				default:
 				}
 				return nil
 			}
-			result := tracker.accept(e.Seq)
-			switch result {
+			switch tracker.accept(e.Seq) {
 			case acceptOutOfOrder:
 				return fmt.Errorf("%s: out-of-order delivery: got seq=%d want=%d",
 					name, e.Seq, tracker.want())
@@ -150,7 +184,7 @@ func run() error {
 				log.Printf("%s: handled seq=%d (in order)", name, e.Seq)
 				if e.Seq == handoffAt {
 					select {
-					case handoffOnce <- name: // trigger the kill of THIS (active) consumer
+					case handoffReached <- struct{}{}: // unblock the failover
 					default:
 					}
 				}
@@ -163,12 +197,12 @@ func run() error {
 		}
 	}
 
-	// Start two consumer instances. SingleActiveConsumer makes exactly one active.
-	cancels := make(map[string]context.CancelFunc, 2)
-	consumerErrs := make(chan error, 2)
 	var wg sync.WaitGroup
+	consumerErrs := make(chan error, 2)
 
-	startConsumer := func(name string) error {
+	// startConsumer subscribes a named Concurrency(1) consumer on the given
+	// connection and runs its Consume loop until cctx is cancelled.
+	startConsumer := func(cctx context.Context, conn *warren.Connection, name string) error {
 		c, err := warren.ConsumerFor[Event](conn).
 			Queue(queue).
 			Tag(name).
@@ -178,57 +212,97 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("build consumer %s: %w", name, err)
 		}
-		cctx, ccancel := context.WithCancel(ctx)
-		cancels[name] = ccancel
 		wg.Go(func() {
-			defer ccancel() // idempotent with the external kill; guarantees cancel on return
 			consumerErrs <- c.Consume(cctx, makeHandler(name))
 		})
 		return nil
 	}
 
-	if err := startConsumer("consumer-a"); err != nil {
+	publishProbe := func(who string) error {
+		if err := pub.Publish(ctx, warren.Message[Event]{Body: &Event{Seq: probeSeq}}); err != nil {
+			return fmt.Errorf("publish readiness probe (%s): %w", who, err)
+		}
+		return nil
+	}
+	// awaitProbe blocks until the named consumer handles a readiness probe,
+	// proving it is the active consumer. No magic sleep.
+	awaitProbe := func(who string, within time.Duration) error {
+		for {
+			select {
+			case got := <-probeReady:
+				if got == who {
+					return nil
+				}
+			case <-time.After(within):
+				return fmt.Errorf("%s did not become the active consumer within %s", who, within)
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled before %s became active: %w", who, ctx.Err())
+			}
+		}
+	}
+
+	// — Bring up consumer-a as the active consumer ————————————————————————————
+	cctxA, cancelA := context.WithCancel(ctx)
+	defer cancelA()
+	if err := startConsumer(cctxA, connActive, "consumer-a"); err != nil {
 		return err
 	}
-	// Make consumer-a's activeness OBSERVABLE instead of guessing with a sleep —
-	// the library bans magic sleeps as synchronization. While consumer-a is the
-	// only subscriber it is necessarily the active consumer, so publishing one
-	// readiness probe and blocking until consumer-a's handler processes it proves
-	// its basic.consume is registered and live. Only then do we add the standby;
-	// SingleActiveConsumer keeps consumer-a active because it subscribed first.
-	if err := pub.Publish(ctx, warren.Message[Event]{Body: &Event{Seq: probeSeq}}); err != nil {
-		return fmt.Errorf("publish readiness probe: %w", err)
+	// While consumer-a is the only subscriber it is necessarily the active
+	// consumer. Publish a readiness probe and block until consumer-a handles it,
+	// proving its basic.consume is live; only then add the standby.
+	if err := publishProbe("consumer-a"); err != nil {
+		return err
 	}
-	select {
-	case <-probeReady:
-	case <-time.After(15 * time.Second):
-		return fmt.Errorf("consumer-a did not become the active consumer within 15s")
-	case <-ctx.Done():
-		return fmt.Errorf("context cancelled before consumer-a became active: %w", ctx.Err())
-	}
-	if err := startConsumer("consumer-b"); err != nil {
+	if err := awaitProbe("consumer-a", 15*time.Second); err != nil {
 		return err
 	}
 
-	// — Publish the ordered sequence ——————————————————————————————————————————
-	for seq := range numEvents {
+	// Add the standby. SingleActiveConsumer keeps consumer-a active because it
+	// subscribed first; consumer-b waits as a hot standby.
+	cctxB, cancelB := context.WithCancel(ctx)
+	defer cancelB()
+	if err := startConsumer(cctxB, connMain, "consumer-b"); err != nil {
+		return err
+	}
+
+	// — Publish the prefix; consumer-a handles 0..handoffAt in order ——————————
+	for seq := 0; seq <= handoffAt; seq++ {
+		e := Event{Seq: seq}
+		if err := pub.Publish(ctx, warren.Message[Event]{Body: &e}); err != nil {
+			return fmt.Errorf("publish seq=%d: %w", seq, err)
+		}
+	}
+	select {
+	case <-handoffReached:
+	case <-time.After(20 * time.Second):
+		return fmt.Errorf("timed out waiting for consumer-a to reach the handoff at seq=%d", handoffAt)
+	case <-ctx.Done():
+		return fmt.Errorf("context cancelled before handoff: %w", ctx.Err())
+	}
+
+	// — Fail over: close consumer-a's connection so the broker promotes the standby —
+	log.Printf("killing active consumer consumer-a after seq=%d — broker will promote the standby", handoffAt)
+	closeActive()
+	cancelA() // let consumer-a's Consume goroutine return now that its connection is gone
+
+	// Make the promotion OBSERVABLE before publishing the suffix: a second probe
+	// proves consumer-b is now the active consumer, so it provably handles the
+	// rest of the sequence.
+	if err := publishProbe("consumer-b"); err != nil {
+		return err
+	}
+	if err := awaitProbe("consumer-b", 20*time.Second); err != nil {
+		return err
+	}
+
+	// — Publish the suffix; only consumer-b can handle it now ——————————————————
+	for seq := handoffAt + 1; seq < numEvents; seq++ {
 		e := Event{Seq: seq}
 		if err := pub.Publish(ctx, warren.Message[Event]{Body: &e}); err != nil {
 			return fmt.Errorf("publish seq=%d: %w", seq, err)
 		}
 	}
 	log.Printf("published %d ordered events", numEvents)
-
-	// — Kill the active consumer at the handoff point —————————————————————————
-	go func() {
-		select {
-		case name := <-handoffOnce:
-			log.Printf("killing active consumer %s after seq=%d — broker will promote the standby",
-				name, handoffAt)
-			cancels[name]()
-		case <-ctx.Done():
-		}
-	}()
 
 	// Wait for the full ordered sequence or a deadline.
 	select {
@@ -241,9 +315,8 @@ func run() error {
 	}
 
 	// Tear down both consumers and join their goroutines.
-	for _, c := range cancels {
-		c()
-	}
+	cancelA()
+	cancelB()
 	wg.Wait()
 	close(consumerErrs)
 	for err := range consumerErrs {

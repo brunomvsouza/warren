@@ -33,8 +33,13 @@ func amqpTestURL(t *testing.T) string {
 //	(b) The active consumer was actually killed and the broker promoted the
 //	    standby (the "killing active consumer" line appears), so the in-order
 //	    completion was achieved ACROSS a real failover, not by a single consumer.
-//	(c) The completion line confirms order was preserved across the failover.
-//	(d) No goroutine leaks in the test process itself.
+//	(c) BOTH consumers contributed: consumer-a handled the prefix and consumer-b
+//	    (the promoted standby) handled the suffix. This is the assertion that
+//	    catches the silent-pass bug where a single consumer races through the
+//	    whole sequence and the "failover" is a no-op — a real failover MUST show
+//	    "consumer-b: handled seq=" lines.
+//	(d) The completion line confirms order was preserved across the failover.
+//	(e) No goroutine leaks in the test process itself.
 func TestOrderedConsumeExample_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -55,6 +60,11 @@ func TestOrderedConsumeExample_integration(t *testing.T) {
 
 	assert.Contains(t, output, "killing active consumer",
 		"the example must kill the active consumer to exercise the standby promotion")
+	assert.Contains(t, output, "consumer-a: handled seq=",
+		"the active consumer must handle the prefix of the sequence before the failover")
+	assert.Contains(t, output, "consumer-b: handled seq=",
+		"the promoted standby must handle the suffix after the failover — "+
+			"without this, a single consumer silently did all the work and no real failover occurred")
 	assert.Contains(t, output, "handled in order across the failover",
 		"the standby must continue the sequence in order after promotion")
 	assert.Contains(t, output, "publish order == handler order across failover",

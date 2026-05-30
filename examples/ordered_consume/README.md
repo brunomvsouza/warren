@@ -21,13 +21,16 @@ parallelizes within the active consumer.
 ## What this example does
 
 1. Declares a queue with `SingleActiveConsumer = true`.
-2. Starts `consumer-a`, then publishes a **readiness probe** and blocks until
-   `consumer-a` handles it — proving it is the active consumer before adding the
-   standby `consumer-b` (no `time.Sleep` guessing). Both use `Concurrency(1)`.
-3. Publishes `0..19` in order. The active consumer prints them in order.
-4. After the active consumer accepts seq `9`, the example **cancels it**
-   (simulating a crash/deploy). The broker promotes the standby, which continues
-   with `10..19`, still in order.
+2. Starts `consumer-a` **on its own connection**, then publishes a **readiness
+   probe** and blocks until `consumer-a` handles it — proving it is the active
+   consumer before adding the standby `consumer-b` (on the main connection). No
+   `time.Sleep` guessing. Both use `Concurrency(1)`.
+3. Publishes the prefix `0..9`. The active consumer prints them in order.
+4. After `consumer-a` accepts seq `9`, the example **closes its connection**
+   (simulating an instance dying). The broker drops its subscription and promotes
+   the standby. A second readiness probe blocks until `consumer-b` is confirmed
+   active, then the suffix `10..19` is published — so the standby provably
+   handles it, still in order.
 5. Asserts the deduped accepted stream is exactly `0..19` — publish order ==
    handler order across the failover.
 
@@ -36,6 +39,17 @@ Run it against a local broker:
 ```sh
 AMQP_URL=amqp://guest:guest@localhost:5672/ go run ./examples/ordered_consume
 ```
+
+### Why close the connection instead of cancelling the context
+
+Cancelling the `Consume` context stops local dispatch but does **not** send
+`basic.cancel` or close the AMQP channel — the broker still sees the consumer as
+active and never promotes the standby, so no failover happens (and an in-flight
+unacked message would be stranded). Closing the consumer's **connection** is what
+deregisters it at the broker, triggers the `SingleActiveConsumer` promotion, and
+requeues any in-flight message to the standby. That is why each consumer runs on
+its own connection — closing one models a real instance failure without
+disturbing the publisher or the standby.
 
 ## The trade-off
 
