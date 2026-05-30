@@ -194,6 +194,13 @@ type BatchConsumer[M any] struct {
 	// deterministic under -race instead of racing handlerDone vs hCtx.Done().
 	testHookBeforeTimeoutDrain func()
 
+	// testHookChannelClosed mirrors Consumer.testHookChannelClosed: when non-nil it
+	// is invoked the instant cur.ch reports closed (!ok), before the inner select
+	// waits for a re-subscribe / pending basic.cancel / ctx cancel. A test buffers a
+	// cancel reason at that point to deterministically exercise the channel-closed
+	// inner-select branch without a fixed sleep. nil (a no-op) in production.
+	testHookChannelClosed func()
+
 	closedCh  chan struct{}
 	closeOnce sync.Once
 	started   atomic.Bool
@@ -413,6 +420,9 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 
 		case d, ok := <-cur.ch:
 			if !ok {
+				if c.testHookChannelClosed != nil {
+					c.testHookChannelClosed()
+				}
 				// AMQP channel closed; wait for re-subscribe, a pending basic.cancel,
 				// or ctx cancel. basic.cancel also closes the delivery stream, so the
 				// cancel reason may already be buffered when this !ok fires.
@@ -693,7 +703,7 @@ func (c *BatchConsumer[M]) openBatchDeliveryCh(ctx context.Context) (deliverySub
 					select {
 					case tag, ok := <-cancelCh:
 						if ok {
-							c.forwardCancel(tag)
+							forwardCancelReason(c.cancelReasonCh, tag)
 						}
 					default:
 					}
@@ -711,7 +721,7 @@ func (c *BatchConsumer[M]) openBatchDeliveryCh(ctx context.Context) (deliverySub
 				// cancelCh (ok=false) is the channel shutting down on reconnect — treat
 				// it like NotifyClose so the consumer re-subscribes instead of dying.
 				if ok {
-					c.forwardCancel(tag)
+					forwardCancelReason(c.cancelReasonCh, tag)
 				}
 				closeChannelDone()
 				return
@@ -725,16 +735,6 @@ func (c *BatchConsumer[M]) openBatchDeliveryCh(ctx context.Context) (deliverySub
 	}()
 
 	return deliverySub{ch: out, done: channelDone}, nil
-}
-
-// forwardCancel relays a broker basic.cancel reason (the consumer tag) to Consume's
-// loop without blocking the delivery pump. cancelReasonCh is buffered (size 1); a
-// full buffer means a cancel is already pending, so the first one wins.
-func (c *BatchConsumer[M]) forwardCancel(reason string) {
-	select {
-	case c.cancelReasonCh <- reason:
-	default:
-	}
 }
 
 // Health reports whether the batch consumer's pinned connection is healthy.

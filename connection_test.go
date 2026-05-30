@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net"
 	"regexp"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,6 +69,83 @@ func TestDial_frameMaxExactlyMinimum_doesNotFailOnValidation(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
 		"FrameMax=4096 must pass validation; got: %v", err)
+}
+
+// — WithAddrs scheme validation (S-1) — reject a mixed amqp/amqps list ————————
+
+func TestDial_WithAddrs_mixedSchemes_returnsErrInvalidOptions(t *testing.T) {
+	ctx := context.Background()
+	_, err := warren.Dial(ctx, warren.WithAddrs([]string{
+		"amqp://guest:guest@localhost:5672/",
+		"amqps://guest:guest@localhost:5671/",
+	}))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, warren.ErrInvalidOptions),
+		"a WithAddrs list mixing amqp:// and amqps:// must fail validation; got: %v", err)
+	// The validation error names only the schemes — never the URIs — so credentials
+	// embedded in the addresses must not leak into it.
+	assert.NotContains(t, err.Error(), "guest:guest",
+		"the scheme-mismatch error must not leak credentials from the URIs")
+}
+
+func TestDial_WithAddrs_uniformScheme_doesNotFailOnValidation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := warren.Dial(ctx,
+		warren.WithAddrs([]string{
+			"amqp://guest:guest@localhost:5672/",
+			"amqp://guest:guest@otherhost:5672/",
+		}),
+		// instant-fail dialer so validation, not the network, is what we observe
+		warren.WithDialer(func(_, _ string) (net.Conn, error) {
+			return nil, errors.New("no broker")
+		}),
+	)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, warren.ErrInvalidOptions),
+		"a uniform amqp:// WithAddrs list must pass validation; got: %v", err)
+}
+
+// — WithAddrs failover: every node down (I-1) ————————————————————————————————
+//
+// Complements the positive round-robin integration tests: when EVERY WithAddrs
+// node refuses, the round-robin reconnect path (nextDialAddr) must try each address
+// in turn and surface a credential-redacted error rather than hanging or retrying
+// only the first. A stub dialer makes this deterministic with no broker.
+func TestDial_WithAddrs_allAddrsDown_returnsRedactedError_triesEach(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	dialed := map[string]int{}
+
+	_, err := warren.Dial(ctx,
+		warren.WithAddrs([]string{
+			"amqp://guest:guest@127.0.0.1:1/",
+			"amqp://guest:guest@127.0.0.1:9/",
+		}),
+		warren.WithPublisherConnections(1),
+		warren.WithConsumerConnections(1),
+		warren.WithReconnectBackoff(warren.RetryPolicy{
+			Min: time.Millisecond, Max: 2 * time.Millisecond, Retries: 6, WithoutJitter: true,
+		}),
+		warren.WithDialer(func(_, addr string) (net.Conn, error) {
+			mu.Lock()
+			dialed[addr]++
+			mu.Unlock()
+			return nil, errors.New("connection refused")
+		}),
+	)
+
+	require.Error(t, err, "Dial must return an error when every WithAddrs node is down")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Contains(t, dialed, "127.0.0.1:1", "must have tried the first dead node")
+	assert.Contains(t, dialed, "127.0.0.1:9",
+		"round-robin must rotate to the second dead node, not retry only the first")
+	assert.NotContains(t, err.Error(), "guest:guest",
+		"the all-down dial error must be credential-redacted")
 }
 
 func TestDial_channelPoolSizeExceedsChannelMax_returnsErrInvalidOptions(t *testing.T) {

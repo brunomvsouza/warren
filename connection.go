@@ -822,6 +822,16 @@ func validateConnOptions(opts *connOptions) error {
 			ErrInvalidOptions, opts.channelPoolSize, opts.channelMax)
 	}
 
+	// WithAddrs entries must all share one URI scheme. The connection's TLS, SASL,
+	// and credential settings apply to whichever node is dialled, and the
+	// round-robin failover path (nextDialAddr) now dials every entry — a list
+	// mixing amqp:// and amqps:// would silently dial some nodes in plaintext and
+	// others over TLS. Reject the mix fail-fast rather than at an unpredictable
+	// later reconnect.
+	if err := validateAddrsScheme(opts.addrs); err != nil {
+		return err
+	}
+
 	// SASL EXTERNAL: fail-closed
 	if opts.saslMechanism == SASLExternal {
 		addr := opts.addr
@@ -862,6 +872,30 @@ func validateConnOptions(opts *connOptions) error {
 			"full-availability gap during reconnect")
 	}
 
+	return nil
+}
+
+// validateAddrsScheme rejects a WithAddrs list whose entries do not all share the
+// same URI scheme. Unparseable entries (or entries without a scheme) are left for
+// the dialer to surface; only a genuine scheme disagreement among parseable
+// entries is an options error. The error names the two schemes — never the URIs —
+// so no credentials can leak.
+func validateAddrsScheme(addrs []string) error {
+	var scheme string
+	for _, a := range addrs {
+		u, err := url.Parse(a)
+		if err != nil || u.Scheme == "" {
+			continue
+		}
+		if scheme == "" {
+			scheme = u.Scheme
+			continue
+		}
+		if u.Scheme != scheme {
+			return fmt.Errorf("%w: WithAddrs entries must all use the same scheme; found both %q and %q",
+				ErrInvalidOptions, scheme, u.Scheme)
+		}
+	}
 	return nil
 }
 

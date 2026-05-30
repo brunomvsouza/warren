@@ -13,6 +13,7 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"math/big"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -225,14 +226,11 @@ func TestWaitBarrier_cancelledCtx_whileReconnecting_returnsErrReconnecting(t *te
 	mc.barrierMu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- mc.waitBarrier(ctx) }()
 
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		cancel()
-		mc.barrierCond.Broadcast()
-	}()
-
-	err := mc.waitBarrier(ctx)
+	cancel()
+	err := nudgeBarrierUntilDone(mc, errCh)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrReconnecting)
 }
@@ -245,16 +243,31 @@ func TestWaitBarrier_cancelledCtx_whileBlocked_returnsErrConnectionBlocked(t *te
 	mc.barrierMu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- mc.waitBarrier(ctx) }()
 
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		cancel()
-		mc.barrierCond.Broadcast()
-	}()
-
-	err := mc.waitBarrier(ctx)
+	cancel()
+	err := nudgeBarrierUntilDone(mc, errCh)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrConnectionBlocked)
+}
+
+// nudgeBarrierUntilDone deterministically replaces a fixed time.Sleep gate.
+// waitBarrier parks in barrierCond.Wait(); its own ctx-watcher fires exactly one
+// Broadcast on cancellation, which is lost if it races ahead of the park. Rather
+// than sleeping long enough to "probably" be parked, broadcast repeatedly (yielding
+// between attempts) until waitBarrier observes the already-cancelled ctx and returns
+// — terminating as soon as the result lands on errCh, with no timing assumption.
+func nudgeBarrierUntilDone(mc *managedConn, errCh <-chan error) error {
+	for {
+		mc.barrierCond.Broadcast()
+		select {
+		case err := <-errCh:
+			return err
+		default:
+			runtime.Gosched()
+		}
+	}
 }
 
 // — health: SPEC §6.1 degraded-state + ctx awareness ——————————————————————
