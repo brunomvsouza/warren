@@ -2,8 +2,7 @@
 // Warren library's BatchConsumer[M], with both size-based and timer-based flush
 // triggers.
 //
-// # What this example demonstrates
-//
+// What this example demonstrates:
 //   - Building a BatchConsumer[Order] via BatchConsumerFor with Size(100) and
 //     FlushAfter(500ms) — whichever trigger fires first dispatches the pending batch.
 //   - Two-burst publishing: 200 messages published before the consumer starts
@@ -16,7 +15,7 @@
 //   - Manual batch acknowledgement via Batch.Ack is also accepted; the framework's
 //     auto-verdict is suppressed (idempotent guard inside Batch[M]).
 //
-// # Important constraints
+// Important constraints:
 //
 // PublishRetry does NOT apply to PublishBatch. If a channel closes mid-batch
 // the caller must retry the affected messages using the per-result MessageID
@@ -24,16 +23,14 @@
 // idempotent processing keyed on MessageID; see examples/idempotent_consume/
 // for a reference pattern.
 //
-// # How to run
+// How to run:
 //
 //	go run ./examples/batch_consume
 //
-// # Environment variables
-//
+// Environment variables:
 //   - AMQP_URL: broker URL (default: amqp://guest:guest@localhost:5672/)
 //
-// # Topology side-effects on the broker
-//
+// Topology side-effects on the broker:
 //   - Creates exchange "warren.examples.batchconsume" (direct, non-durable, auto-delete)
 //   - Creates queue "warren.examples.batchconsume.orders" (non-durable, auto-delete)
 //   - Binds queue to exchange with routing key "batchconsume.order"

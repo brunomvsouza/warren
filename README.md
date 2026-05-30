@@ -178,7 +178,7 @@ Warren is built with "production-first" principles, embedding several reliabilit
 - **Observability** — pluggable `log.Logger`, Prometheus metrics (default), OpenTelemetry tracer + W3C propagation helpers; **publisher** spans inject trace context into AMQP headers before the frame is written and **consumer** spans extract it on the other side, so continuity survives DLX bounces (the broker preserves headers verbatim); `BatchConsumer` spans carry one Link per message
 - **Patterns** — RPC over direct reply-to (`CallerFor[Req, Resp]` + `ReplierFor[Req, Resp]`, at-least-once replies deduped by `CorrelationID`, DLX-on-request-queue validation); delayed publish via `Message[M].Delay` + the `DelayedTopic` helper for the `x-delayed-message` plugin
 - **Testing** — `warren.NewDeliveryFixture` / `NewBatchFixture` fabricate `Delivery[M]` / `Batch[M]` values (keyed-literal `DeliveryFixture`/`BatchFixture`, no live broker) so you can unit-test `ConsumeRaw` handlers — the one fixture only the library can provide. No mock package is shipped: generate your own interface mocks with whatever tool you prefer. Warren's own integration suite uses an internal testcontainers RabbitMQ fixture (`internal/amqptest`), so no test dependency leaks into your build
-- **Examples** — [`examples/publish`](examples/publish/main.go), [`examples/consume`](examples/consume/main.go), [`examples/topology`](examples/topology/main.go), [`examples/deadletter`](examples/deadletter/main.go), [`examples/batch_publish`](examples/batch_publish/main.go), [`examples/batch_consume`](examples/batch_consume/main.go), [`examples/rpc`](examples/rpc/main.go), [`examples/delayed`](examples/delayed/main.go)
+- **Examples** — [`examples/publish`](examples/publish/main.go), [`examples/consume`](examples/consume/main.go), [`examples/topology`](examples/topology/main.go), [`examples/deadletter`](examples/deadletter/main.go), [`examples/batch_publish`](examples/batch_publish/main.go), [`examples/batch_consume`](examples/batch_consume/main.go), [`examples/rpc`](examples/rpc/main.go), [`examples/delayed`](examples/delayed/main.go), [`examples/idempotent_consume`](examples/idempotent_consume/main.go), [`examples/ordered_consume`](examples/ordered_consume/main.go), [`examples/otel`](examples/otel/main.go)
 
 ### On the roadmap (`v0.1.0`)
 
@@ -201,6 +201,9 @@ See [`tasks/todo.md`](tasks/todo.md) for the live checklist.
 | [`examples/batch_consume`](examples/batch_consume/main.go) | `BatchConsumerFor[M]` with `Size` + `FlushAfter` triggers and `multiple=true` ack |
 | [`examples/rpc`](examples/rpc/main.go) | Request/reply via `CallerFor`/`ReplierFor` over direct reply-to: concurrent calls demuxed by `CorrelationID`, DLX on the request queue, `ErrCallTimeout` |
 | [`examples/delayed`](examples/delayed/main.go) | Delayed delivery via `Message[M].Delay` + `DelayedTopic` against the `x-delayed-message` plugin |
+| [`examples/idempotent_consume`](examples/idempotent_consume/main.go) | At-least-once dedupe by `MessageID` with a bounded LRU+TTL cache (SPEC §6.2.1); forced-duplicate handled exactly once |
+| [`examples/ordered_consume`](examples/ordered_consume/main.go) | Strict per-queue ordering via `SingleActiveConsumer` + `Concurrency(1)`, preserved across an active-consumer failover |
+| [`examples/otel`](examples/otel/main.go) | OpenTelemetry trace propagation: publish→consume spans share one trace, adapter from the OTel SDK to `warren/otel.Tracer` |
 
 ```bash
 # Build all examples (no broker required)
