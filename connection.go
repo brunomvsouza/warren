@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -876,14 +878,58 @@ func dialAMQP(_ context.Context, opts *connOptions, name, addr string) (*amqp091
 	}
 
 	// client-properties: use the per-socket name, not opts.connectionName
+	cfg.Properties = buildClientProperties(opts, name)
+
+	return amqp091.DialConfig(addr, cfg)
+}
+
+// buildClientProperties assembles the AMQP client-properties table advertised to
+// the broker during connection.open. It seeds the library defaults — the
+// per-socket connection_name, product, the warren module version, and the Go
+// runtime platform — then overlays any user-supplied WithClientProperties keys
+// last, so an explicit caller value wins over a default.
+func buildClientProperties(opts *connOptions, name string) amqp091.Table {
 	props := amqp091.Table{
 		"connection_name": name,
 		"product":         "Warren",
+		"version":         warrenVersion(),
+		"platform":        "Go " + runtime.Version(),
 	}
 	maps.Copy(props, opts.clientProperties)
-	cfg.Properties = props
+	return props
+}
 
-	return amqp091.DialConfig(addr, cfg)
+// warrenVersion reports the module version of warren as recorded in the build
+// info, so the broker UI shows which client release opened the connection. It
+// returns the main-module version when warren is built directly (its own
+// tests/binaries), the dependency version when imported downstream, and a
+// "(devel)"/"unknown" fallback when build info is unavailable.
+func warrenVersion() string {
+	const modulePath = "github.com/brunomvsouza/warren"
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	if info.Main.Path == modulePath && info.Main.Version != "" {
+		return info.Main.Version
+	}
+	for _, dep := range info.Deps {
+		if dep.Path == modulePath && dep.Version != "" {
+			return dep.Version
+		}
+	}
+	return "(devel)"
+}
+
+// notifyResubscribed records the resubscription metric and fires the optional
+// WithOnResubscribe callback after a consumer re-installs its subscription on
+// reconnect. Consumer and BatchConsumer funnel through this single seam so the
+// metric and the user callback stay paired.
+func notifyResubscribed(cm metrics.ConsumerMetrics, onResubscribe func(queue string), queue string) {
+	cm.RecordResubscribed(queue)
+	if onResubscribe != nil {
+		onResubscribe(queue)
+	}
 }
 
 // externalAuth implements amqp091.Authentication for SASL EXTERNAL.

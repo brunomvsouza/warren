@@ -218,7 +218,7 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 		}
 		select {
 		case resubCh <- sub:
-			c.cm.RecordResubscribed(c.queue)
+			notifyResubscribed(c.cm, c.mc.opts.onResubscribe, c.queue)
 		case <-hookCtx.Done():
 			return hookCtx.Err()
 		}

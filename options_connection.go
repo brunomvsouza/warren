@@ -87,6 +87,7 @@ type connOptions struct {
 	onBlocked      func(reason string)
 	onTopoDegraded func(error)
 	onReconnect    func()
+	onResubscribe  func(queue string)
 
 	// observability
 	logger  log.Logger
@@ -148,14 +149,20 @@ func WithVHost(vhost string) Option {
 
 // WithHeartbeat sets the AMQP heartbeat interval negotiated with the broker.
 //
-// Recommended sizing tiers:
-//   - 5 s  — latency-sensitive services (detects half-open TCP faster)
-//   - 10 s — general production default (amqp091-go default)
-//   - 30 s — over high-latency or congested links
+// Partition detection: the broker (and amqp091-go) drops the connection after
+// missing two heartbeats, so the time to notice a half-open TCP link is roughly
+// 2× the interval. Size the interval to the detection latency you can tolerate:
 //
-// WithHeartbeat(0) uses the server's default (~10 s).
-// A negative value disables heartbeats entirely; Dial emits a warning because
-// disabled heartbeats prevent detection of half-open TCP connections.
+//   - 5 s  — high-throughput / low-latency services (≈10 s detection)
+//   - 30 s — batch / low-priority workloads (≈60 s detection)
+//   - 60 s — battery-constrained clients or behind an idle-timeout load balancer
+//     (≈120 s detection)
+//
+// WithHeartbeat(0) — the zero value, also the default when the option is not
+// set — uses the server's negotiated default (~10 s on RabbitMQ); it is not a
+// request to disable heartbeats. A negative value disables heartbeats entirely;
+// Dial emits a warning because disabled heartbeats prevent detection of
+// half-open TCP connections.
 func WithHeartbeat(d time.Duration) Option {
 	return func(o *connOptions) { o.heartbeat = d }
 }
@@ -263,6 +270,19 @@ func WithOnTopologyDegraded(fn func(error)) Option {
 // synchronously inside the reconnect barrier before traffic resumes.
 func WithOnReconnect(fn func()) Option {
 	return func(o *connOptions) { o.onReconnect = fn }
+}
+
+// WithOnResubscribe registers a callback fired once per consumer re-subscribe
+// after a reconnect, with the queue name that was re-subscribed. It runs inside
+// the reconnect barrier alongside the consumer_resubscribed_total metric, after
+// the replacement subscription is installed and before delivery resumes.
+//
+// Each consumer pinned to a reconnecting socket fires the callback once per
+// reconnect; keep it fast and non-blocking — a slow callback delays delivery
+// resumption for that consumer. Use it to refresh per-subscription state (e.g.
+// reset an in-process dedupe window) on reconnect.
+func WithOnResubscribe(fn func(queue string)) Option {
+	return func(o *connOptions) { o.onResubscribe = fn }
 }
 
 // WithLogger sets the logger used for connection lifecycle events.

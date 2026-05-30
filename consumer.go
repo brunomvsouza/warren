@@ -396,7 +396,7 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 		}
 		select {
 		case resubCh <- sub:
-			c.cm.RecordResubscribed(c.queue)
+			notifyResubscribed(c.cm, c.mc.opts.onResubscribe, c.queue)
 		case <-hookCtx.Done():
 			return hookCtx.Err()
 		}
