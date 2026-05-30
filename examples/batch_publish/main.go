@@ -2,8 +2,7 @@
 // Warren library's PublishBatch — a single always-all pipeline that preserves
 // per-channel message ordering and returns a []PublishResult slice.
 //
-// # What this example demonstrates
-//
+// What this example demonstrates:
 //   - Declaring AMQP topology (exchange + queue + binding) via Topology.Declare
 //   - Building a typed Publisher[Order] with PublisherFor
 //   - Publishing 1000 messages atomically via PublishBatch with ErrBatchTooLarge guard
@@ -11,7 +10,7 @@
 //   - Attempting a batch of 2000 against default PublishBatchMaxSize=1024 to
 //     demonstrate the ErrBatchTooLarge guard (immediate return, no broker work)
 //
-// # Important constraints
+// Important constraints:
 //
 // PublishRetry does NOT apply to PublishBatch. If a channel closes mid-batch,
 // the affected messages surface ErrChannelClosed in their PublishResult.Err —
@@ -21,16 +20,14 @@
 // MUST implement idempotent processing keyed on MessageID; see
 // examples/idempotent_consume/ for a reference pattern.
 //
-// # How to run
+// How to run:
 //
 //	go run ./examples/batch_publish
 //
-// # Environment variables
-//
+// Environment variables:
 //   - AMQP_URL: broker URL (default: amqp://guest:guest@localhost:5672/)
 //
-// # Topology side-effects on the broker
-//
+// Topology side-effects on the broker:
 //   - Creates exchange "warren.examples.batch" (direct, non-durable, auto-delete)
 //   - Creates queue "warren.examples.batch.orders" (non-durable, auto-delete)
 //   - Binds queue to exchange with routing key "batch.order"
