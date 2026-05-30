@@ -10,7 +10,9 @@ import (
 )
 
 // Delivery wraps a broker-delivered message with its decoded payload [M].
-// Tests that need a fake delivery use amqpmock.NewDelivery[M] from amqpmock/.
+//
+// Tests fabricate a fake delivery with [NewDeliveryFixture] (gomock-free, in
+// this package) or the equivalent amqpmock.NewDelivery re-export.
 type Delivery[M any] struct {
 	body  *M
 	queue string

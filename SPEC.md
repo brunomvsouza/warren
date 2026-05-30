@@ -1113,9 +1113,14 @@ func (d *Delivery[M]) AckIf(err error) error // nil→Ack; err→Nack(requeue=er
 ```
 
 `Delivery[M]` is a **concrete struct**, not an interface — methods can be
-added in minor releases without breaking implementers. Tests that need a
-fake delivery use `amqpmock.NewDelivery[M](amqpmock.DeliveryFixture{…})`
-from the `amqpmock/` subpackage.
+added in minor releases without breaking implementers. Tests fabricate a
+fake delivery with `warren.NewDeliveryFixture[M](warren.DeliveryFixture[M]{…})`
+— the **gomock-free** fixture path in the root package, so consumer/raw/batch
+unit tests never pull in `go.uber.org/mock` (GA-09) — or the equivalent
+`amqpmock.NewDelivery[M](amqpmock.DeliveryFixture{…})` re-export in the
+`amqpmock/` subpackage. Both `DeliveryFixture`/`BatchFixture` are keyed-literal
+only (an unexported guard field rejects positional literals), so new fields are
+non-breaking.
 
 `Ack`, `Nack`, and `AckIf` may return:
 - `ErrChannelClosed` — the delivery's channel was closed before the
@@ -2213,9 +2218,12 @@ value.
     the most common debug query during incidents.
 
 - **`amqpmock`** — generated gomock mocks for the public interfaces
-  (`codec.Codec`, `log.Logger`, the three metrics interfaces, `otel.Tracer`)
-  plus hand-written constructors `NewDelivery[M]` and `NewBatch[M]` to
-  fabricate concrete `Delivery[M]`/`Batch[M]` values in tests.
+  (`codec.Codec`/`HeaderCodec`, `log.Logger`, the three metrics interfaces,
+  `otel.Tracer`/`Span`/`LinkingTracer`) plus `NewDelivery[M]` / `NewBatch[M]`
+  constructors that re-export the gomock-free `warren.NewDeliveryFixture[M]` /
+  `warren.NewBatchFixture[M]` (GA-09) to fabricate concrete `Delivery[M]`/
+  `Batch[M]` values in tests. Importing `amqpmock` pulls in `go.uber.org/mock`;
+  fixture-only tests call the root constructors directly to stay gomock-free.
 
 - **`amqptest`** — public testcontainers-go helper that spins up a
   RabbitMQ node with the `rabbitmq_delayed_message_exchange` plugin
@@ -2653,8 +2661,14 @@ the next reader so the rationale survives the conversation:
 
 9. **`Delivery[M]` and `Batch[M]` are concrete structs**, not
    interfaces. Methods can be added in minor releases without
-   breaking implementers. Tests use `amqpmock.NewDelivery[M](…)` /
-   `amqpmock.NewBatch[M](…)` constructors.
+   breaking implementers. The canonical fixture path is the
+   **gomock-free** `warren.NewDeliveryFixture[M]` /
+   `warren.NewBatchFixture[M]` (keyed-literal `DeliveryFixture`/
+   `BatchFixture` inputs with an unexported guard field) so
+   consumer/raw/batch unit tests fabricate deliveries without pulling
+   in `go.uber.org/mock` (GA-09); `amqpmock.NewDelivery[M]` /
+   `amqpmock.NewBatch[M]` re-export them for tests already using the
+   gomock subpackage.
 
 52. **Quorum Queue `x-dead-letter-strategy: at-least-once` (Rev 9)** —
     Implicitly injected by `Topology.Declare` for Quorum queues with DLXs
