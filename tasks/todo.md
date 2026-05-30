@@ -767,14 +767,14 @@ Per SPEC §6.9 "Tracing continuity post-mortem" + §10 #51 (Rev 8 item M).
 
 ## Phase 7 — Advanced patterns
 
-### [ ] T29 — RPC `Caller[Req,Resp]` · M
+### [x] T29 — RPC `Caller[Req,Resp]` · M
 - **Acceptance:**
-  - [ ] `CallerFor[Req,Resp](conn).Build()` returns a configured caller.
-  - [ ] `Call(ctx, req)` uses RabbitMQ direct reply-to (`amq.rabbitmq.reply-to`) by default; reply consumer is declared **before** the request is published; consumer auto-enables `no-ack` (required by the pseudo-queue protocol). Auto-stamps `CorrelationID` and `ReplyTo` on the request message if empty.
-  - [ ] `UseExclusiveReplyQueue()` builder method switches to a real exclusive auto-delete reply queue per Caller, with regular ack semantics.
-  - [ ] `ctx` deadline maps to per-call timeout → `ErrCallTimeout`.
-  - [ ] Concurrent calls return the right response (`CorrelationID` matching).
-  - [ ] If the underlying channel closes during a Call, in-flight calls return `ErrChannelClosed`; new calls reconnect transparently.
+  - [x] `CallerFor[Req,Resp](conn).Build()` returns a configured caller.
+  - [x] `Call(ctx, req)` uses RabbitMQ direct reply-to (`amq.rabbitmq.reply-to`) by default; reply consumer is declared **before** the request is published; consumer auto-enables `no-ack` (required by the pseudo-queue protocol). Auto-stamps `CorrelationID` and `ReplyTo` on the request message if empty.
+  - [x] `UseExclusiveReplyQueue()` builder method switches to a real exclusive auto-delete reply queue per Caller, with regular ack semantics.
+  - [x] `ctx` deadline maps to per-call timeout → `ErrCallTimeout`.
+  - [x] Concurrent calls return the right response (`CorrelationID` matching).
+  - [x] If the underlying channel closes during a Call, in-flight calls return `ErrChannelClosed`; new calls reconnect transparently.
 - **Verify:** Integration tests: (a) 100 concurrent calls, every response matches its request; (b) ctx timeout returns `ErrCallTimeout` cleanly; (c) `UseExclusiveReplyQueue` round-trip; (d) channel close mid-call surfaces `ErrChannelClosed`.
 - **Files:** `rpc.go`, `rpc_caller_builder.go`, `rpc_caller_integration_test.go`.
 - **Deps:** T12, T18.
