@@ -1084,35 +1084,14 @@ dependency for the doc reconciliation itself.
 
 ---
 
-### LATER-65 — Delayed-delivery timing assertion never runs in CI (only the x-delay emission is covered)
-
-**Context:** The delayed-message round-trip that proves the broker actually *holds* a message for its
-`x-delay` — `TestDelay_DelayedDelivery_integration` (`delay_integration_test.go`), asserting arrival
-in the 2s–2.5s window — is skip-guarded by `requireDelayedExchange`, because the default
-`rabbitmq:3-management` image (and the CI broker) ships without the `rabbitmq_delayed_message_exchange`
-plugin. The example smoke test `examples/delayed/example_integration_test.go` skip-guards identically.
-On every CI run today both `t.Skip()`. The fast-lane unit tests (`delay_test.go`) prove only that the
-`x-delay` header is *emitted* (and now that out-of-range delays are rejected) — nothing proves the
-broker *acts* on it.
-
-**Impact:** Medium-low and bounded. The publish-side contract (header emitted, range-validated, caller
-headers not mutated) is fully unit-covered, and the reviewer verified the broker-side behavior by
-inspection. But the one behavior unique to the delayed path — that a confirmed delayed publish is
-actually deferred — has **zero green coverage anywhere**. A regression in how `x-delay` is wired (wrong
-type, wrong units, wrong exchange arg) would pass the entire suite. This is the only Phase 7 guarantee
-with no executed assertion.
-
-**Evidence:** `/ship` test-engineer coverage analysis (gap #8, 2026-05-30). Consciously deferred at
-T31/T31b time to the future `amqptest.RequireDelayedExchange(t)` helper (T37), per the plan's
-allowance for the checkpoint examples landing before the test tooling.
-
-**Suggested solution:** Two complementary options, either or both: (a) land `amqptest.RequireDelayedExchange(t)`
-in T37 and migrate the two skip-guards to it (already the planned path); (b) add a CI lane variant that
-runs a RabbitMQ image with the `rabbitmq_delayed_message_exchange` plugin enabled (a custom Dockerfile
-or an `enabled_plugins` mount), wired into the `integration` job, so the 2s–2.5s timing assertion runs
-at least on one lane. Without (b), even after T37 the assertion only executes on a developer's
-plugin-enabled broker, never in CI.
-
-**Prerequisites:** T37 (`amqptest/` testcontainers helper) for option (a); the Phase 9 CI work
-(T38/T42) for wiring the plugin-enabled lane in option (b).
+<!-- LATER-65 resolved (option b): Dockerfile.rabbitmq-delayed bakes the
+     rabbitmq_delayed_message_exchange plugin (pinned by SHA-256) into a
+     rabbitmq:3.13-management broker; docker-compose.integration.yml builds it and the
+     ci.yml integration job provisions it via `make integration-up`, so
+     TestDelay_DelayedDelivery_integration and the examples/delayed smoke test now run
+     the 2s–2.5s window assertion on every integration lane instead of skipping. The
+     probe-and-t.Skip guard is retained for plugin-less brokers. Option (a) — folding
+     the duplicated requireDelayedExchange helper into amqptest.RequireDelayedExchange —
+     stays deferred to T37 and is tracked by the inline TODO in both test files; it is a
+     code-dedup nicety, not a coverage gap, now that (b) makes the assertion run. -->
 

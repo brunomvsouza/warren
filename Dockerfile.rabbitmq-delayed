@@ -1,0 +1,33 @@
+# Plugin-enabled RabbitMQ broker for warren's integration lane.
+#
+# Why this image exists: rabbitmq_delayed_message_exchange is a community plugin
+# shipped as a standalone .ez archive -- it is NOT bundled in any official rabbitmq
+# image. Without it the delayed-delivery timing assertions
+# (TestDelay_DelayedDelivery_integration and examples/delayed's
+# TestDelayedExample_integration) skip on every run, so the one behaviour unique to
+# the delayed path -- that the broker actually holds a message for its x-delay -- has
+# zero executed coverage. Baking the plugin in lets that 2s-2.5s window assertion run
+# on every integration lane (CI and local `make integration-up`), not only on a
+# developer's hand-built broker.
+#
+# Pinned for reproducibility and plugin/broker ABI compatibility:
+#   - rabbitmq 3.13 (management) <-> delayed-message-exchange v3.13.0 (matching minor;
+#     the plugin is ABI-compatible across 3.13.x patch releases).
+#   - the .ez is fetched by exact release URL and verified by SHA-256, so a tampered
+#     or truncated download fails the build (supply-chain hardening; mirrors the
+#     concerns tracked for the CI image pins).
+FROM rabbitmq:3.13-management
+
+# Drop the plugin archive (a zip .ez) into the broker's plugin directory. --checksum
+# makes BuildKit verify the bytes before the layer is committed; --chmod keeps it
+# world-readable so the unprivileged rabbitmq user can load it.
+ADD --chmod=644 \
+    --checksum=sha256:3479180df03fa830fd59ccf638a60eee8f0e8261524a8616685522d7b8d9a9ee \
+    https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases/download/v3.13.0/rabbitmq_delayed_message_exchange-3.13.0.ez \
+    /opt/rabbitmq/plugins/
+
+# Merge the plugin into the enabled set offline (no running broker needed): --offline
+# appends to the existing [rabbitmq_management,rabbitmq_prometheus] enabled_plugins
+# file rather than replacing it, so the management HTTP API the integration tests
+# read (AMQP_TEST_MANAGEMENT_URL) stays enabled alongside the new plugin.
+RUN rabbitmq-plugins enable --offline rabbitmq_delayed_message_exchange

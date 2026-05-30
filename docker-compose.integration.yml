@@ -1,6 +1,13 @@
 services:
   rabbitmq:
-    image: rabbitmq:3-management
+    # Built from Dockerfile.rabbitmq-delayed (rabbitmq:3.13-management +
+    # rabbitmq_delayed_message_exchange) so the delayed-delivery timing assertions
+    # actually run instead of skipping. CI builds the same image, keeping the local
+    # broker identical to the integration lane.
+    build:
+      context: .
+      dockerfile: Dockerfile.rabbitmq-delayed
+    image: warren-rabbitmq-delayed:3.13
     ports:
       - "5672:5672"
       - "15672:15672"
