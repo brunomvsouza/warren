@@ -955,21 +955,41 @@ run in a goroutine to avoid blocking the event-loop that dispatches them.
   `-race` green (root cov 79.7%), integration lane `-race` green (31.3s),
   examples-smoke `-race` green, lint 0 issues, build + gofmt clean.
 
-### [ ] T36 — Remaining consumer options · S
+### [x] T36 — Remaining consumer options · S
 SPEC compliance reminder: **`NoLocal()` is intentionally omitted** (SPEC
 §6 "Note on AMQP 0-9-1 vs RabbitMQ" and SPEC §10 decision 10). RabbitMQ
 silently ignores the `no-local` flag on `basic.consume`; exposing it
 would be misleading API surface.
 - **Acceptance:**
-  - [ ] `Exclusive()`, `Args(Headers)`, `Tag(string)` builder methods land on both `ConsumerBuilder` and `BatchConsumerBuilder` and round-trip the values into the underlying `basic.consume` frame.
-  - [ ] **No `NoLocal()` method** on either builder — verified by a unit test that asserts the symbol is absent (`grep`-style guard in `consumer_api_test.go`).
-  - [ ] **`OnCancel(func(reason string))`** fires when broker sends `basic.cancel` (queue deleted, exclusive forced off, etc.). The reason is sourced from the AMQP frame.
-  - [ ] **`Consume(ctx, ...)` returns `ErrConsumerCancelled` (wrapping the reason)** after delivering the `OnCancel` callback, so the consumer goroutine is never silently dead. The library does NOT auto-redeclare or reissue `basic.consume` — operators usually deleted the queue on purpose.
-  - [ ] **Mandatory metric `consumer_cancelled_total{queue, reason}`** increments per received `basic.cancel`.
-  - [ ] The library advertises `consumer_cancel_notify=true` in `connection.start-ok` client capabilities (already default in `amqp091-go`; assert via a recorded frame).
+  - [x] `Exclusive()`, `Args(Headers)`, `Tag(string)` builder methods land on both `ConsumerBuilder` and `BatchConsumerBuilder` and round-trip the values into the underlying `basic.consume` frame.
+  - [x] **No `NoLocal()` method** on either builder — verified by a unit test that asserts the symbol is absent (`grep`-style guard in `consumer_api_test.go`).
+  - [x] **`OnCancel(func(reason string))`** fires when broker sends `basic.cancel` (queue deleted, exclusive forced off, etc.). The reason is sourced from the AMQP frame.
+  - [x] **`Consume(ctx, ...)` returns `ErrConsumerCancelled` (wrapping the reason)** after delivering the `OnCancel` callback, so the consumer goroutine is never silently dead. The library does NOT auto-redeclare or reissue `basic.consume` — operators usually deleted the queue on purpose.
+  - [x] **Mandatory metric `consumer_cancelled_total{queue, reason}`** increments per received `basic.cancel`.
+  - [x] The library advertises `consumer_cancel_notify=true` in `connection.start-ok` client capabilities (already default in `amqp091-go`; assert via a recorded frame).
 - **Verify:** Integration tests: declare a queue, attach consumer with `OnCancel` callback, delete the queue, assert callback fires with reason `"queue deleted"`, `Consume` returns `errors.Is(err, ErrConsumerCancelled)`, and `consumer_cancelled_total{queue, reason}` == 1. Symbol-absence test asserts the public surface has no `NoLocal` method on either builder.
 - **Files:** edits to `consumer.go`, `consumer_builder.go`, `batch_consumer_builder.go`, `consumer_cancel_integration_test.go`, `consumer_api_test.go`.
 - **Deps:** T18.
+- **Done:** `Exclusive()`/`Args(Headers)` made functional on both `ConsumerBuilder`
+  and `BatchConsumerBuilder` (Tag already shipped in T18); they round-trip into
+  `basic.consume` via the new `buildConsumeArgs` helper (user Args merged, typed
+  `Priority()` overlays `x-priority` last) and the exclusive flag. Symbol-absence
+  guards for `NoLocal` on both builders via reflection (`consumer_api_test.go`).
+  `OnCancel(func(reason))` + broker `basic.cancel` surfacing wired symmetrically into
+  `Consumer.runConsume` and `BatchConsumer.Consume`: the delivery pump distinguishes a
+  real `basic.cancel` (tag, ok=true) from a channel-close (`cancelCh` closed, ok=false)
+  — the latter re-subscribes instead of dying — and forwards real cancels to the loop,
+  which fires `OnCancel` (or warns), records the metric, drains in-flight handlers, and
+  returns `ErrConsumerCancelled` wrapping the consumer tag. The library does NOT
+  auto-redeclare. **Cardinality fix (was flagged for T36 in `metrics/prometheus.go`):**
+  `consumer_cancelled_total` now records the bounded `reason="broker_initiated"` class
+  instead of the unbounded `ctag-<uuidv7>`; the per-event tag is surfaced through
+  `OnCancel` and the wrapped error where unbounded values are harmless. `consumer_cancel_notify`
+  is force-advertised by `amqp091-go` (`openTune`); the queue-deletion integration test
+  reaching `OnCancel` is the recorded-frame proof. Verified: unit `-race` (root cov
+  79.6%), full integration `-race` lane green (32.98s) + reconnect stress `-count=3`
+  (45/45 PASS, locking the cancelCh-close regression fix), examples-smoke `-race` 8/8,
+  lint 0, gofmt + build + vet clean.
 
 ### [ ] T37 — `amqpmock/` + `amqptest/` subpackages · M
 Rev 5 promotes the testcontainers helper to a public `amqptest/`

@@ -26,6 +26,14 @@ type ConsumerBuilder[M any] struct {
 	priority    int
 	prioritySet bool
 	autoAck     bool
+	exclusive   bool
+
+	// consumeArgs are extra basic.consume arguments (Args). x-priority is layered
+	// on top at subscribe time when Priority is set, so the typed option wins.
+	consumeArgs Headers
+	// onCancel fires when the broker sends basic.cancel (queue deleted, exclusive
+	// lock revoked). nil means "log a warning instead".
+	onCancel func(reason string)
 
 	handlerTimeout time.Duration
 	timeoutVerdict TimeoutVerdict
@@ -125,9 +133,14 @@ func (b *ConsumerBuilder[M]) Tracer(t otel.Tracer) *ConsumerBuilder[M] {
 	return b
 }
 
-// Exclusive marks the consumer as exclusive on the queue.
-// NOTE: full implementation is in T36; the flag is stored here.
-func (b *ConsumerBuilder[M]) Exclusive() *ConsumerBuilder[M] { return b }
+// Exclusive requests exclusive consumer access to the queue (the basic.consume
+// exclusive flag). While an exclusive consumer is attached, the broker refuses any
+// other consumer on the same queue with ACCESS_REFUSED (surfaced as ErrAccessRefused).
+// Use this for active/standby topologies where exactly one worker must hold the queue.
+func (b *ConsumerBuilder[M]) Exclusive() *ConsumerBuilder[M] {
+	b.exclusive = true
+	return b
+}
 
 // AutoAck enables the AMQP no-ack flag on basic.consume, which tells the broker
 // to consider every delivery already acknowledged before the client sees it.
@@ -154,14 +167,26 @@ func (b *ConsumerBuilder[M]) AutoAck() *ConsumerBuilder[M] {
 	return b
 }
 
-// Args sets extra queue-consume arguments forwarded in basic.consume.
-// NOTE: full implementation is in T36.
-func (b *ConsumerBuilder[M]) Args(_ Headers) *ConsumerBuilder[M] { return b }
+// Args sets extra arguments forwarded in the basic.consume frame (the consumer
+// argument table, e.g. broker-specific consumer options). When Priority is also
+// set, the typed x-priority value is layered on top, so Priority wins over any
+// x-priority slipped through Args.
+func (b *ConsumerBuilder[M]) Args(args Headers) *ConsumerBuilder[M] {
+	b.consumeArgs = args
+	return b
+}
 
-// OnCancel registers a callback invoked when the broker cancels the consumer
-// via basic.cancel (e.g. the queue was deleted or the exclusive lock revoked).
-// NOTE: full implementation is in T36.
-func (b *ConsumerBuilder[M]) OnCancel(_ func(reason string)) *ConsumerBuilder[M] { return b }
+// OnCancel registers a callback invoked when the broker cancels the consumer via
+// basic.cancel (e.g. the queue was deleted or an exclusive lock was revoked). The
+// reason is the cancelled consumer's tag — the only datum the AMQP basic.cancel
+// frame carries; it is not a free-form description. After OnCancel fires, Consume
+// returns ErrConsumerCancelled (the library does not auto-redeclare the queue).
+// When OnCancel is unset, the library logs a warning instead. Always wire OnCancel
+// in production code: a silently dying consumer is worse than a leaked deletion.
+func (b *ConsumerBuilder[M]) OnCancel(fn func(reason string)) *ConsumerBuilder[M] {
+	b.onCancel = fn
+	return b
+}
 
 // MaxRedeliveries caps the number of times a message can be redelivered before
 // it is dead-lettered. Default 0 = unbounded.

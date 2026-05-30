@@ -153,6 +153,18 @@ type BatchConsumer[M any] struct {
 	priority    int
 	prioritySet bool
 
+	// exclusive requests the basic.consume exclusive flag (Exclusive()).
+	exclusive bool
+	// consumeArgs are extra basic.consume arguments (Args()); x-priority is layered
+	// on top at subscribe time when prioritySet is true.
+	consumeArgs Headers
+	// onCancel fires when the broker sends basic.cancel (OnCancel()); nil → warn.
+	onCancel func(reason string)
+	// cancelReasonCh relays broker basic.cancel notifications from the delivery pump
+	// to Consume's loop, which fires OnCancel and returns ErrConsumerCancelled.
+	// Consume lazily creates it (buffered, size 1); tests may pre-set it.
+	cancelReasonCh chan string
+
 	maxRedeliveries  int
 	counterBDisabled bool
 	counterState     atomic.Pointer[redeliveryCounter]
@@ -201,6 +213,13 @@ func (c *BatchConsumer[M]) recordHandler(outcome string, d time.Duration) {
 func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error {
 	if !c.started.CompareAndSwap(false, true) {
 		return fmt.Errorf("%w: batch consumer already started; create a new consumer via Build() to restart", ErrInvalidOptions)
+	}
+
+	// cancelReasonCh relays broker basic.cancel notifications from the delivery pump
+	// to this loop. Create it before registering the reconnect hook so every pump
+	// observes the same channel. Tests may pre-set it.
+	if c.cancelReasonCh == nil {
+		c.cancelReasonCh = make(chan string, 1)
 	}
 
 	resubCh := make(chan deliverySub, 1)
@@ -377,6 +396,14 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 			stopFlushTimer()
 			cur = sub
 
+		case reason := <-c.cancelReasonCh:
+			// Broker sent basic.cancel (queue deleted, exclusive lock revoked).
+			// Discard the unacked pending batch (the queue is likely gone), fire
+			// OnCancel, record the metric, and return ErrConsumerCancelled (SPEC §6.3).
+			pending = pending[:0]
+			stopFlushTimer()
+			return surfaceBrokerCancel(c.onCancel, c.mc.opts.logger, c.cm, c.queue, reason)
+
 		case <-flushCh:
 			flushCh = nil
 			flushTimer = nil
@@ -384,12 +411,16 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 
 		case d, ok := <-cur.ch:
 			if !ok {
-				// AMQP channel closed; wait for re-subscribe or ctx cancel.
+				// AMQP channel closed; wait for re-subscribe, a pending basic.cancel,
+				// or ctx cancel. basic.cancel also closes the delivery stream, so the
+				// cancel reason may already be buffered when this !ok fires.
 				pending = pending[:0]
 				stopFlushTimer()
 				select {
 				case <-ctx.Done():
 					return nil
+				case reason := <-c.cancelReasonCh:
+					return surfaceBrokerCancel(c.onCancel, c.mc.opts.logger, c.cm, c.queue, reason)
 				case cur = <-resubCh:
 				}
 				continue
@@ -630,12 +661,11 @@ func (c *BatchConsumer[M]) openBatchDeliveryCh(ctx context.Context) (deliverySub
 		return deliverySub{}, fmt.Errorf("warren: batch consumer Qos: %w", wrapAMQPError(err))
 	}
 
-	var args amqp091.Table
-	if c.prioritySet {
-		args = amqp091.Table{"x-priority": c.priority}
-	}
+	args := buildConsumeArgs(c.consumeArgs, c.prioritySet, c.priority)
 
-	deliveries, err := ch.Consume(c.queue, c.tag, false, false, false, false, args)
+	// ch.Consume(queue, consumer, autoAck, exclusive, noLocal, noWait, args):
+	// exclusive = c.exclusive (Exclusive()); noLocal=false (RabbitMQ ignores it).
+	deliveries, err := ch.Consume(c.queue, c.tag, false, c.exclusive, false, false, args)
 	if err != nil {
 		_ = ch.Close()
 		return deliverySub{}, fmt.Errorf("warren: batch consumer subscribe: %w", wrapAMQPError(err))
@@ -643,6 +673,7 @@ func (c *BatchConsumer[M]) openBatchDeliveryCh(ctx context.Context) (deliverySub
 
 	out := make(chan amqp091.Delivery, int(c.prefetch)) //nolint:gosec // G115: prefetch bounded
 	closeCh := ch.NotifyClose(make(chan *amqp091.Error, 1))
+	cancelCh := ch.NotifyCancel(make(chan string, 1))
 
 	channelDone := make(chan struct{})
 	var onceDone sync.Once
@@ -654,6 +685,16 @@ func (c *BatchConsumer[M]) openBatchDeliveryCh(ctx context.Context) (deliverySub
 			select {
 			case d, ok := <-deliveries:
 				if !ok {
+					// basic.cancel or broker closed the delivery stream. Drain cancelCh
+					// non-blockingly; only a real basic.cancel (ok=true) forwards a
+					// reason — a closed cancelCh (ok=false) is just channel shutdown.
+					select {
+					case tag, ok := <-cancelCh:
+						if ok {
+							c.forwardCancel(tag)
+						}
+					default:
+					}
 					closeChannelDone()
 					return
 				}
@@ -662,6 +703,16 @@ func (c *BatchConsumer[M]) openBatchDeliveryCh(ctx context.Context) (deliverySub
 				case <-ctx.Done():
 					return
 				}
+			case tag, ok := <-cancelCh:
+				// A real basic.cancel (ok=true) carries the consumer tag: forward it so
+				// Consume fires OnCancel and returns ErrConsumerCancelled. A closed
+				// cancelCh (ok=false) is the channel shutting down on reconnect — treat
+				// it like NotifyClose so the consumer re-subscribes instead of dying.
+				if ok {
+					c.forwardCancel(tag)
+				}
+				closeChannelDone()
+				return
 			case <-closeCh:
 				closeChannelDone()
 				return
@@ -672,6 +723,16 @@ func (c *BatchConsumer[M]) openBatchDeliveryCh(ctx context.Context) (deliverySub
 	}()
 
 	return deliverySub{ch: out, done: channelDone}, nil
+}
+
+// forwardCancel relays a broker basic.cancel reason (the consumer tag) to Consume's
+// loop without blocking the delivery pump. cancelReasonCh is buffered (size 1); a
+// full buffer means a cancel is already pending, so the first one wins.
+func (c *BatchConsumer[M]) forwardCancel(reason string) {
+	select {
+	case c.cancelReasonCh <- reason:
+	default:
+	}
 }
 
 // Health reports whether the batch consumer's pinned connection is healthy.

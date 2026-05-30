@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
 
 	"github.com/brunomvsouza/warren/codec"
+	"github.com/brunomvsouza/warren/log"
 	"github.com/brunomvsouza/warren/metrics"
 	"github.com/brunomvsouza/warren/otel"
 )
@@ -234,6 +236,14 @@ type Consumer[M any] struct {
 	priority    int
 	prioritySet bool
 
+	// exclusive requests the basic.consume exclusive flag (Exclusive()).
+	exclusive bool
+	// consumeArgs are extra basic.consume arguments (Args()); x-priority is layered
+	// on top at subscribe time when prioritySet is true.
+	consumeArgs Headers
+	// onCancel fires when the broker sends basic.cancel (OnCancel()); nil → warn.
+	onCancel func(reason string)
+
 	// brokerAutoAck issues basic.consume with the AMQP no-ack flag (AutoAck()).
 	// This is DISTINCT from the dispatch `autoAck` parameter, which only selects
 	// the Consume (library applies the verdict) vs ConsumeRaw (handler applies it)
@@ -274,12 +284,12 @@ type Consumer[M any] struct {
 	// returns it with done=nil (channel-close detection is not exercised).
 	deliveryCh chan amqp091.Delivery
 
-	// basicCancelCh is a test-injection hook for basic.cancel notifications.
-	// When non-nil, ConsumeRaw's main select loop picks it up and calls
-	// cm.RecordCancelled with the received consumer tag. A nil channel is never
-	// selected in Go, so production code (where basicCancelCh is always nil) is
-	// unaffected.
-	basicCancelCh chan string
+	// cancelReasonCh carries broker basic.cancel notifications (the cancelled
+	// consumer tag) from the openDeliveryCh delivery pump to runConsume's main loop,
+	// which then fires OnCancel, records the metric, and returns ErrConsumerCancelled.
+	// runConsume lazily creates it (buffered, size 1) when nil; tests may pre-set it
+	// to inject a cancel without a live broker.
+	cancelReasonCh chan string
 
 	// deliverySubOverride is a full test-injection hook: when non-nil, openDeliveryCh
 	// returns it directly, including the done channel for channel-close detection tests.
@@ -314,6 +324,9 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 		channelQoS:       b.channelQoS,
 		priority:         b.priority,
 		prioritySet:      b.prioritySet,
+		exclusive:        b.exclusive,
+		consumeArgs:      b.consumeArgs,
+		onCancel:         b.onCancel,
 		brokerAutoAck:    b.autoAck,
 		handlerTimeout:   b.handlerTimeout,
 		timeoutVerdict:   b.timeoutVerdict,
@@ -353,6 +366,68 @@ func connIndexForTag(tag string, n int) int {
 		h *= 16777619
 	}
 	return int(h) % n //nolint:gosec // G115: n is bounded by WithConsumerConnections
+}
+
+// cancelReasonBrokerInitiated is the bounded "reason" label for
+// consumer_cancelled_total. The AMQP basic.cancel frame carries only the consumer
+// tag (no human-readable reason), and using that unbounded tag as a metric label
+// blew up Prometheus cardinality (one series per ctag-<uuidv7>). The metric records
+// this closed-vocabulary class instead, while the per-event tag is surfaced through
+// OnCancel and the wrapped ErrConsumerCancelled where unbounded values are harmless.
+const cancelReasonBrokerInitiated = "broker_initiated"
+
+// buildConsumeArgs assembles the basic.consume argument table from the user-supplied
+// Args plus the typed Priority option. It copies consumeArgs (never mutating the
+// caller's map) and, when prioritySet, overlays x-priority so the typed Priority()
+// wins over any x-priority slipped through Args(). Returns nil when there is nothing
+// to send, matching amqp091's "no arguments" convention.
+func buildConsumeArgs(consumeArgs Headers, prioritySet bool, priority int) amqp091.Table {
+	if len(consumeArgs) == 0 && !prioritySet {
+		return nil
+	}
+	args := make(amqp091.Table, len(consumeArgs)+1)
+	maps.Copy(args, amqp091.Table(consumeArgs))
+	if prioritySet {
+		args["x-priority"] = priority
+	}
+	return args
+}
+
+// forwardCancel relays a broker basic.cancel reason (the consumer tag) to
+// runConsume's loop without blocking the delivery pump. cancelReasonCh is buffered
+// (size 1); a full buffer means a cancel is already pending, so the first one wins.
+func (c *Consumer[M]) forwardCancel(reason string) {
+	select {
+	case c.cancelReasonCh <- reason:
+	default:
+	}
+}
+
+// handleBrokerCancel runs the shared basic.cancel response, then drains in-flight
+// handlers before returning so the caller (runConsume) leaves no goroutines behind.
+func (c *Consumer[M]) handleBrokerCancel(wg *sync.WaitGroup, reason string) error {
+	err := surfaceBrokerCancel(c.onCancel, c.mc.opts.logger, c.cm, c.queue, reason)
+	wg.Wait()
+	return err
+}
+
+// surfaceBrokerCancel is the shared basic.cancel response for Consumer and
+// BatchConsumer (SPEC §6.3): fire OnCancel with the consumer tag (or warn when
+// unset), increment the bounded consumer_cancelled_total{queue, reason} metric, and
+// build the ErrConsumerCancelled the consumer goroutine returns. The wrapped error
+// carries the tag (the only datum the frame provides); the library does NOT
+// auto-redeclare the queue — operators usually deleted it on purpose.
+func surfaceBrokerCancel(onCancel func(string), logger log.Logger, cm metrics.ConsumerMetrics, queue, reason string) error {
+	if onCancel != nil {
+		onCancel(reason)
+	} else {
+		logger.Warningf(
+			"warren: broker cancelled consumer %q on queue %q (basic.cancel); Consume returns ErrConsumerCancelled and does not auto-redeclare the queue",
+			reason, queue,
+		)
+	}
+	cm.RecordCancelled(queue, cancelReasonBrokerInitiated)
+	return fmt.Errorf("%w: consumer tag %q", ErrConsumerCancelled, reason)
 }
 
 // Consume starts consuming from the configured queue, decoding each message
@@ -398,6 +473,13 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 		return fmt.Errorf("%w: consumer already started; create a new consumer via Build() to restart", ErrInvalidOptions)
 	}
 
+	// cancelReasonCh relays broker basic.cancel notifications from the delivery pump
+	// to this loop. Create it before registering the reconnect hook (which may open a
+	// fresh pump) so every pump observes the same channel. Tests may pre-set it.
+	if c.cancelReasonCh == nil {
+		c.cancelReasonCh = make(chan string, 1)
+	}
+
 	// resubCh carries replacement subscriptions produced by the reconnect hook.
 	resubCh := make(chan deliverySub, 1)
 
@@ -438,19 +520,23 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 		case sub := <-resubCh:
 			cur = sub
 
-		case tag := <-c.basicCancelCh:
-			// Test-injection path: simulates broker-initiated basic.cancel.
-			// Production code uses ch.NotifyCancel inside openDeliveryCh instead.
-			// A nil basicCancelCh is never selected (Go semantics for nil channels).
-			c.cm.RecordCancelled(c.queue, tag)
+		case reason := <-c.cancelReasonCh:
+			// Broker sent basic.cancel (queue deleted, exclusive lock revoked).
+			// Fire OnCancel, record the metric, drain in-flight handlers, and return
+			// ErrConsumerCancelled — never silently die (SPEC §6.3).
+			return c.handleBrokerCancel(&wg, reason)
 
 		case d, ok := <-cur.ch:
 			if !ok {
-				// AMQP channel closed; wait for re-subscribe or ctx cancel.
+				// AMQP channel closed; wait for re-subscribe, a pending basic.cancel,
+				// or ctx cancel. basic.cancel also closes the delivery stream, so the
+				// cancel reason may already be buffered when this !ok fires.
 				select {
 				case <-ctx.Done():
 					wg.Wait()
 					return nil
+				case reason := <-c.cancelReasonCh:
+					return c.handleBrokerCancel(&wg, reason)
 				case cur = <-resubCh:
 				}
 				continue
@@ -486,7 +572,7 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 	}
 	if c.deliveryCh != nil {
 		// done is nil: channel-close detection is not exercised in basic unit tests.
-		// basicCancelCh (when set) is handled in ConsumeRaw's main select loop.
+		// cancelReasonCh (when set) is handled in runConsume's main select loop.
 		return deliverySub{ch: c.deliveryCh, done: nil}, nil
 	}
 
@@ -509,14 +595,13 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 		return deliverySub{}, fmt.Errorf("warren: consumer Qos: %w", wrapAMQPError(err))
 	}
 
-	var args amqp091.Table
-	if c.prioritySet {
-		args = amqp091.Table{"x-priority": c.priority}
-	}
+	args := buildConsumeArgs(c.consumeArgs, c.prioritySet, c.priority)
 
-	// The third argument is the AMQP no-ack flag: c.brokerAutoAck (AutoAck()) makes
-	// the broker treat every delivery as acknowledged on dispatch (SPEC §6.3).
-	deliveries, err := ch.Consume(c.queue, c.tag, c.brokerAutoAck, false, false, false, args)
+	// ch.Consume(queue, consumer, autoAck, exclusive, noLocal, noWait, args):
+	//   - autoAck   = c.brokerAutoAck (AutoAck()): broker acks on dispatch (SPEC §6.3).
+	//   - exclusive = c.exclusive (Exclusive()): refuse other consumers on this queue.
+	//   - noLocal   = false: RabbitMQ silently ignores it; never exposed (SPEC §6 note).
+	deliveries, err := ch.Consume(c.queue, c.tag, c.brokerAutoAck, c.exclusive, false, false, args)
 	if err != nil {
 		_ = ch.Close()
 		return deliverySub{}, fmt.Errorf("warren: consumer subscribe: %w", wrapAMQPError(err))
@@ -543,10 +628,13 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 					// Drain cancelCh non-blockingly: both cancelCh and deliveries
 					// may become ready simultaneously; Go picks non-deterministically,
 					// so the !ok branch can win before the cancelCh case is selected.
-					// This ensures RecordCancelled is always called on every basic.cancel.
+					// Only a real basic.cancel (ok=true) forwards a reason; a closed
+					// cancelCh (ok=false) just means the channel is shutting down.
 					select {
-					case tag := <-cancelCh:
-						c.cm.RecordCancelled(c.queue, tag)
+					case tag, ok := <-cancelCh:
+						if ok {
+							c.forwardCancel(tag)
+						}
 					default:
 					}
 					closeChannelDone()
@@ -557,11 +645,17 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 				case <-ctx.Done():
 					return
 				}
-			case tag := <-cancelCh:
-				// Broker sent basic.cancel for this consumer (e.g. queue deleted,
-				// exclusive lock revoked). Record the metric; the delivery stream
-				// will also close and drive closeChannelDone via the !ok drain above.
-				c.cm.RecordCancelled(c.queue, tag)
+			case tag, ok := <-cancelCh:
+				// A real basic.cancel (ok=true) carries the consumer tag (queue
+				// deleted, exclusive lock revoked): forward it so runConsume fires
+				// OnCancel and returns ErrConsumerCancelled. A closed cancelCh
+				// (ok=false) is just the channel shutting down on reconnect — treat it
+				// like a NotifyClose so the consumer re-subscribes instead of dying.
+				if ok {
+					c.forwardCancel(tag)
+				}
+				closeChannelDone()
+				return
 			case <-closeCh:
 				// AMQP channel close frame received.
 				closeChannelDone()

@@ -30,6 +30,13 @@ type BatchConsumerBuilder[M any] struct {
 	channelQoS  bool
 	priority    int
 	prioritySet bool
+	exclusive   bool
+
+	// consumeArgs are extra basic.consume arguments (Args); x-priority is layered on
+	// top at subscribe time when prioritySet is true.
+	consumeArgs Headers
+	// onCancel fires when the broker sends basic.cancel; nil → warn.
+	onCancel func(reason string)
 
 	maxRedeliveries  int
 	counterBDisabled bool
@@ -105,6 +112,30 @@ func (b *BatchConsumerBuilder[M]) ChannelQoS() *BatchConsumerBuilder[M] {
 func (b *BatchConsumerBuilder[M]) Priority(p int) *BatchConsumerBuilder[M] {
 	b.priority = p
 	b.prioritySet = true
+	return b
+}
+
+// Exclusive requests exclusive consumer access to the queue (the basic.consume
+// exclusive flag). While set, the broker refuses any other consumer on the same
+// queue with ACCESS_REFUSED (surfaced as ErrAccessRefused).
+func (b *BatchConsumerBuilder[M]) Exclusive() *BatchConsumerBuilder[M] {
+	b.exclusive = true
+	return b
+}
+
+// Args sets extra arguments forwarded in the basic.consume frame. When Priority is
+// also set, the typed x-priority value is layered on top (Priority wins).
+func (b *BatchConsumerBuilder[M]) Args(args Headers) *BatchConsumerBuilder[M] {
+	b.consumeArgs = args
+	return b
+}
+
+// OnCancel registers a callback invoked when the broker cancels the consumer via
+// basic.cancel. The reason is the cancelled consumer's tag (the only datum the
+// frame carries). After OnCancel fires, Consume returns ErrConsumerCancelled; the
+// library does not auto-redeclare the queue. When unset, a warning is logged.
+func (b *BatchConsumerBuilder[M]) OnCancel(fn func(reason string)) *BatchConsumerBuilder[M] {
+	b.onCancel = fn
 	return b
 }
 
@@ -195,6 +226,9 @@ func (b *BatchConsumerBuilder[M]) Build() (*BatchConsumer[M], error) {
 		channelQoS:       cfg.channelQoS,
 		priority:         cfg.priority,
 		prioritySet:      cfg.prioritySet,
+		exclusive:        cfg.exclusive,
+		consumeArgs:      cfg.consumeArgs,
+		onCancel:         cfg.onCancel,
 		maxRedeliveries:  cfg.maxRedeliveries,
 		counterBDisabled: cfg.counterBDisabled,
 		codec:            cfg.c,
