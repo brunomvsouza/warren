@@ -13,6 +13,7 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"math/big"
+	"net"
 	"runtime"
 	"sync"
 	"testing"
@@ -510,4 +511,28 @@ func TestNextDialAddr_cursorStaysBounded(t *testing.T) {
 		assert.GreaterOrEqual(t, mc.dialCursor, 0)
 		assert.Less(t, mc.dialCursor, len(addrs))
 	}
+}
+
+// TestConnectOnce_ctxCancelled_returnsCtxErr covers the ctx-cancellation fork of
+// connectOnce (which wraps reconnectRaw): when no dial succeeds and the context is
+// done, the caller must surface ctx.Err() rather than a redacted dial error. A dialer
+// that always fails forces the backoff loop to keep retrying until the cancelled ctx
+// ends it; Retries caps the worst case so the test can never spin if ctx were ignored.
+func TestConnectOnce_ctxCancelled_returnsCtxErr(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	mc := newBareManaged(t)
+	mc.opts.addr = "amqp://h:5672/"
+	mc.opts.dialer = func(_, _ string) (net.Conn, error) {
+		return nil, errors.New("no broker")
+	}
+	mc.opts.reconnectBackoff = RetryPolicy{Min: time.Millisecond, Max: time.Millisecond, Retries: 50}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before any dial can succeed
+
+	err := mc.connectOnce(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled,
+		"a ctx cancelled before any successful dial must surface ctx.Err(), not a redacted dial error")
 }

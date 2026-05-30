@@ -615,6 +615,10 @@ internally via `Concurrency(n)`.
 - Publisher confirms enabled on every channel.
 - `connection.blocked`/`unblocked` events surfaced via `WithOnBlocked`
   and metrics, with one callback fire per affected TCP connection.
+  The callback runs **asynchronously** on a tracked goroutine (drained on
+  `Close`), so it may still be running — or start — after the matching
+  `unblocked` has been processed; do not assume it completes before traffic
+  resumes.
   While *any* publisher connection is blocked, `Publisher.Publish` and
   `Publisher.PublishBatch` route around it to an unblocked publisher
   connection if one exists; if **all** publisher connections are
@@ -1165,7 +1169,7 @@ func (b *ConsumerBuilder[M]) HandlerTimeoutVerdict(v TimeoutVerdict) *ConsumerBu
 func (b *ConsumerBuilder[M]) Exclusive() *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) AutoAck() *ConsumerBuilder[M]           // explicit opt-in; see warning below
 func (b *ConsumerBuilder[M]) Args(Headers) *ConsumerBuilder[M]
-func (b *ConsumerBuilder[M]) OnCancel(func(reason string)) *ConsumerBuilder[M] // basic.cancel from broker; reason e.g. "queue deleted"
+func (b *ConsumerBuilder[M]) OnCancel(func(reason string)) *ConsumerBuilder[M] // basic.cancel from broker; reason is the cancelled consumer tag (the frame carries no description)
 func (b *ConsumerBuilder[M]) MaxRedeliveries(n int) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) Metrics(metrics.ConsumerMetrics) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) WithoutMetrics() *ConsumerBuilder[M]
