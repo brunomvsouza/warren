@@ -490,6 +490,13 @@ func finishPublishSpan(span otel.Span, err error) {
 		return
 	}
 	span.SetAttributes(semconv.ErrorTypeKey.String(errType))
+	// Invariant: this predicate agrees with publishOutcome's first-match switch for
+	// every real path. ErrInvalidMessage arises only in encodeMsg (codec encode /
+	// header / UserID validation), which returns before any broker interaction, so
+	// it is never joined with a broker sentinel (ErrUnroutable, ErrPublishNacked,
+	// ...). On a contrived multi-sentinel error the code still degrades safely: it
+	// redacts (the conservative choice) and errType remains whatever publishOutcome
+	// reported, so the status description and recorded label stay consistent.
 	if errors.Is(err, ErrInvalidMessage) {
 		span.SetStatus(otelcodes.Error, errType)
 		span.RecordError(redactedSpanError{label: errType, err: err})

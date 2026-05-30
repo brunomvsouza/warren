@@ -1008,30 +1008,32 @@ phase is tackled first.
 
 ---
 
-<!-- LATER-59 resolved (Phase 6 validation): finishPublishSpan now redacts the codec-encode /
-     client-validation class (errors.Is(err, ErrInvalidMessage)) to the sentinel label on both the
-     span status description and the recorded error, via the shared redactedSpanError adapter, while
-     errors.Is backends still unwrap to the sentinel. Broker/framework diagnostics stay verbatim.
-     SPEC §8 leakage guarantee is now uniform across the publish and consume span paths. Pinned by
-     TestFinishPublishSpan_redactsCodecClassKeepsBrokerVerbatim. -->
+<!-- LATER-59 resolved: commit 810adb1 (Phase 6 validation) — finishPublishSpan now redacts the
+     codec-encode / client-validation class (errors.Is(err, ErrInvalidMessage)) to the sentinel label
+     on both the span status description and the recorded error, via the shared redactedSpanError
+     adapter, while errors.Is backends still unwrap to the sentinel. Broker/framework diagnostics stay
+     verbatim. SPEC §8 leakage guarantee is now uniform across the publish and consume span paths.
+     Pinned by TestFinishPublishSpan_redactsCodecClassKeepsBrokerVerbatim. -->
 
 ---
 
-<!-- LATER-60 resolved (Phase 6 validation): ceBinaryCodec.DecodeWithHeaders now caps the number of
-     cloudEvents:-prefixed extensions it reconstructs at maxCEBinaryExtensions (128) and rejects the
-     delivery with ErrInvalidMessage past the cap, mirroring maxHeaderDepth. Pinned by
+<!-- LATER-60 resolved: commit aab9b1b (Phase 6 validation) — ceBinaryCodec.DecodeWithHeaders now
+     caps the number of cloudEvents:-prefixed extensions it reconstructs at maxCEBinaryExtensions (128)
+     and rejects the delivery with ErrInvalidMessage past the cap, mirroring maxHeaderDepth. Pinned by
      TestCloudEventsBinary_DecodeWithHeaders_RejectsTooManyExtensions / _AcceptsExtensionsAtCap. -->
 
-<!-- LATER-61 resolved (Phase 6 validation): the json.Marshal call in ceStructuredCodec.Encode now
-     routes through a package-var seam (marshalEvent) so a test can inject a synthetic failure and
-     cover the otherwise-unreachable ErrInvalidMessage wrap. cloudevents.go Encode is now at 100%
-     statement coverage. Pinned by
+<!-- LATER-61 resolved: commit aab9b1b (Phase 6 validation) — ceStructuredCodec.Encode delegates the
+     json.Marshal call to a per-instance injected marshaler (the marshal field, set to json.Marshal by
+     NewCloudEventsStructured) so a test can inject a synthetic failure and cover the otherwise-
+     unreachable ErrInvalidMessage wrap, with no mutable package global. cloudevents.go Encode is now
+     at 100% statement coverage. Pinned by
      TestCloudEventsStructured_Encode_MarshalFailureWrapsErrInvalidMessage. -->
 
 ---
 
-<!-- LATER-62 resolved (Phase 6 validation): startBatchSpan now skips deliveries whose producer
-     context is invalid (Extract → context.Background()) via propagator.ActiveContext, so a
-     LinkingTracer adapter only ever receives Links with a valid producer span context. Pinned by
-     TestBatchConsumer_processBatchSpan_linksOnlyValidProducerContext. -->
+<!-- LATER-62 resolved: commit aa3af0c (Phase 6 validation) — startBatchSpan now skips deliveries
+     whose producer context is invalid (Extract → context.Background()) via propagator.ActiveContext,
+     so a LinkingTracer adapter only ever receives Links with a valid producer span context. Pinned by
+     TestBatchConsumer_processBatchSpan_linksOnlyValidProducerContext (and the all-bare-deliveries edge
+     TestBatchConsumer_processBatchSpan_allBareDeliveries_noLinks). -->
 

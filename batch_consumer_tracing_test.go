@@ -173,6 +173,52 @@ func TestBatchConsumer_processBatchSpan_linksOnlyValidProducerContext(t *testing
 	}
 }
 
+// TestBatchConsumer_processBatchSpan_allBareDeliveries_noLinks pins the edge of
+// LATER-62 where EVERY delivery arrives without a producer traceparent: the batch
+// span must carry zero Links (an empty slice handed to StartWithLinks), not one
+// invalid-context Link per delivery.
+func TestBatchConsumer_processBatchSpan_allBareDeliveries_noLinks(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	tr := &recordingTracer{}
+	deliveryCh := make(chan amqp091.Delivery, 10)
+	bc := newTracedBatchConsumer(t, tr, deliveryCh, 2)
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bc.Consume(ctx, func(_ context.Context, _ *Batch[string]) error { return nil })
+	}()
+
+	bare := func(tag uint64, body string) amqp091.Delivery {
+		return amqp091.Delivery{
+			DeliveryTag:  tag,
+			Body:         []byte(`"` + body + `"`),
+			ContentType:  "application/json",
+			Acknowledger: &fakeAcknowledger{},
+		}
+	}
+	deliveryCh <- bare(1, "a")
+	deliveryCh <- bare(2, "b")
+
+	assert.Eventually(t, func() bool { return tr.only() != nil }, time.Second, 10*time.Millisecond,
+		"expected exactly one process_batch span")
+
+	cancel()
+	require.NoError(t, <-done)
+
+	span := tr.only()
+	require.NotNil(t, span)
+
+	count, ok := span.attr("messaging.batch.message_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(2), count.AsInt64(), "all messages are still counted")
+	assert.Empty(t, span.links, "no delivery carries a valid producer context, so no Link is created")
+}
+
 // — process_batch span: handler error stamps the nack outcome ————————————————
 
 func TestBatchConsumer_processBatchSpan_errorOutcome(t *testing.T) {
