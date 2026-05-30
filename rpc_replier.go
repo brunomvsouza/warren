@@ -3,6 +3,7 @@ package warren
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -91,8 +92,13 @@ func (r *Replier[Req, Resp]) makeRawHandler(h ReplyHandler[Req, Resp]) RawHandle
 
 		replyTo := d.raw.ReplyTo
 		if replyTo == "" {
-			// No reply address: the request cannot be answered. Drop it (its DLX
-			// preserves it if configured) rather than leave it unacked forever.
+			// No reply address: the request cannot be answered. Signal OnError so the
+			// missing-ReplyTo footgun is observable like any other reply failure, then
+			// drop it (its DLX preserves it if configured) rather than leave it unacked
+			// forever.
+			if r.onError != nil {
+				r.onError(ctx, req, fmt.Errorf("%w: request has no ReplyTo address", ErrInvalidMessage))
+			}
 			r.nackDrop(d)
 			return nil
 		}

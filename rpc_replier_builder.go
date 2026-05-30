@@ -52,10 +52,13 @@ func (b *ReplierBuilder[Req, Resp]) Metrics(cm metrics.ConsumerMetrics) *Replier
 	return b
 }
 
-// OnError registers a hook invoked when a handler returns a non-nil error. The
-// request is Nack(false)'d (so it routes to a DLX if configured, or is dropped if
-// not) and no error envelope is sent to the caller — the caller observes
-// ErrCallTimeout once its ctx expires.
+// OnError registers a hook invoked when a successful reply cannot be produced or
+// addressed: the handler returns a non-nil error, the response fails to encode, or
+// the request carries no ReplyTo address. (A reply that encodes and is published
+// but never confirms is NOT reported here — that is a transport failure, not a
+// handler one.) In every case the request is Nack(false)'d (so it routes to a DLX
+// if configured, or is dropped if not) and no error envelope is sent to the caller
+// — the caller observes ErrCallTimeout once its ctx expires.
 //
 // The silent-drop failure mode is load-bearing: without a DLX on the request
 // queue, Nack(false) is a drop and OnError is the only client-side signal. Log,
