@@ -195,10 +195,14 @@ type PrometheusConsumerMetrics struct {
 // (a fresh slice per call so callers cannot corrupt shared state).
 // Returns an error if any collector is already registered.
 //
-// Cardinality note: consumer_cancelled_total uses the consumer tag as the "reason"
-// label. Auto-generated tags (ctag-<uuidv7>) create one new time series per
-// cancellation event; in high-churn environments this can cause unbounded Prometheus
-// cardinality. See LATER-22 for the planned remediation in T36.
+// Cardinality note: warren records consumer_cancelled_total with a bounded "reason"
+// class ("broker_initiated") rather than the consumer tag. The AMQP basic.cancel
+// frame carries only the tag, and using that unbounded ctag-<uuidv7> as a label
+// created one new time series per cancellation. T36 moved the per-event tag to the
+// OnCancel callback and the wrapped ErrConsumerCancelled — where unbounded values are
+// harmless — keeping this metric's cardinality finite. The collector itself still
+// accepts any reason string, so callers wiring their own metrics may use a different
+// bounded vocabulary.
 //
 // enabled opts in to high-cardinality labels on the consumer_handler_seconds
 // histogram: MetricsLabelMessageType adds message_type. MetricsLabelRoutingKey

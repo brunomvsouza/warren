@@ -861,16 +861,14 @@ func TestConsumer_Consume_HandlerTimeout_CompletesBeforeDeadline_HandlerError_Na
 	assert.Equal(t, 0, capCM.timeouts, "no timeout metric must be recorded on the error path")
 }
 
-func TestConsumer_Consume_BasicCancel_RecordsCancelled(t *testing.T) {
-	// When broker sends basic.cancel (simulated via basicCancelCh injection),
-	// RecordCancelled must be called with the queue name and the consumer tag.
-	// basicCancelCh is handled in the ConsumeRaw main select loop (nil channel
-	// semantics ensure no-op in production where it is never set).
+func TestConsumer_Consume_BasicCancel_RecordsCancelledAndReturns(t *testing.T) {
+	// When the broker sends basic.cancel (simulated via cancelReasonCh injection),
+	// the metric increments with the bounded "broker_initiated" reason class and
+	// Consume returns ErrConsumerCancelled wrapping the consumer tag (SPEC §6.3).
 	defer goleak.VerifyNone(t)
 
 	conn := newFakeConsumerConn(t)
-	cancelledSignal := make(chan struct{})
-	cm := &countingConsumerMetrics{cancelledNotify: cancelledSignal}
+	cm := &countingConsumerMetrics{}
 	consumer, err := ConsumerFor[string](conn).Queue("testq").Metrics(cm).Build()
 	require.NoError(t, err)
 
@@ -878,39 +876,32 @@ func TestConsumer_Consume_BasicCancel_RecordsCancelled(t *testing.T) {
 	deliveryCh := make(chan amqp091.Delivery)
 	cancelCh := make(chan string, 1)
 	consumer.deliveryCh = deliveryCh
-	consumer.basicCancelCh = cancelCh
+	consumer.cancelReasonCh = cancelCh
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	consumeDone := make(chan struct{})
+	errCh := make(chan error, 1)
 	go func() {
-		defer close(consumeDone)
-		_ = consumer.Consume(ctx, func(_ context.Context, _ string) error { return nil })
+		errCh <- consumer.Consume(ctx, func(_ context.Context, _ string) error { return nil })
 	}()
 
-	// Fire broker cancel with the consumer tag as reason (buffered; does not block).
+	// Fire broker cancel carrying the consumer tag (the only basic.cancel frame datum).
 	cancelCh <- consumer.tag
 
-	// Wait for RecordCancelled to fire; this ensures the write to cm.cancelled
-	// happens-before we read it, avoiding a data race under -race.
+	var consumeErr error
 	select {
-	case <-cancelledSignal:
+	case consumeErr = <-errCh:
 	case <-time.After(2 * time.Second):
-		t.Fatal("RecordCancelled was not called within timeout")
+		t.Fatal("Consume did not return after basic.cancel")
 	}
 
-	// Now cancel the consumer ctx and wait for the loop to exit cleanly.
-	cancel()
-	select {
-	case <-consumeDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("ConsumeRaw did not exit after ctx cancel")
-	}
-
+	require.ErrorIs(t, consumeErr, ErrConsumerCancelled, "Consume must return ErrConsumerCancelled on basic.cancel")
+	assert.Contains(t, consumeErr.Error(), consumer.tag, "the returned error must carry the cancelled consumer tag")
 	assert.Equal(t, 1, cm.cancelled, "RecordCancelled must be called once for basic.cancel")
 	assert.Equal(t, "testq", cm.cancelledQueue, "RecordCancelled queue must be the consumer queue")
-	assert.Equal(t, consumer.tag, cm.cancelledReason, "RecordCancelled reason must be the consumer tag")
+	assert.Equal(t, cancelReasonBrokerInitiated, cm.cancelledReason,
+		"metric reason must be the bounded broker_initiated class, not the unbounded consumer tag")
 }
 
 func TestConsumer_Consume_DeliveryChannelClosed_WaitsForCtxCancel(t *testing.T) {

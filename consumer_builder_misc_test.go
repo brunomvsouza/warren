@@ -75,12 +75,20 @@ func TestConsumerBuilder_PrefetchBytes_IsNoOp(t *testing.T) {
 	assert.NotNil(t, c)
 }
 
-// — ConsumerBuilder stubs (T36 placeholders) ————————————————————————
+// — ConsumerBuilder remaining options (T36) — Exclusive / Args / OnCancel ———
 
-func TestConsumerBuilder_Exclusive_IsChainable(t *testing.T) {
+func TestConsumerBuilder_Exclusive_RoundTrips(t *testing.T) {
 	conn := newFakeConsumerConn(t)
-	_, err := ConsumerFor[string](conn).Queue("q").Exclusive().Build()
+	c, err := ConsumerFor[string](conn).Queue("q").Exclusive().Build()
 	require.NoError(t, err)
+	assert.True(t, c.exclusive, "Exclusive() must set the consumer exclusive flag")
+}
+
+func TestConsumerBuilder_Exclusive_DefaultsOff(t *testing.T) {
+	conn := newFakeConsumerConn(t)
+	c, err := ConsumerFor[string](conn).Queue("q").Build()
+	require.NoError(t, err)
+	assert.False(t, c.exclusive, "exclusive must default to false")
 }
 
 // — AutoAck (T35) — broker no-ack flag is stored on the consumer —————————
@@ -99,16 +107,19 @@ func TestConsumerBuilder_AutoAck_DefaultsOff(t *testing.T) {
 	assert.False(t, c.brokerAutoAck, "brokerAutoAck must default to false (manual ack)")
 }
 
-func TestConsumerBuilder_Args_IsChainable(t *testing.T) {
+func TestConsumerBuilder_Args_RoundTrips(t *testing.T) {
 	conn := newFakeConsumerConn(t)
-	_, err := ConsumerFor[string](conn).Queue("q").Args(Headers{"x-custom": "value"}).Build()
+	c, err := ConsumerFor[string](conn).Queue("q").Args(Headers{"x-custom": "value"}).Build()
 	require.NoError(t, err)
+	require.NotNil(t, c.consumeArgs)
+	assert.Equal(t, "value", c.consumeArgs["x-custom"], "Args() must round-trip into the consumer consume args")
 }
 
-func TestConsumerBuilder_OnCancel_IsChainable(t *testing.T) {
+func TestConsumerBuilder_OnCancel_RoundTrips(t *testing.T) {
 	conn := newFakeConsumerConn(t)
-	_, err := ConsumerFor[string](conn).Queue("q").OnCancel(func(_ string) {}).Build()
+	c, err := ConsumerFor[string](conn).Queue("q").OnCancel(func(_ string) {}).Build()
 	require.NoError(t, err)
+	assert.NotNil(t, c.onCancel, "OnCancel() must store the callback on the consumer")
 }
 
 // — TopologyHint last-wins reset ——————————————————————————————————————
