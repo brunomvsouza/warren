@@ -39,25 +39,23 @@ Each item must contain:
 
 <!-- LATER-02 resolved: commit 48ee170 (fix: coerce int/uint headers to int64/uint64 during validation) -->
 
-### LATER-05 — `wrapAMQPError` propaga o campo `Reason` do broker verbatim nos erros
+### LATER-05 — `wrapAMQPError` propagates the broker's `Reason` field verbatim into errors
 
-**Contexto:** `errors.go:wrapAMQPError` — o wrapping `fmt.Errorf("%w: %w", sentinel, err)` inclui
-a string `.Error()` do `*amqp091.Error`, que contém o campo `Reason` do broker com detalhes de
-topologia interna (nome de fila, vhost, tipo de recurso). Ex: `"Exception (405) Reason:
+**Context:** `errors.go:wrapAMQPError` — the `fmt.Errorf("%w: %w", sentinel, err)` wrap includes the
+`.Error()` string of the `*amqp091.Error`, which carries the broker's `Reason` field with internal
+topology details (queue name, vhost, resource type). E.g. `"Exception (405) Reason:
 \"RESOURCE_LOCKED - exclusive access to queue 'jobs' in vhost '/'\""`.
 
-**Impacto:** Em deployments multi-tenant ou com separação de contextos, nomes de filas e vhosts
-de outras tenants podem vazar em logs de aplicação, responses HTTP ou sistemas de observabilidade
-externos.
+**Impact:** In multi-tenant deployments, or ones with context separation, queue names and vhosts of
+other tenants can leak into application logs, HTTP responses, or external observability systems.
 
-**Evidência:** `/ship` security-audit T12 — MEDIUM finding.
+**Evidence:** `/ship` security-audit T12 — MEDIUM finding.
 
-**Sugestão de solução:** Criar `redact.AMQPError(err)` que formata apenas o código numérico
-(`"Exception (%d)"`) sem o Reason, ou aplicar redação no `Reason` antes de incluí-lo no erro
-retornado. O passo de dois wraps (`%w: %w`) deve ser mantido para `errors.Is`/`AMQPCode`
-continuarem funcionando.
+**Suggested solution:** Add `redact.AMQPError(err)` that formats only the numeric code
+(`"Exception (%d)"`) without the Reason, or redact the `Reason` before including it in the returned
+error. The two-wrap step (`%w: %w`) must be preserved so `errors.Is`/`AMQPCode` keep working.
 
-**Pré-requisitos:** `internal/redact` (já existe). Pode ser feito a qualquer momento após T12.
+**Prerequisites:** `internal/redact` (already exists). Can be done at any time after T12.
 
 ---
 
@@ -71,64 +69,67 @@ continuarem funcionando.
 
 ---
 
-### LATER-10 — Imagem RabbitMQ com tag flutuante no CI de integração
+### LATER-10 — RabbitMQ image on a floating tag in the integration CI
 
-**Contexto:** `.github/workflows/ci.yml:43` — `rabbitmq:3-management` é uma tag mutável no
-Docker Hub. Um push malicioso para a tag pode injetar uma imagem comprometida que rode no
-runner de CI.
+**Context:** `.github/workflows/ci.yml:43` — `rabbitmq:3-management` is a mutable tag on Docker Hub.
+A malicious push to the tag could inject a compromised image that runs on the CI runner. (Largely
+addressed since: the integration lane now builds a pinned, plugin-enabled image from
+`Dockerfile.rabbitmq-delayed` via `docker-compose.integration.yml` rather than pulling the floating
+tag — kept open until the base `FROM` is pinned to a digest rather than the `3.13-management` minor
+tag.)
 
-**Impacto:** CI não-reproduzível; testes de integração podem quebrar por mudança de comportamento
-do broker sem aviso; risco teórico de supply chain.
+**Impact:** Non-reproducible CI; integration tests can break on a broker behavior change with no
+warning; theoretical supply-chain risk.
 
-**Evidência:** `/ship` review de T15/T16 — security-auditor (Low).
+**Evidence:** `/ship` review of T15/T16 — security-auditor (Low).
 
-**Sugestão de solução:** Fixar em digest imutável ou ao menos em minor tag:
+**Suggested solution:** Pin to an immutable digest, or at least a minor tag:
 `rabbitmq:3.13-management`.
 
-**Pré-requisitos:** LATER-08.
+**Prerequisites:** LATER-08.
 
 ---
 
-### LATER-11 — `registerReconnectHook` em `connection.go` sem chamadores diretos
+### LATER-11 — `registerReconnectHook` in `connection.go` has no direct callers
 
-**Contexto:** `connection.go:308` — `Connection.registerReconnectHook` foi adicionado como API
-interna para `Topology.AttachTo` e `Consumer` (T18), mas `AttachTo` itera `pubConns`/`conConns`
-diretamente e não usa esta função. Com isso, a função está em 0% de cobertura e sem chamadores.
+**Context:** `connection.go:308` — `Connection.registerReconnectHook` was added as an internal API
+for `Topology.AttachTo` and `Consumer` (T18), but `AttachTo` iterates `pubConns`/`conConns`
+directly and does not use this function. As a result the function sits at 0% coverage with no
+callers.
 
-**Impacto:** Dead code que confunde futuros leitores sobre o padrão de registro de hooks.
+**Impact:** Dead code that confuses future readers about the hook-registration pattern.
 
-**Evidência:** `/ship` review de T15/T16 — code-reviewer (Suggestion).
+**Evidence:** `/ship` review of T15/T16 — code-reviewer (Suggestion).
 
-**Sugestão de solução:** Quando Consumer (T18) for implementado, verificar se `registerReconnectHook`
-é o ponto de entrada correto. Se Consumer também iterar diretamente, remover a função. Se Consumer
-a usa, manter e adicionar cobertura.
+**Suggested solution:** When Consumer (T18) is implemented, check whether `registerReconnectHook`
+is the correct entry point. If Consumer also iterates directly, remove the function. If Consumer
+uses it, keep it and add coverage.
 
-**Pré-requisitos:** T18 (Consumer re-subscribe hooks).
+**Prerequisites:** T18 (Consumer re-subscribe hooks).
 
 ---
 
-### LATER-21 — Test case B3: `x-delivery-limit` exhaustion em quorum queue
+### LATER-21 — Test case B3: `x-delivery-limit` exhaustion on a quorum queue
 
-**Contexto:** `consumer_handler_timeout_verdict_integration_test.go` — T18b test case B
-verifica apenas que a mensagem é reenfileirada ao menos duas vezes (`deliveryCount >= 2`).
-Não exercita o cenário de esgotamento de `x-delivery-limit`: após N redeliveries, o broker
-deve dead-letter a mensagem automaticamente para o DLX configurado.
+**Context:** `consumer_handler_timeout_verdict_integration_test.go` — T18b test case B only checks
+that the message is requeued at least twice (`deliveryCount >= 2`). It does not exercise the
+`x-delivery-limit` exhaustion scenario: after N redeliveries the broker must automatically
+dead-letter the message to the configured DLX.
 
-**Impacto:** O caminho de "requeue até o limite → dead-letter" é um contrato importante
-do `TimeoutNackRequeue` (o usuário precisa de um DLX na fila de origem para evitar que
-mensagens travadas circulem para sempre). Sem teste, o comportamento pode regredir sem
-detecção automática.
+**Impact:** The "requeue up to the limit → dead-letter" path is an important contract of
+`TimeoutNackRequeue` (the user needs a DLX on the source queue so stuck messages do not circulate
+forever). Without a test, the behavior can regress with no automatic detection.
 
-**Evidência:** Registrado durante revisão de código do commit `23834a7` (T18b). O critério
-original de aceite de T18b (caso B, item 3) previa este cenário, mas foi omitido pois a
-configuração de quorum queue com `x-delivery-limit` ficou fora do escopo imediato.
+**Evidence:** Recorded during code review of commit `23834a7` (T18b). T18b's original acceptance
+criterion (case B, item 3) called for this scenario, but it was omitted because configuring a
+quorum queue with `x-delivery-limit` fell outside the immediate scope.
 
-**Sugestão de solução:**
-Adicionar `TestHandlerTimeoutVerdict_NackRequeue_DeliveryLimit_integration` em
+**Suggested solution:**
+Add `TestHandlerTimeoutVerdict_NackRequeue_DeliveryLimit_integration` to
 `consumer_handler_timeout_verdict_integration_test.go`:
 
 ```go
-// Topologia: quorum queue com x-delivery-limit: 3 + DLX fanout + binding
+// Topology: quorum queue with x-delivery-limit: 3 + DLX fanout + binding
 topo := &warren.Topology{
     Exchanges: []warren.Exchange{
         {Name: dlxExch, Kind: warren.ExchangeFanout, Durable: false},
@@ -149,66 +150,63 @@ topo := &warren.Topology{
         {Exchange: dlxExch, Queue: dlqQ, RoutingKey: ""},
     },
 }
-// Após 3 timeouts, assert que deliveryCount == 3 e a mensagem aparece na DLQ.
+// After 3 timeouts, assert deliveryCount == 3 and the message appears in the DLQ.
 ```
 
-**Pré-requisitos:** LATER-20 (binding DLX/DLQ), RabbitMQ 3.10+ (quorum queue
-`x-delivery-limit` suportado). CI usa `rabbitmq:3-management` que suporta quorum
-queues desde 3.8.
+**Prerequisites:** LATER-20 (DLX/DLQ binding), RabbitMQ 3.10+ (quorum-queue `x-delivery-limit`
+support). CI uses `rabbitmq:3-management`, which supports quorum queues since 3.8.
 
 ---
 
-### LATER-24 — `sync.Map` retém memória interna após batches grandes
+### LATER-24 — `sync.Map` retains internal memory after large batches
 
-**Contexto:** `publisher.go:returnTagMap` — `sync.Map` mantém o estado de cópia de leitura
-interna (`readOnly` + `dirty`) mesmo após todos os pares serem deletados. Após um
-`PublishBatch` com batch grande (ex: 1024 mensagens), a `sync.Map` pode reter capacidade
-interna proporcional ao pico do batch, que é reaproveitada no próximo caller que obtiver o
-mesmo `publisherEntry` via `pool.acquire`.
+**Context:** `publisher.go:returnTagMap` — a `sync.Map` keeps its internal read-copy state
+(`readOnly` + `dirty`) even after all pairs are deleted. After a `PublishBatch` with a large batch
+(e.g. 1024 messages), the `sync.Map` can retain internal capacity proportional to the batch peak,
+which is reused by the next caller that obtains the same `publisherEntry` via `pool.acquire`.
 
-**Impacto:** Overhead de memória O(peak_batch_size) por entry enquanto o entry não for
-descartado (por fechamento de canal) ou substituído (por reconexão). Em uso normal o GC
-eventualmente libera; não é exploitável remotamente. Não é bloqueante.
+**Impact:** O(peak_batch_size) memory overhead per entry while the entry is not discarded (by
+channel close) or replaced (by reconnect). In normal use the GC eventually frees it; not remotely
+exploitable. Not a blocker.
 
-**Evidência:** `/ship` security-audit — LOW finding (2026-05-24, mandatory+batch review).
+**Evidence:** `/ship` security-audit — LOW finding (2026-05-24, mandatory+batch review).
 
-**Sugestão de solução:** Em `publisherConnPool.release`, substituir a `returnTagMap` por uma
-nova `new(sync.Map)` se o batch processado foi maior que um threshold (ex: 256 entries):
+**Suggested solution:** In `publisherConnPool.release`, replace `returnTagMap` with a fresh
+`new(sync.Map)` if the processed batch was larger than a threshold (e.g. 256 entries):
 
 ```go
-// Em release, após os selects:
+// In release, after the selects:
 if shouldResetMap(entry.returnTagMap) {
     entry.returnTagMap = new(sync.Map)
 }
 ```
 
-Alternativamente, reavaliar se `returnTagMap` deve ser recriada no `openPublisherEntry` a
-cada canal reaberto (pós-reconexão), já que nesse ponto o estado anterior é inválido de
-qualquer forma.
+Alternatively, reconsider whether `returnTagMap` should be recreated in `openPublisherEntry` on
+every channel reopen (post-reconnect), since at that point the prior state is invalid anyway.
 
-**Pré-requisitos:** Nenhum. Standalone, mas de baixa prioridade.
+**Prerequisites:** None. Standalone, but low priority.
 
 ---
 
-### LATER-25 — Latência de batch exclui tempo de aquisição de canal na métrica
+### LATER-25 — Batch latency excludes channel-acquisition time in the metric
 
-**Contexto:** `publisher.go:649` — em `PublishBatch`, `msgStart = time.Now()` é definido
-antes de `tracker.Wait` (depois da aquisição do canal). Em `publishOnce`, `start = time.Now()`
-é definido antes de `pool.acquire`. Logo, métricas de latência de batch excluem o tempo de
-espera no pool, enquanto métricas de publish unitário incluem.
+**Context:** `publisher.go:649` — in `PublishBatch`, `msgStart = time.Now()` is set before
+`tracker.Wait` (after channel acquisition). In `publishOnce`, `start = time.Now()` is set before
+`pool.acquire`. So batch-latency metrics exclude the pool-wait time, while single-publish metrics
+include it.
 
-**Impacto:** Dashboards que comparam `publisher_publish_latency_seconds` entre publishers
-unitários e em batch vão observar latências sistematicamente menores para batch, mesmo quando
-o tempo de espera no pool é idêntico. Pode induzir operadores a concluir incorretamente que
-batch é mais rápido quando a diferença é de método de medição.
+**Impact:** Dashboards comparing `publisher_publish_latency_seconds` between single and batch
+publishers will observe systematically lower latencies for batch, even when the pool-wait time is
+identical. It can lead operators to wrongly conclude batch is faster when the difference is a
+measurement-method artifact.
 
-**Evidência:** `/ship` code-review — Suggestion S-2 (2026-05-24, mandatory+batch review).
+**Evidence:** `/ship` code-review — Suggestion S-2 (2026-05-24, mandatory+batch review).
 
-**Sugestão de solução:** Mover `msgStart = time.Now()` para antes da aquisição do canal em
-`PublishBatch`, ou documentar explicitamente a diferença de semântica no godoc da métrica
-`publisher_publish_latency_seconds` em `metrics/`.
+**Suggested solution:** Move `msgStart = time.Now()` to before channel acquisition in
+`PublishBatch`, or explicitly document the semantic difference in the godoc of the
+`publisher_publish_latency_seconds` metric in `metrics/`.
 
-**Pré-requisitos:** Nenhum. Decisão de design a ser tomada ao revisar o contrato da métrica.
+**Prerequisites:** None. A design decision to be made when reviewing the metric's contract.
 
 ---
 
@@ -264,27 +262,26 @@ covers the residual audit and tooling-based prevention.
 
 ---
 
-### LATER-26 — `wireReturnPool` e `wireFakePool` são near-duplicatas
+### LATER-26 — `wireReturnPool` and `wireFakePool` are near-duplicates
 
-**Contexto:** `publisher_t13_test.go:wireReturnPool` e `publisher_test.go:wireFakePool` —
-ambas implementam o mesmo select goroutine de correlação confirm+return. Diferem apenas na
-assinatura: `wireReturnPool` aceita qualquer `pubChannel` e retorna o tracker separadamente;
-`wireFakePool` é especializada para `*fakePubChannel`. Qualquer mudança futura na lógica do
-goroutine deve ser aplicada em ambos os lugares.
+**Context:** `publisher_t13_test.go:wireReturnPool` and `publisher_test.go:wireFakePool` — both
+implement the same confirm+return correlation select goroutine. They differ only in signature:
+`wireReturnPool` accepts any `pubChannel` and returns the tracker separately; `wireFakePool` is
+specialized for `*fakePubChannel`. Any future change to the goroutine's logic must be applied in
+both places.
 
-**Impacto:** Risco de divergência silenciosa. Ex: se o guard `if ret.MessageId != ""` for
-atualizado em uma função mas esquecido na outra, os testes exercitariam semânticas diferentes
-da produção.
+**Impact:** Risk of silent divergence. E.g. if the `if ret.MessageId != ""` guard is updated in one
+function but forgotten in the other, the tests would exercise semantics different from production.
 
-**Evidência:** `/ship` code-review — Suggestion S-1 (2026-05-24, mandatory+batch review).
+**Evidence:** `/ship` code-review — Suggestion S-1 (2026-05-24, mandatory+batch review).
 
-**Sugestão de solução:** Extrair o corpo do goroutine para uma função shared unexported
+**Suggested solution:** Extract the goroutine body into a shared unexported function
 `runReturnCorrelationLoop(returnCh <-chan amqp091.Return, confirmCh <-chan amqp091.Confirmation,
-rtm *sync.Map, tracker *confirms.Tracker, onReturn func(amqp091.Return))` e ter ambas as
-funções chamá-la. Alternativamente, colapsar `wireReturnPool` em `wireFakePool` com parâmetro
-`pubChannel` genérico e retornar o tracker opcionalmente.
+rtm *sync.Map, tracker *confirms.Tracker, onReturn func(amqp091.Return))` and have both functions
+call it. Alternatively, collapse `wireReturnPool` into `wireFakePool` with a generic `pubChannel`
+parameter and optionally return the tracker.
 
-**Pré-requisitos:** Nenhum. Refactoring de teste puro, sem impacto no código de produção.
+**Prerequisites:** None. Pure test refactor, no impact on production code.
 
 ---
 
@@ -324,7 +321,7 @@ Surfaced by the Rev 10 specialist re-review (2026-05-25) as finding **P1.1 / R10
    surface and the duplicate-budget bookkeeping the async path implies (still at-least-once;
    consumers dedupe by `MessageID` per §6.2.1).
 
-**Pré-requisitos:** Owner decision on reopening Rev 6 decision 31. Builds on T11
+**Prerequisites:** Owner decision on reopening Rev 6 decision 31. Builds on T11
 (`internal/confirms`) and T12/T13 (publisher). If accepted, it becomes a new task (likely a
 Phase 11 follow-on) with its own SPEC amendment; if rejected, item 1 (the honesty note) lands and
 this entry is closed.
