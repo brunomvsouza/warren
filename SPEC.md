@@ -1105,8 +1105,16 @@ func ConsumerFor[M any](conn *Connection) *ConsumerBuilder[M]
 
 func (c *Consumer[M]) Consume(ctx context.Context, h Handler[M]) error
 func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error
-func (c *Consumer[M]) Health(ctx context.Context) error
+func (c *Consumer[M]) Health(ctx context.Context) (*ConsumerHealth, error) // (nil, err) when the connection is unhealthy
 func (c *Consumer[M]) Close(ctx context.Context) error  // drains in-flight
+
+// ConsumerHealth is a point-in-time runtime snapshot for liveness/readiness probes.
+type ConsumerHealth struct {
+	Active           bool      // started, not closed, not paused
+	Paused           bool      // between Pause and Resume
+	LastDeliveryAt   time.Time // receipt time of the most recent delivery (zero if none)
+	InFlightHandlers int       // handler invocations currently executing
+}
 
 type Handler[M any]     func(ctx context.Context, msg M) error
 type RawHandler[M any]  func(ctx context.Context, d *Delivery[M]) error

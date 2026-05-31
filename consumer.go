@@ -326,6 +326,17 @@ type Consumer[M any] struct {
 
 	// started guards against calling Consume/ConsumeRaw more than once.
 	started atomic.Bool
+
+	// — T53 Health snapshot + draining state —
+	// lastDeliveryNanos is the UnixNano of the most recent delivery received from the
+	// broker (0 = none yet); surfaced as ConsumerHealth.LastDeliveryAt.
+	lastDeliveryNanos atomic.Int64
+	// inFlight counts handler goroutines currently executing; surfaced as
+	// ConsumerHealth.InFlightHandlers.
+	inFlight atomic.Int64
+	// paused is true between Pause and Resume; surfaced as ConsumerHealth.Paused and
+	// read by the delivery pump to keep in-flight handlers alive across a local cancel.
+	paused atomic.Bool
 }
 
 func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
@@ -844,6 +855,9 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 				}
 				continue
 			}
+			// Stamp the receipt time for ConsumerHealth.LastDeliveryAt (T53) the moment
+			// a delivery arrives, before any decode/dispatch work.
+			c.lastDeliveryNanos.Store(time.Now().UnixNano())
 			sem <- struct{}{}
 			// In-flight memory guardrail (T50): reserve this body's bytes before
 			// dispatching, blocking the delivery pump (and thus prefetch refill) when
@@ -859,11 +873,13 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 			c.byteLimiter.acquire(bodyBytes)
 			c.cm.InFlightBytesAdd(c.queue, bodyBytes)
 			wg.Add(1)
+			c.inFlight.Add(1)
 			// Capture the current channel's done signal so in-flight handlers
 			// from this channel are cancelled if this channel closes mid-handler.
 			chanDone := cur.done
 			go func(raw amqp091.Delivery, chanDone <-chan struct{}, n int64) {
 				defer wg.Done()
+				defer c.inFlight.Add(-1)
 				defer func() { <-sem }()
 				defer func() {
 					c.cm.InFlightBytesAdd(c.queue, -n)
@@ -1364,9 +1380,59 @@ func safeDecodeConsumer(c codec.Codec, payload []byte, headers amqp091.Table, co
 	return c.Decode(payload, out)
 }
 
-// Health reports whether the consumer's pinned connection is healthy.
-func (c *Consumer[M]) Health(ctx context.Context) error {
-	return c.mc.health(ctx)
+// ConsumerHealth is a point-in-time snapshot of a consumer's runtime state,
+// suitable for building Kubernetes liveness/readiness probes (T53). Health
+// returns it only when the pinned connection is healthy; on a connection error
+// Health returns (nil, err), since a snapshot would carry no meaningful state.
+type ConsumerHealth struct {
+	// Active is true when the consumer is started, not closed, and not paused —
+	// i.e. it is (or should be) receiving and dispatching deliveries.
+	Active bool
+	// Paused is true between Pause and Resume.
+	Paused bool
+	// LastDeliveryAt is the wall-clock time the most recent delivery was received
+	// from the broker; the zero Time if none has arrived yet. A LastDeliveryAt that
+	// stops advancing on a queue that should be busy is a liveness signal.
+	LastDeliveryAt time.Time
+	// InFlightHandlers is the number of handler invocations currently executing.
+	InFlightHandlers int
+}
+
+// isClosed reports whether Close has been called.
+func (c *Consumer[M]) isClosed() bool {
+	select {
+	case <-c.closedCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// snapshot builds a ConsumerHealth from the consumer's live atomics. It performs
+// no I/O, so it is safe to call concurrently with Consume and from probe handlers.
+func (c *Consumer[M]) snapshot() ConsumerHealth {
+	var last time.Time
+	if n := c.lastDeliveryNanos.Load(); n != 0 {
+		last = time.Unix(0, n)
+	}
+	return ConsumerHealth{
+		Active:           c.started.Load() && !c.isClosed() && !c.paused.Load(),
+		Paused:           c.paused.Load(),
+		LastDeliveryAt:   last,
+		InFlightHandlers: int(c.inFlight.Load()),
+	}
+}
+
+// Health verifies the consumer's pinned connection and, when healthy, returns a
+// snapshot of the consumer's runtime state. On a connection error it returns
+// (nil, err): the connection liveness check is the gate, and a zeroed snapshot
+// alongside an error would be misleading (T53).
+func (c *Consumer[M]) Health(ctx context.Context) (*ConsumerHealth, error) {
+	if err := c.mc.health(ctx); err != nil {
+		return nil, err
+	}
+	snap := c.snapshot()
+	return &snap, nil
 }
 
 // Close signals the consumer to stop accepting new deliveries.

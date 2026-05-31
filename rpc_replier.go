@@ -140,7 +140,8 @@ func (r *Replier[Req, Resp]) nackDrop(d *Delivery[Req]) {
 
 // Health reports whether the Replier's consumer connection is healthy.
 func (r *Replier[Req, Resp]) Health(ctx context.Context) error {
-	return r.consumer.Health(ctx)
+	_, err := r.consumer.Health(ctx)
+	return err
 }
 
 // replyPublisher publishes confirm-tracked replies to dynamic routing keys on a
