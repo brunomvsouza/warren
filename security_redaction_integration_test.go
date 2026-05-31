@@ -10,11 +10,14 @@ package warren_test
 //
 // Lens-10 TV-14 — exercise, not just scan: a grep only catches output that was
 // actually produced, so the run must FORCE the highest-risk leak path before
-// scanning. Per Lens-07 the likeliest leak is a wrapped underlying amqp091-go
-// error whose message embeds the dial URL, not a warren-own string. This test
-// therefore dials with a distinctive sentinel credential that the broker
-// rejects, producing a real wrapped-auth-failure error, and scans that error's
-// full chain alongside the steady-state surfaces.
+// scanning. The likeliest leak (Lens-07) is the connect-failure path: warren
+// formats and logs the URL it dialed, and any wrap of the underlying amqp091-go
+// error rides alongside it. This test therefore dials with a distinctive
+// sentinel credential that the broker rejects, then scans the full returned
+// error chain and the redacted log surface alongside the steady-state surfaces.
+// (amqp091's own auth error does not embed the dial URL in the versions we pin,
+// so it is warren's own formatting/logging — not the driver string — that must
+// redact; this asserts exactly that.)
 //
 // Anti-vacuity (VG-6 analogue): scanForSecrets is self-tested against a planted
 // leak so a passing run means "redacted", never "the scanner is broken"; and the
@@ -23,6 +26,7 @@ package warren_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -215,7 +219,7 @@ drainLoop:
 		}
 	}
 
-	// — Force the wrapped amqp091 error path (TV-14) ——————————————————————————
+	// — Force the connect-failure error path (TV-14) ——————————————————————————
 	// A real auth failure: same broker host, sentinel credentials the broker
 	// rejects. warren must redact the URL in whatever it returns/logs; if it wraps
 	// the raw amqp091 error with the un-redacted dial URL, the sentinel password
@@ -279,7 +283,7 @@ func withUserinfo(base *url.URL, user, pass string) string {
 // filterCanceled drops the benign context.Canceled returned by a consumer that
 // was stopped on purpose, so it is not recorded as a surface error.
 func filterCanceled(err error) error {
-	if err == nil || strings.Contains(err.Error(), context.Canceled.Error()) {
+	if err == nil || errors.Is(err, context.Canceled) {
 		return nil
 	}
 	return err
