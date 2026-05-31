@@ -412,43 +412,103 @@ const (
 // the DLQ under this name.
 const dlqNameSuffix = ".dlq"
 
+// minDepthSampleInterval is the floor WithQueueDepthSampler intervals clamp to (T52a).
+// A sub-100ms poll adds avoidable queue.declare traffic to a connection that already
+// serializes I/O without making the gauge meaningfully fresher.
+const minDepthSampleInterval = 100 * time.Millisecond
+
+// maxDepthSampleBackoff caps the exponential back-off applied while every probe in a
+// sample fails (T52a), so a permanently-missing queue settles at one probe per 30s
+// rather than churning a channel-open + 404-close at the base interval forever.
+const maxDepthSampleBackoff = 30 * time.Second
+
 // runDepthSampler periodically samples the source-queue and DLQ depths until ctx is
 // cancelled (T52). It primes the gauges once immediately so they are populated before
-// the first tick, then samples every depthSampleInterval. A context already cancelled
-// when the goroutine starts skips even the priming sample, so a consumer torn down in
-// the same breath as it starts issues no stray declare.
+// the first tick, then re-samples on a self-resetting timer. A context already
+// cancelled when the goroutine starts skips even the priming sample, so a consumer
+// torn down in the same breath as it starts issues no stray declare.
+//
+// The configured interval is clamped to minDepthSampleInterval (T52a) with a one-time
+// warning. While every probe in a sample fails — a permanently-missing queue, or a
+// socket down mid-reconnect — the delay backs off exponentially (capped at
+// maxDepthSampleBackoff, never below the configured interval); the first sample that
+// emits any gauge resets the cadence to the base interval.
 func (c *Consumer[M]) runDepthSampler(ctx context.Context) {
-	ticker := time.NewTicker(c.depthSampleInterval)
-	defer ticker.Stop()
+	base := c.depthSampleInterval
+	if base < minDepthSampleInterval {
+		c.mc.opts.logger.Warningf(
+			"warren: queue depth sampler interval %s is below the %s floor; clamped to the floor",
+			base, minDepthSampleInterval,
+		)
+		base = minDepthSampleInterval
+	}
 	select {
 	case <-ctx.Done():
 		return
 	default:
 	}
-	c.sampleDepths()
+	failures := 0
+	if !c.sampleDepths() {
+		failures++
+	}
+	timer := time.NewTimer(depthSampleDelay(base, failures))
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			c.sampleDepths()
+		case <-timer.C:
+			if c.sampleDepths() {
+				failures = 0
+			} else {
+				failures++
+			}
+			timer.Reset(depthSampleDelay(base, failures))
 		}
 	}
+}
+
+// depthSampleDelay returns the base interval after a successful sample (failures == 0)
+// and an exponentially backed-off interval otherwise: the delay doubles per
+// consecutive all-failed sample, capped at maxDepthSampleBackoff but never reduced
+// below base (so a configured interval already slower than the cap is preserved). The
+// ceiling also bounds the doubling so the shift can never overflow time.Duration.
+func depthSampleDelay(base time.Duration, failures int) time.Duration {
+	if failures <= 0 {
+		return base
+	}
+	ceiling := maxDepthSampleBackoff
+	if base > ceiling {
+		ceiling = base
+	}
+	delay := base
+	for i := 0; i < failures && delay < ceiling; i++ {
+		delay *= 2
+	}
+	if delay > ceiling {
+		delay = ceiling
+	}
+	return delay
 }
 
 // sampleDepths reads the source-queue depth (always) and the conventional
 // "<queue>.dlq" dead-letter-queue depth (only when it exists) via passive declares,
 // emitting the queue_depth and dlq_depth gauges. A queue that does not exist is
 // skipped rather than reported as zero, so no phantom series appears for a consumer
-// without a DLQ.
-func (c *Consumer[M]) sampleDepths() {
+// without a DLQ. It reports whether any gauge was emitted, so the caller can back off
+// when a whole sample reaches nothing (broker down, source queue gone).
+func (c *Consumer[M]) sampleDepths() bool {
+	emitted := false
 	if depth, ok := c.sampleQueueDepth(c.queue); ok {
 		c.cm.SetQueueDepth(c.queue, depth)
+		emitted = true
 	}
 	dlq := c.queue + dlqNameSuffix
 	if depth, ok := c.sampleQueueDepth(dlq); ok {
 		c.cm.SetDLQDepth(dlq, depth)
+		emitted = true
 	}
+	return emitted
 }
 
 // sampleQueueDepth opens a short-lived channel and passively declares name to read
@@ -705,6 +765,11 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 		defer func() {
 			cancelSampler()
 			samplerWG.Wait()
+			// Drop the gauge series so a process that cycles consumers over distinct
+			// queue names does not accumulate stale frozen series (T52b). Harmless for
+			// a series that was never set (e.g. a consumer without a DLQ).
+			c.cm.DeleteQueueDepth(c.queue)
+			c.cm.DeleteDLQDepth(c.queue + dlqNameSuffix)
 		}()
 	}
 

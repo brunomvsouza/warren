@@ -118,14 +118,21 @@ func (b *ConsumerBuilder[M]) MaxInFlightBytes(n int64) *ConsumerBuilder[M] {
 //
 // Size interval against broker load: each tick costs one or two lightweight
 // queue.declare-passive round-trips on the consumer's connection. A few seconds is
-// typical; sub-second polling on a large cluster adds avoidable broker load. The DLQ
-// name follows warren's own DeadLetter convention ("<queue>.dlq"); a DLQ under a
-// different name is not sampled.
+// typical; sub-second polling on a large cluster adds avoidable broker load, so an
+// interval below 100ms is clamped to a 100ms floor with a one-time warning. While a
+// whole sample fails to reach the broker — the source queue is gone, or the socket is
+// down mid-reconnect — the sampler backs off exponentially (capped at 30s, never below
+// interval) and returns to interval on the first sample that emits a gauge, so a
+// permanently-missing queue does not probe at full rate forever. The DLQ name follows
+// warren's own DeadLetter convention ("<queue>.dlq"); a DLQ under a different name is
+// not sampled.
 //
-// The gauges hold their last sampled value: a sample that cannot reach the broker
-// (e.g. mid-reconnect) is skipped rather than zeroed, and after the consumer stops the
-// series freezes at its final value until the process exits. Alert on rate/derivative
-// or pair with consumer liveness rather than reading a single point as "current".
+// The gauges hold their last sampled value while the consumer runs: a sample that
+// cannot reach the broker (e.g. mid-reconnect) is skipped rather than zeroed. When the
+// consumer stops, both series are removed from the registry, so a long-lived process
+// that cycles consumers over distinct queue names does not accumulate stale frozen
+// series. Alert on rate/derivative or pair with consumer liveness rather than reading a
+// single point as "current".
 func (b *ConsumerBuilder[M]) WithQueueDepthSampler(interval time.Duration) *ConsumerBuilder[M] {
 	b.depthSampleInterval = interval
 	return b

@@ -1237,33 +1237,9 @@ dependency for the doc reconciliation itself.
 
 ---
 
-### LATER-80 — Depth sampler probes at a fixed interval with no failure-aware backoff
+<!-- LATER-80 resolved by T52a: depth sampler now clamps sub-100ms intervals to a 100ms floor (one-time warn) and backs off exponentially (cap 30s, never below the configured interval) while a whole sample fails. -->
 
-**Context:** `runDepthSampler` / `sampleDepths` / `sampleQueueDepth` (`consumer.go:420-475`) fire on a fixed `time.Ticker` and, per tick, open a fresh channel and issue one or two `queue.declare-passive` round-trips. On any failure (missing queue, mid-reconnect, broker rejection) the error is discarded and `(0,false)` returned — there is no exponential backoff or failure-aware pacing, and `WithQueueDepthSampler(interval)` documents but does not enforce a minimum interval. A persistently-missing queue is therefore probed (channel-open + close-on-404) at full rate forever on a connection that already serializes I/O (architectural invariant #1).
-
-**Impact:** Self-inflicted broker load / noisy consumer. Operator-influenced, not attacker-influenced (the interval is set at build time and is not data-derived), and bounded by the operator-chosen interval — no tight spin loop. Worst case is avoidable `queue.declare` traffic when an aggressive interval meets a permanently-absent queue.
-
-**Evidence:** Phase 10 `/ship` security-auditor + code-reviewer (T52, 2026-05-31) — Low.
-
-**Suggested solution:** Clamp sub-100ms intervals to a documented floor with a one-time warn (mirroring the `newRateLimiter` interval clamp), and/or add a lightweight consecutive-failure backoff so a permanently-missing queue stops probing at full rate.
-
-**Prerequisites:** T52 depth sampler (shipped). No code dependency.
-
----
-
-### LATER-81 — `queue_depth` / `dlq_depth` gauge series are never deleted under high queue-name churn
-
-**Context:** The depth gauges are keyed by queue name via `WithLabelValues(queue)` (`metrics/prometheus.go:355-363`). The label is bounded and operator-configured (`ConsumerBuilder.Queue`), so this is **not** unbounded-cardinality — correctly so. But when a consumer stops, the sampler goroutine is cancelled and joined cleanly while the gauge series is never removed from the registry; it freezes at its last value forever (documented on the `WithQueueDepthSampler` godoc by commit e9e431a). A long-running process that creates and tears down consumers across many distinct queue names (e.g. dynamic per-tenant queues) accumulates one permanent stale series per name.
-
-**Impact:** Slow registry memory growth and misleading frozen gauge values an unaware operator could read as "current". Requires a high-churn dynamic-queue topology to matter; a non-issue for the typical fixed-queue deployment.
-
-**Evidence:** Phase 10 `/ship` security-auditor (T52, 2026-05-31) — Low.
-
-**Suggested solution:** Document that `queue_depth`/`dlq_depth` target static queue topologies, or call `DeleteLabelValues(queue)` on the depth gauges at consumer `Close`. Revisit before any future task that introduces dynamic/per-tenant queue topologies, which would upgrade this from Low to material.
-
-**Prerequisites:** T52 depth sampler (shipped). No code dependency.
-
----
+<!-- LATER-81 resolved by T52b: ConsumerMetrics.DeleteQueueDepth/DeleteDLQDepth remove the depth series when the sampler stops, so consumer churn over distinct queue names no longer accumulates stale frozen series. -->
 
 ### LATER-82 — Depth sampler's DLQ name is hard-wired to `<queue>.dlq` and can drift from the topology layer
 

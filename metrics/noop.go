@@ -67,3 +67,9 @@ func (NoOpConsumerMetrics) SetQueueDepth(_ string, _ int64) {}
 
 // SetDLQDepth discards the dlq-depth gauge set.
 func (NoOpConsumerMetrics) SetDLQDepth(_ string, _ int64) {}
+
+// DeleteQueueDepth discards the queue-depth series deletion.
+func (NoOpConsumerMetrics) DeleteQueueDepth(_ string) {}
+
+// DeleteDLQDepth discards the dlq-depth series deletion.
+func (NoOpConsumerMetrics) DeleteDLQDepth(_ string) {}

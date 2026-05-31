@@ -361,3 +361,14 @@ func (m *PrometheusConsumerMetrics) SetQueueDepth(queue string, depth int64) {
 func (m *PrometheusConsumerMetrics) SetDLQDepth(dlq string, depth int64) {
 	m.dlqDepth.WithLabelValues(dlq).Set(float64(depth))
 }
+
+// DeleteQueueDepth removes the queue_depth{queue} series so it does not linger as a
+// stale frozen value after the consumer stops (T52b).
+func (m *PrometheusConsumerMetrics) DeleteQueueDepth(queue string) {
+	m.queueDepth.DeleteLabelValues(queue)
+}
+
+// DeleteDLQDepth removes the dlq_depth{dlq} series after the consumer stops (T52b).
+func (m *PrometheusConsumerMetrics) DeleteDLQDepth(dlq string) {
+	m.dlqDepth.DeleteLabelValues(dlq)
+}
