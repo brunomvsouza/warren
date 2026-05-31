@@ -1,36 +1,39 @@
-# LATER.md — Melhorias Diferidas
+# LATER.md — Deferred Improvements
 
-## Motivação e uso deste arquivo
+## Motivation and how to use this file
 
-Este arquivo registra melhorias identificadas durante revisões de código (`/ship`), auditorias de
-segurança ou análises de cobertura que foram **conscientemente adiadas** — não são bugs, não
-bloqueiam o merge atual, mas merecem atenção em algum momento futuro a critério do mantenedor.
+This file records improvements identified during code reviews (`/ship`), security audits, or
+coverage analyses that were **consciously deferred** — they are not bugs, do not block the current
+merge, but deserve attention at some future point at the maintainer's discretion.
 
-### Como usar com `agent-skills:plan`
+### How to use it with `agent-skills:plan`
 
-Quando você quiser transformar itens deste arquivo em tarefas formais do plano de implementação:
+When you want to turn items in this file into formal tasks in the implementation plan:
 
-1. Invoque `/plan` ou a skill `agent-skills:planning-and-task-breakdown`.
-2. Aponte o agente para este arquivo como fonte de requisitos: *"use LATER.md como input"*.
-3. O agente irá decompor cada item em tarefas com acceptance criteria, dependências e ordem de
-   execução, seguindo o mesmo padrão de `tasks/plan.md` (numeração Txx, acceptance criteria
-   verificáveis, seção de verificação com comandos).
-4. As novas tarefas devem ser inseridas em `tasks/plan.md` na fase correta e em `tasks/todo.md`
-   com o checkbox `[ ]`.
+1. Invoke `/plan` or the `agent-skills:planning-and-task-breakdown` skill.
+2. Point the agent at this file as the source of requirements: *"use LATER.md as input"*.
+3. The agent decomposes each item into tasks with acceptance criteria, dependencies, and an
+   execution order, following the same pattern as `tasks/plan.md` (Txx numbering, verifiable
+   acceptance criteria, a verification section with commands).
+4. The new tasks must be inserted into `tasks/plan.md` in the correct phase and into `tasks/todo.md`
+   with a `[ ]` checkbox.
 
-### Padrão de cada entrada neste arquivo
+### Format of each entry in this file
 
-Cada item deve conter:
-- **Título** curto (o problema em uma linha)
-- **Contexto** — qual código está envolvido e por que o problema existe
-- **Impacto** — o que pode dar errado se o item nunca for resolvido
-- **Evidência** — de onde veio (ex: `/ship` review, auditoria de segurança, test-engineer)
-- **Sugestão de solução** — direção técnica sem prescrever a implementação completa
-- **Pré-requisitos** — qual task do plano (`Txx`) deve existir antes deste item ser atacado
+Each item must contain:
+- **Title** — short (the problem in one line)
+- **Context** — which code is involved and why the problem exists
+- **Impact** — what can go wrong if the item is never resolved
+- **Evidence** — where it came from (e.g. `/ship` review, security audit, test-engineer)
+- **Suggested solution** — technical direction without prescribing the full implementation
+- **Prerequisites** — which plan task (`Txx`) must exist before this item is tackled
+
+> Note: new entries are written in English (CLAUDE.md). A few early entries below remain in
+> Portuguese as historical records.
 
 ---
 
-## Itens pendentes
+## Pending items
 
 ---
 
@@ -62,41 +65,9 @@ continuarem funcionando.
 
 <!-- LATER-03 resolved: commit 7d4dde9 (test(codec): improve fuzz coverage for lax and strict JSON codecs) -->
 
-### LATER-08 — CI actions pinadas em tags semver mutáveis
+<!-- LATER-08 resolved: SHA-pinned every third-party action (checkout, setup-go, golangci-lint-action, upload-artifact, github-script) to its commit SHA with a version comment across ci.yml/bench.yml/release.yml, and pinned benchstat off @latest (Phase 9 /review I6). -->
 
-**Contexto:** `.github/workflows/ci.yml` — `actions/checkout@v6`, `actions/setup-go@v6`,
-`golangci/golangci-lint-action@v9` usam tags semver que podem ser force-pushed por um maintainer
-comprometido, injetando código malicioso no contexto do workflow com acesso ao `GITHUB_TOKEN`.
-
-**Impacto:** Risco de supply chain no CI. Baixo agora (sem secrets críticos além do token de
-leitura), mas se torna crítico quando tokens de publicação (pkg.go.dev, GitHub Packages) forem
-adicionados.
-
-**Evidência:** `/ship` review de T15/T16 — security-auditor (Low).
-
-**Sugestão de solução:** Fixar cada action ao SHA imutável do commit com comentário do semver:
-```yaml
-- uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-```
-
-**Pré-requisitos:** Nenhum. Tarefa standalone de hardening de CI.
-
----
-
-### LATER-09 — `golangci-lint-action` usa `version: latest` — builds não-determinísticos
-
-**Contexto:** `.github/workflows/ci.yml:33` — `version: latest` baixa a versão mais recente do
-linter a cada execução. Uma nova release pode introduzir regras que quebram o CI de forma
-imprevisível, ou regredir regras de segurança (`gosec`, `errcheck`) silenciosamente.
-
-**Impacto:** CI não-reproduzível; regras de lint auditáveis podem mudar sem rastreabilidade.
-
-**Evidência:** `/ship` review de T15/T16 — security-auditor (Low).
-
-**Sugestão de solução:** Fixar em versão específica: `version: v1.64.x` (ou versão corrente) e
-atualizar deliberadamente via commit dedicado.
-
-**Pré-requisitos:** LATER-08 (fixar SHAs é o passo natural para consolidar ambos numa única PR).
+<!-- LATER-09 resolved: ci.yml pins the golangci-lint binary to `version: v2.12` (no longer `latest`). -->
 
 ---
 
@@ -1153,6 +1124,8 @@ dependency for the doc reconciliation itself.
 
 **Prerequisites:** T44b (this suite) + one green run of `.github/workflows/bench.yml` on the reference runner to source the baseline numbers. Capstone classification is T152.
 
+---
+
 ### LATER-71 — Cancelling the `Consume` context does not deregister the consumer at the broker
 
 **Context:** `consumer.go` `runConsume` — on `ctx.Done()` (the case in the main select and the channel-closed `!ok` branch) the loop just does `wg.Wait(); return nil`. It does NOT send `basic.cancel` and does NOT close the AMQP channel obtained from `openDeliveryCh`/`mc.openChannel()`. `Consumer.Close()` only closes `closedCh` (a flag that makes `Delivery.Ack/Nack` refuse) — it likewise does not `basic.cancel` or close the channel. The consumer's broker-side `basic.consume` registration therefore lives until the whole `Connection` is closed (`Connection.Close` cancels the supervisors / drops the TCP sockets). Verified against a real broker via the management API: after a cancelled `Consume`, the queue still reports the consumer as `active=true` holding its prefetched-but-unacked message.
@@ -1164,4 +1137,46 @@ dependency for the doc reconciliation itself.
 **Suggested solution:** Decide and document the intended contract, then make code + godoc agree. Either (a) on `ctx` cancel (or `Consumer.Close`), send `basic.cancel` and close the consumer's AMQP channel so the broker requeues in-flight messages and promotes a SAC standby — i.e. context cancel becomes a true graceful per-consumer shutdown; or (b) keep the current behavior but state explicitly in the `Consume`/`Close` godoc that broker-side deregistration happens only at `Connection.Close`, and that per-consumer SAC failover requires a dedicated connection per consumer. Option (a) is the least-surprising and removes the stranded-unacked window; it needs a unit test (channel-close/`basic.cancel` issued on cancel) plus an integration test asserting the standby is promoted by a per-consumer cancel.
 
 **Prerequisites:** Formalize as a task in `tasks/plan.md` + `tasks/todo.md` before implementing (it changes the consumer lifecycle contract and likely touches SPEC §6.3). Coordinates with the SPEC §6.3 ordering/failover wording and the `examples/ordered_consume` workaround already in place.
+
+---
+
+### LATER-72 — `redact.Error` retains the un-redacted cause via `Unwrap`; a chain-walking surface would bypass redaction
+
+**Context:** `internal/redact/redact.go:40-53` — `redact.Error(err)` returns `&redactedError{msg: URI(err.Error()), cause: err}`. `Error()` returns the redacted string, but `Unwrap()` returns the **original, un-redacted** `cause` (deliberately, so `errors.Is`/`errors.As` keep working). Every production surface today formats errors through `.Error()` (logs via the redacting Slog adapter, returned error strings), so the redacted message is what is emitted — confirmed by `TestSecurityRedaction_NoCredentialLeak_integration`, which scans the top-level `err.Error()` of the forced connect-failure. The residual is that a *future* surface that walks the chain — `fmt.Sprintf("%+v", err)` on a verbose-formatting wrapper, an error reporter that recurses through `errors.Unwrap` and prints each cause, or a structured logger that serializes the cause tree — would reach the retained un-redacted cause and re-leak the URI the redactor stripped.
+
+**Impact:** Defense-in-depth gap, not a live leak. No current code path formats the unwrapped cause, and the security scan proves the `.Error()` path is clean. But the un-redacted credential is retained in-memory inside the error value and is one chain-walking formatter away from an observable surface, so the redaction guarantee is "true for `.Error()`", not "true for the whole error value".
+
+**Evidence:** Phase 9 `/review` (2026-05-31) — security axis Suggestion. The T45b security scan reads only the top-level `err.Error()`; the reviewer noted the `Unwrap`-reachable cause is outside that scan's reach.
+
+**Suggested solution:** Either (a) make the scan/exercise also assert on the unwrapped chain (`for c := err; c != nil; c = errors.Unwrap(c) { scan(c.Error()) }`) so a regression in any cause's redaction is caught — cheap, and tightens the existing test; or (b) change `redactedError` to also wrap the cause in a redacting shim (so `Unwrap().Error()` is redacted too) while keeping a separate typed-target field for `errors.As`. Prefer (a) for v0.1 (the production paths use `.Error()`, so the in-memory cause is a latent risk, not an active one); revisit (b) if any surface starts formatting cause chains.
+
+**Prerequisites:** None. Standalone; coordinates with `internal/redact` and the T45b security scan.
+
+---
+
+### LATER-73 — Root package coverage sits ~0.4pt above the 80% floor (gate-flap risk)
+
+**Context:** `scripts/covercheck` enforces per-package ≥80% and critical-path ≥95%. The root `warren` package currently measures ~80.4% — a ~0.4-percentage-point margin above the default floor. Any root-package edit that adds a few uncovered statements (a new error branch, an option, a guard) can tip it under 80% and fail the coverage gate on an otherwise-correct change.
+
+**Impact:** Low but recurring friction: the gate can flap red on small, correct additions to root-package files, forcing an unrelated coverage top-up in the same PR. It is a thin-margin maintainability issue, not a correctness gap.
+
+**Evidence:** Phase 9 `/review` (2026-05-31) — coverage axis Suggestion.
+
+**Suggested solution:** Add targeted unit tests to the lowest-covered root-package files (identify them via the per-file table `go tool cover -func=coverage.out | sort -k3 -n`) to lift the root package to a comfortable ~85%+ headroom, so routine edits do not graze the floor. Do not raise the floor itself — keep 80% as the contract; buy margin with tests.
+
+**Prerequisites:** None. Standalone test-coverage top-up.
+
+---
+
+### LATER-74 — No real-broker conformance assertion for `ChannelQoS()` → `basic.qos global=true`
+
+**Context:** T44 names `basic.qos.global=true for ChannelQoS()` as a conformance target. AMQP 0-9-1 does not echo the `global` flag back on the wire, so the only broker-side observation is the RabbitMQ management API's per-channel `global_prefetch_count`. This was attempted as `TestConformance_ChannelQoS_GlobalPrefetchAtChannelScope` and validated against the conformance image (`rabbitmq:3.13-management`, `rates_mode=basic`) on 2026-05-31; it proved too unreliable to gate a required CI lane: (1) `/api/channels` lags ~7s to even list a live channel; (2) the channel's `connection_details.name` is the peer form (`host:port -> host:port`), not the warren connection name — that name lives only in `/api/connections` under `client_properties.connection_name` (`warren-conf-qos-con-0`), so a channel must be matched by cross-referencing two endpoints; and (3) worst, the consumer's channel reported `consumer_count=0` and `global_prefetch_count=0` even while actively consuming with `Prefetch(137)+ChannelQoS()`. The behavior IS unit-covered (`consumer.go` issues `ch.Qos(int(c.prefetch), 0, c.channelQoS)` with `c.channelQoS=true`), so this is a conformance-assertion gap, not a behavior gap.
+
+**Impact:** One T44 named conformance target lacks a real-broker assertion. Low: the `global=true` wiring is unit-tested and the management-API path is flaky rather than wrong; a regression in the `global` argument would be caught by the unit test, just not pinned end-to-end against a broker.
+
+**Evidence:** Phase 9 `/review` I4 (2026-05-31) + live-broker validation of the would-be conformance test the same day (the data above).
+
+**Suggested solution:** Pick one: (a) match the consumer channel reliably by first reading `/api/connections` (filter `client_properties.connection_name` by the warren connection-name prefix → connection `name`), then `/api/channels` filtered by that `connection_details.name`, AND give the stats DB a generous poll window (e.g. 30s) — accepting some CI-timing fragility (cf. LATER-67); optionally raise the conformance broker to `rates_mode=detailed` so channel QoS surfaces faster; (b) assert via a thin TCP proxy that captures the `basic.qos` frame's `global` bit on the wire — most reliable, most work, and reusable for other wire-level conformance checks; (c) accept the unit-level coverage as sufficient for v0.1 and formally drop the conformance target from T44. Prefer (a) only if the flakiness can be bounded; otherwise (b) for a real wire assertion, or (c) to close the target honestly.
+
+**Prerequisites:** T44 conformance harness; the management-API helper pattern in `topology_integration_test.go` (for option a) or a new wire-proxy fixture (for option b).
 
