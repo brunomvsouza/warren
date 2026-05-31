@@ -442,6 +442,11 @@ func classifyBrokerCancel(mc *managedConn, queue string) string {
 // consumer_cancelled_total metric. When onCancel is set AND the metrics sink is the
 // NoOp default, the class is discarded by both — so the probe is pure overhead and we
 // return cancelReasonUnknown without opening a channel.
+//
+// The type assertion deliberately matches only the bare NoOpConsumerMetrics default.
+// A custom sink, or any decorator that embeds NoOp, falls through to probing — which
+// is safe by design: over-probing only costs a broker round-trip on a rare cancel,
+// never correctness, so the conservative default is to probe whenever in doubt.
 func classifyCancel(mc *managedConn, queue string, onCancel func(string), cm metrics.ConsumerMetrics) string {
 	if onCancel != nil {
 		if _, isNoOp := cm.(metrics.NoOpConsumerMetrics); isNoOp {

@@ -87,10 +87,11 @@ func (b *ConsumerBuilder[M]) PrefetchBytes(_ uint) *ConsumerBuilder[M] { return 
 // prefetch × concurrency × body-size would otherwise risk an OOM, independent of
 // the message-count backpressure that Prefetch provides.
 //
-// n <= 0 (the default) disables the guardrail. A single message larger than n is
-// not rejected: when nothing else is in flight it is dispatched alone, so memory
-// is bounded to max(n, largest single body). The current reserved total is
-// exported as the consumer_inflight_bytes{queue} gauge.
+// n <= 0 (the default) disables the guardrail. n is a soft ceiling, not a hard
+// reject: a single message larger than n is dispatched alone when nothing else is
+// in flight (rather than deadlocking forever), so peak resident payload memory can
+// briefly reach max(n, largest single body) — size n with that headroom in mind.
+// The current reserved total is exported as the consumer_inflight_bytes{queue} gauge.
 func (b *ConsumerBuilder[M]) MaxInFlightBytes(n int64) *ConsumerBuilder[M] {
 	b.maxInFlightBytes = n
 	return b

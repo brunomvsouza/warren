@@ -344,7 +344,12 @@ func (t *Topology) expand() *Topology {
 		//   - dl.RoutingKey unset: messages keep their original key, so bind "#". This
 		//     is the topic-wildcard catch-all and matches the auto-created topic DLX; a
 		//     user-declared direct DLX in this case needs a routing key to route at all.
-		// Skip if the caller already declared the binding.
+		// Skip if the caller already declared this exact binding. The dedup index keys
+		// on the chosen routing key, so a caller who both sets dl.RoutingKey AND
+		// pre-declares a separate "#" binding keeps both: on a topic DLX they coexist
+		// idempotently (the queue is delivered once even when both bindings match), and
+		// on a direct DLX the stray "#" is simply a dead literal key — neither is a
+		// dedup bug.
 		bindRoutingKey := "#"
 		if dl.RoutingKey != "" {
 			bindRoutingKey = dl.RoutingKey
