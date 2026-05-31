@@ -13,6 +13,36 @@ import (
 
 const mod = "github.com/brunomvsouza/warren"
 
+// criticalFiller returns coverage-profile lines placing every critical package
+// and the critical file (channelpool.go) at 100%, except those listed in `skip`.
+// The real gate (scripts/coverage.sh) always profiles all of them, so a unit
+// profile must too: check() fails closed when a declared critical package OR file
+// is absent from the profile (the two rules mirror each other), so a test that
+// does not mean to exercise a given choke-point still has to present it. A test
+// driving a specific choke-point to a non-100% value lists it in `skip` and
+// supplies its own block.
+func criticalFiller(skip ...string) string {
+	skipped := make(map[string]bool, len(skip))
+	for _, s := range skip {
+		skipped[s] = true
+	}
+	var b strings.Builder
+	for _, pkg := range []string{
+		"internal/reconnect",
+		"internal/confirms",
+		"internal/amqperror",
+		"internal/redact",
+	} {
+		if !skipped[pkg] {
+			b.WriteString(mod + "/" + pkg + "/x.go:1.1,2.2 1 1\n")
+		}
+	}
+	if !skipped["channelpool.go"] {
+		b.WriteString(mod + "/channelpool.go:1.1,2.2 1 1\n")
+	}
+	return b.String()
+}
+
 func TestAnalyze_aggregatesByPackageAndFile(t *testing.T) {
 	// Two files in the same package: 3 of 4 statements covered → 75%.
 	profile := "mode: atomic\n" +
@@ -36,11 +66,10 @@ func TestAnalyze_aggregatesByPackageAndFile(t *testing.T) {
 }
 
 func TestCheck_flagsPackageBelowDefaultFloor(t *testing.T) {
-	// A non-critical package at 79% (below the 80% default floor). channelpool.go
-	// is included at 100% because the real gate always profiles the root package;
-	// a critical file absent from the profile is itself a failure (fail-closed).
-	profile := "mode: atomic\n" +
-		mod + "/channelpool.go:1.1,2.2 1 1\n" +
+	// A non-critical package at 79% (below the 80% default floor). criticalFiller
+	// satisfies the fail-closed presence checks for every choke-point this test is
+	// not exercising, so the only violation is codec.
+	profile := "mode: atomic\n" + criticalFiller() +
 		mod + "/codec/json.go:1.1,2.2 79 1\n" +
 		mod + "/codec/json.go:3.1,4.2 21 0\n" // 79/100 = 79%
 
@@ -56,9 +85,8 @@ func TestCheck_flagsPackageBelowDefaultFloor(t *testing.T) {
 
 func TestCheck_criticalPackageNeeds95(t *testing.T) {
 	// reconnect at 90% passes the 80% default but fails the 95% critical floor.
-	// channelpool.go at 100% keeps the profile realistic (root package present).
-	profile := "mode: atomic\n" +
-		mod + "/channelpool.go:1.1,2.2 1 1\n" +
+	// The other choke-points are filled at 100% so only reconnect violates.
+	profile := "mode: atomic\n" + criticalFiller("internal/reconnect") +
 		mod + "/internal/reconnect/loop.go:1.1,2.2 90 1\n" +
 		mod + "/internal/reconnect/loop.go:3.1,4.2 10 0\n" // 90%
 
@@ -74,7 +102,7 @@ func TestCheck_criticalPackageNeeds95(t *testing.T) {
 func TestCheck_channelpoolFileFloor(t *testing.T) {
 	// channelpool.go is a critical FILE inside the root package: 90% fails 95%,
 	// even though the root package as a whole could pass at 80%.
-	profile := "mode: atomic\n" +
+	profile := "mode: atomic\n" + criticalFiller("channelpool.go") +
 		mod + "/channelpool.go:1.1,2.2 90 1\n" +
 		mod + "/channelpool.go:3.1,4.2 10 0\n" + // channelpool.go 90%
 		mod + "/publisher.go:1.1,2.2 100 1\n" // rest of root package 100%
@@ -90,9 +118,7 @@ func TestCheck_channelpoolFileFloor(t *testing.T) {
 }
 
 func TestCheck_allPass(t *testing.T) {
-	profile := "mode: atomic\n" +
-		mod + "/internal/redact/redact.go:1.1,2.2 100 1\n" +
-		mod + "/channelpool.go:1.1,2.2 100 1\n" +
+	profile := "mode: atomic\n" + criticalFiller() +
 		mod + "/codec/json.go:1.1,2.2 85 1\n" +
 		mod + "/codec/json.go:3.1,4.2 15 0\n" // codec 85% (>= 80)
 
@@ -121,9 +147,10 @@ func TestAnalyze_rejectsFilePathWithoutSlash(t *testing.T) {
 func TestCheck_missingCriticalFileFailsClosed(t *testing.T) {
 	// A profile that contains NO channelpool.go block must fail closed: the
 	// critical file absent from the profile is itself a violation at 0%, not a
-	// silent pass. Guards the regression where dropping channelpool.go from
+	// silent pass. The critical packages are present (filler) so channelpool.go is
+	// the only miss. Guards the regression where dropping channelpool.go from
 	// coverage would let the gate go green on the choke-point file.
-	profile := "mode: atomic\n" +
+	profile := "mode: atomic\n" + criticalFiller("channelpool.go") +
 		mod + "/codec/json.go:1.1,2.2 100 1\n" // channelpool.go deliberately absent
 
 	a, err := analyze(strings.NewReader(profile))
@@ -136,13 +163,33 @@ func TestCheck_missingCriticalFileFailsClosed(t *testing.T) {
 	assert.Equal(t, 0.0, violations[0].pct)
 }
 
+func TestCheck_missingCriticalPackageFailsClosed(t *testing.T) {
+	// Symmetric to the file rule: a critical PACKAGE absent from the profile must
+	// fail closed at 0%, not silently void its 95% floor. Guards the regression
+	// where dropping a choke-point package from coverage.sh's package list (a
+	// rename, a widened grep exclusion, or a build-tag change that zeroes its test
+	// files) would let the gate go green with the floor unenforced. Here
+	// internal/redact is omitted while every other choke-point is present.
+	profile := "mode: atomic\n" + criticalFiller("internal/redact") +
+		mod + "/codec/json.go:1.1,2.2 100 1\n" // internal/redact deliberately absent
+
+	a, err := analyze(strings.NewReader(profile))
+	require.NoError(t, err)
+
+	violations, _ := a.check()
+	require.Len(t, violations, 1)
+	assert.Equal(t, "internal/redact", violations[0].name)
+	assert.Equal(t, floorCritical, violations[0].floor)
+	assert.Equal(t, 0.0, violations[0].pct)
+}
+
 func TestCheck_exactlyAtFloorPasses(t *testing.T) {
 	// Boundary case: a default package at exactly 80.0% and a critical package at
 	// exactly 95.0% must NOT be flagged. This is what the +1e-9 epsilon in check()
 	// guarantees; an off-by-one there would silently fail packages sitting on the
-	// floor.
-	profile := "mode: atomic\n" +
-		mod + "/channelpool.go:1.1,2.2 100 1\n" + // critical file ok (100%)
+	// floor. reconnect is skipped in the filler so the test pins it to exactly
+	// 95.0% (the filler's 100% would otherwise mask the boundary).
+	profile := "mode: atomic\n" + criticalFiller("internal/reconnect") +
 		mod + "/codec/json.go:1.1,2.2 80 1\n" + // 80 covered
 		mod + "/codec/json.go:3.1,4.2 20 0\n" + // 20 not → exactly 80.0%
 		mod + "/internal/reconnect/loop.go:1.1,2.2 95 1\n" + // 95 covered
@@ -164,12 +211,10 @@ func writeProfile(t *testing.T, content string) string {
 }
 
 func TestRun_exitCodes(t *testing.T) {
-	allPass := "mode: atomic\n" +
-		mod + "/channelpool.go:1.1,2.2 100 1\n" +
+	allPass := "mode: atomic\n" + criticalFiller() +
 		mod + "/codec/json.go:1.1,2.2 85 1\n" +
 		mod + "/codec/json.go:3.1,4.2 15 0\n" // codec 85% (>= 80)
-	belowFloor := "mode: atomic\n" +
-		mod + "/channelpool.go:1.1,2.2 1 1\n" +
+	belowFloor := "mode: atomic\n" + criticalFiller() +
 		mod + "/codec/json.go:1.1,2.2 79 1\n" +
 		mod + "/codec/json.go:3.1,4.2 21 0\n" // codec 79% (< 80)
 
@@ -196,8 +241,7 @@ func TestRun_exitCodes(t *testing.T) {
 }
 
 func TestRun_failurePrintsViolationToStderr(t *testing.T) {
-	belowFloor := "mode: atomic\n" +
-		mod + "/channelpool.go:1.1,2.2 1 1\n" +
+	belowFloor := "mode: atomic\n" + criticalFiller() +
 		mod + "/codec/json.go:1.1,2.2 79 1\n" +
 		mod + "/codec/json.go:3.1,4.2 21 0\n"
 
