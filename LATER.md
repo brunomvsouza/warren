@@ -1223,15 +1223,15 @@ dependency for the doc reconciliation itself.
 
 ---
 
-### LATER-79 — Branch-protection required-check names must track the renamed Go-matrix jobs
+### LATER-79 — `main` has no branch protection, so the CI gates run but do not block a merge
 
-**Context:** Phase 9 added a Go version matrix to `.github/workflows/ci.yml` (`go: ["1.25", "1.26"]`), so the unit-test check names became `Unit tests (Go 1.25)` / `Unit tests (Go 1.26)` rather than a single `Unit tests`. GitHub branch-protection required-status-checks are matched by exact name and live in repo settings, outside this repo's diff. This is a one-time repo-settings action, not a code change.
+**Context:** Phase 9 wired the CI gates (`Unit tests (Go 1.25)` / `(Go 1.26)`, `Coverage gate`, `Integration tests`, `Vulnerability scan`) into `.github/workflows/ci.yml`. Verified on 2026-05-31 that `main` currently has NO branch-protection rule (`GET repos/brunomvsouza/warren/branches/main/protection` → 404 "Branch not protected"), so there is no required-status-checks list at all. Note also that the Go-matrix addition is purely additive: the unit job's name already interpolated the matrix value (`Unit tests (Go ${{ matrix.go }})`), so `1.25` was never the bare `Unit tests` — adding `1.26` only introduces a new `Unit tests (Go 1.26)` check and renames nothing. The original /ship finding (a stale `Unit tests` required-check name) therefore does not apply.
 
-**Impact:** If the branch-protection rule still pins the old `Unit tests` name, that required check no longer reports and the PR is either blocked forever (pending) or silently stops gating on unit tests — the difference between the gate running and the gate blocking. Same for `Coverage gate` / `Integration tests` / `Vulnerability scan` if their names changed.
+**Impact:** The gates are advisory until protection is enabled: a red CI run does not block a merge to `main`, and a direct push to `main` bypasses them entirely. For a solo maintainer this may be a deliberate workflow choice, not a defect — recorded so the gating posture is explicit rather than assumed.
 
-**Evidence:** Phase 9 `/ship` code-reviewer (S4, 2026-05-31) — Important.
+**Evidence:** Phase 9 `/ship` code-reviewer (S4, 2026-05-31), corrected by a live `gh api` check the same day.
 
-**Suggested solution:** When PR #20 merges, update the repository's branch-protection required-check list to the current job/check names; verify a fork PR and a same-repo PR both surface the expected required checks.
+**Suggested solution:** If/when the gates should actually block, enable branch protection on `main` with these required status checks: `Unit tests (Go 1.25)`, `Unit tests (Go 1.26)`, `Coverage gate`, `Integration tests`, `Vulnerability scan`. Until then no action is needed — there is no stale required-check name to fix.
 
-**Prerequisites:** PR #20 merge; repo admin access (a settings change, not a Txx).
+**Prerequisites:** Repo admin access (a settings change, not a Txx). No code dependency.
 
