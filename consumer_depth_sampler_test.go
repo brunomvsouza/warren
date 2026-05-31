@@ -207,6 +207,47 @@ func TestConsumer_SampleDepths_SkipsSourceWhenAbsent(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestConsumer_SampleDepths_ProbesDLQIndependentlyOfSource(t *testing.T) {
+	// sampleDepths probes source and DLQ via two independent passive declares. When the
+	// source is gone (404) but the DLQ still exists, the DLQ depth must still be emitted
+	// — the source's absence must not short-circuit the DLQ probe.
+	ch := newFakeDepthChannel()
+	ch.errs["orders"] = &amqp091.Error{Code: 404, Reason: "NOT_FOUND"}
+	ch.counts["orders.dlq"] = 5
+	cm := newCaptureDepthMetrics()
+	c := newDepthSamplerConsumer(t, ch, cm)
+
+	c.sampleDepths()
+
+	q, d := cm.snapshot()
+	_, ok := q["orders"]
+	assert.False(t, ok, "no queue_depth when the source queue is gone")
+	dd, ok := d["orders.dlq"]
+	require.True(t, ok, "dlq_depth is emitted even though the source probe failed")
+	assert.Equal(t, int64(5), dd)
+	assert.Equal(t, 1, ch.passiveCallCount("orders.dlq"),
+		"the DLQ is probed regardless of the source result")
+}
+
+func TestConsumer_SampleQueueDepth_NonNotFoundError_Skips(t *testing.T) {
+	// Any passive-declare error skips the sample, not just a 404. A 403 access-refused
+	// must be treated identically — emit no series rather than a misleading 0, so the
+	// skip stays error-class-agnostic and a future change cannot start zeroing on 403.
+	ch := newFakeDepthChannel()
+	ch.errs["orders"] = &amqp091.Error{Code: 403, Reason: "ACCESS_REFUSED"}
+	cm := newCaptureDepthMetrics()
+	c := newDepthSamplerConsumer(t, ch, cm)
+
+	depth, ok := c.sampleQueueDepth("orders")
+	assert.False(t, ok, "a non-404 declare error also skips the sample")
+	assert.Zero(t, depth)
+
+	c.sampleDepths()
+	q, _ := cm.snapshot()
+	_, present := q["orders"]
+	assert.False(t, present, "no queue_depth series emitted on a 403")
+}
+
 func TestConsumer_SampleQueueDepth_OpenChannelFails(t *testing.T) {
 	// No chanFactory and no live socket → openChannel errors → (0,false), no panic.
 	conn := newFakeConsumerConn(t)

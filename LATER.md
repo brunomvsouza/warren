@@ -1263,3 +1263,17 @@ dependency for the doc reconciliation itself.
 
 **Prerequisites:** T52 depth sampler (shipped). No code dependency.
 
+---
+
+### LATER-82 — Depth sampler's DLQ name is hard-wired to `<queue>.dlq` and can drift from the topology layer
+
+**Context:** `sampleDepths` (`consumer.go:444-452`) derives the DLQ name as `c.queue + dlqNameSuffix` with `dlqNameSuffix = ".dlq"` (`consumer.go:413`). This matches warren's own `DeadLetter` topology expansion today, but the suffix is duplicated as a local constant in the consumer rather than shared with the topology layer that actually names the DLQ. If a future option ever lets callers override the DLQ suffix (or use a non-conventional DLQ name), the sampler would silently probe the wrong — or a non-existent — queue and emit no `dlq_depth`, with no error surfaced.
+
+**Impact:** Latent coupling / silent-wrong-metric risk, not a current bug (no override exists). Bounded to a missing `dlq_depth` series, never a wrong value, because a mismatched name 404s and is skipped.
+
+**Evidence:** Phase 10 `/ship` code-reviewer (T52, 2026-05-31) — Suggestion.
+
+**Suggested solution:** When/if a configurable DLQ suffix or name lands, source the sampler's DLQ name from the same topology definition rather than the local `dlqNameSuffix` constant, so the two cannot diverge. Until then, no action needed.
+
+**Prerequisites:** A future configurable-DLQ-name task (does not yet exist). No code dependency today.
+

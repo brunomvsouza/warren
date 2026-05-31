@@ -197,7 +197,10 @@ func (b *PublisherBuilder[M]) PublishRetry(p RetryPolicy) *PublisherBuilder[M] {
 //
 // perSec <= 0 (the default) disables the limiter. PublishBatch is not rate-limited
 // (mirroring PublishRetry's single-message scoping — see PublishBatch's godoc).
-// Last-wins.
+// A perSec approaching 1e9 loses precision as the emission interval rounds toward
+// the nanosecond floor, so the effective ceiling saturates near one grant per
+// nanosecond — far above any real broker, since this is a runaway-loop guardrail
+// rather than a precise shaper. Last-wins.
 func (b *PublisherBuilder[M]) WithPublishRateLimit(perSec int) *PublisherBuilder[M] {
 	b.publishRateLimit = perSec
 	return b

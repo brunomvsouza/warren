@@ -213,6 +213,20 @@ func TestRateLimiter_Reserve_DeterministicBurstAndConservativeCursor(t *testing.
 	assert.Zero(t, rl.reserve(base.Add(time.Hour)), "after idling past the cursor the burst is restored")
 }
 
+func TestRateLimiter_SingleToken_Burst1_PacesEveryGrant(t *testing.T) {
+	// The degenerate burst==1 boundary: tau = (1-1)*interval = 0, so the burst window
+	// collapses to nothing and every grant after the first must wait a full interval.
+	// Pinned deterministically with an injected clock (no sleep). perSec=1 → 1s interval.
+	rl := newRateLimiter(1)
+	require.Equal(t, time.Second, rl.interval)
+	require.Zero(t, rl.tau, "burst 1 leaves zero burst tolerance")
+	base := time.Unix(0, 0)
+
+	assert.Zero(t, rl.reserve(base), "the single burst token grants immediately")
+	assert.Equal(t, time.Second, rl.reserve(base), "the next grant at the same instant waits a full interval")
+	assert.Equal(t, 2*time.Second, rl.reserve(base), "and the one after waits two — strictly paced, no burst")
+}
+
 func TestNewRateLimiter_HugePerSec_ClampsInterval(t *testing.T) {
 	// perSec > 1e9 rounds time.Second/perSec to zero; the constructor clamps the
 	// emission interval to the finest tick so the bucket never degenerates into
@@ -225,6 +239,46 @@ func TestNewRateLimiter_HugePerSec_ClampsInterval(t *testing.T) {
 	throttled, err := rl.wait(context.Background())
 	require.NoError(t, err)
 	assert.False(t, throttled, "the first grant is still within the burst")
+}
+
+func TestPublisher_PublishBatch_NotRateLimited(t *testing.T) {
+	// WithPublishRateLimit governs single Publish only; PublishBatch is explicitly
+	// excluded (mirroring PublishRetry's single-message scoping). Drain the single
+	// burst token, then a batch must proceed at once — neither blocking on the bucket
+	// for ~1s nor recording publisher_rate_limited_total. Guards against a future
+	// refactor accidentally wiring the limiter into the batch path.
+	fake := newFakePubCh(true /* autoAck */)
+	pm := &capturePublisherMetrics{}
+	pub, stopPool := newTestPubBatch[testPayload](fake, pm, 1024)
+	pub.rateLimiter = newRateLimiter(1) // 1s interval, burst 1
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	// Exhaust the single burst token so any rate-limited path would block ~1s.
+	_, err := pub.rateLimiter.wait(context.Background())
+	require.NoError(t, err)
+
+	msgs := make([]Message[testPayload], 5)
+	for i := range msgs {
+		msgs[i] = Message[testPayload]{Body: &testPayload{Value: "x"}}
+	}
+
+	start := time.Now()
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	require.Len(t, results, 5)
+	for i, r := range results {
+		assert.NoErrorf(t, r.Err, "batch message %d must publish", i)
+	}
+	assert.Less(t, elapsed, 500*time.Millisecond,
+		"PublishBatch must not block on the drained rate-limit bucket")
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	assert.Empty(t, pm.rateLimited, "PublishBatch must not record publisher_rate_limited_total")
 }
 
 func TestRateLimiter_Concurrent_RaceClean(t *testing.T) {
