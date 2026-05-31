@@ -219,6 +219,102 @@ func TestConsumer_SampleQueueDepth_OpenChannelFails(t *testing.T) {
 	assert.Zero(t, depth)
 }
 
+// bareTopoChannel satisfies topologyChannel but deliberately does NOT implement
+// passiveQueueInspector (no QueueDeclarePassive), so sampleQueueDepth must take the
+// type-assertion-failed branch and still close the channel.
+type bareTopoChannel struct {
+	mu     sync.Mutex
+	closed int
+}
+
+func (b *bareTopoChannel) ExchangeDeclare(_, _ string, _, _, _, _ bool, _ amqp091.Table) error {
+	return nil
+}
+
+func (b *bareTopoChannel) QueueDeclare(_ string, _, _, _, _ bool, _ amqp091.Table) (amqp091.Queue, error) {
+	return amqp091.Queue{}, nil
+}
+
+func (b *bareTopoChannel) QueueBind(_, _, _ string, _ bool, _ amqp091.Table) error { return nil }
+
+func (b *bareTopoChannel) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closed++
+	return nil
+}
+
+func TestConsumer_SampleQueueDepth_ChannelNotInspector(t *testing.T) {
+	// A channel that cannot passively declare (does not implement passiveQueueInspector)
+	// must yield (0,false) without panicking, and the throwaway channel must still be
+	// closed so the defensive type-assertion guard never leaks a channel.
+	bare := &bareTopoChannel{}
+	cm := newCaptureDepthMetrics()
+	conn := newFakeConsumerConn(t)
+	conn.conConns[0].chanFactory = func() (topologyChannel, error) { return bare, nil }
+	c, err := ConsumerFor[string](conn).
+		Queue("orders").
+		Metrics(cm).
+		WithQueueDepthSampler(time.Hour).
+		Build()
+	require.NoError(t, err)
+
+	depth, ok := c.sampleQueueDepth("orders")
+
+	assert.False(t, ok, "a channel without QueueDeclarePassive must not report a depth")
+	assert.Zero(t, depth)
+	bare.mu.Lock()
+	closed := bare.closed
+	bare.mu.Unlock()
+	assert.Equal(t, 1, closed, "the probe channel must be closed even when it is not an inspector")
+}
+
+func TestConsumer_SampleDepths_SkipsAllWhenChannelUnopenable(t *testing.T) {
+	// Mid-reconnect openChannel returns ErrNotConnected. The contract is skip, not zero:
+	// neither gauge may be written, so the last good value freezes rather than being
+	// overwritten with a misleading 0 while the socket is down.
+	cm := newCaptureDepthMetrics()
+	conn := newFakeConsumerConn(t)
+	conn.conConns[0].chanFactory = func() (topologyChannel, error) { return nil, ErrNotConnected }
+	c, err := ConsumerFor[string](conn).
+		Queue("orders").
+		Metrics(cm).
+		WithQueueDepthSampler(time.Hour).
+		Build()
+	require.NoError(t, err)
+
+	c.sampleDepths()
+
+	q, d := cm.snapshot()
+	assert.Empty(t, q, "no queue_depth written while the channel cannot be opened")
+	assert.Empty(t, d, "no dlq_depth written while the channel cannot be opened")
+}
+
+func TestConsumer_SampleDepths_GaugeFreezesWhenBrokerUnreachable(t *testing.T) {
+	// Prime the gauges with a good sample, then make every subsequent probe fail
+	// (as during a reconnect). The previously-emitted value must remain the last
+	// thing written — the sampler skips rather than zeroing the series.
+	ch := newFakeDepthChannel()
+	ch.counts["orders"] = 11
+	ch.counts["orders.dlq"] = 2
+	cm := newCaptureDepthMetrics()
+	c := newDepthSamplerConsumer(t, ch, cm)
+
+	c.sampleDepths() // prime: orders=11, orders.dlq=2
+
+	// The broker becomes unreachable: every passive declare now fails.
+	ch.mu.Lock()
+	ch.errs["orders"] = &amqp091.Error{Code: 404, Reason: "NOT_FOUND"}
+	ch.errs["orders.dlq"] = &amqp091.Error{Code: 404, Reason: "NOT_FOUND"}
+	ch.mu.Unlock()
+
+	c.sampleDepths() // must write neither gauge
+
+	q, d := cm.snapshot()
+	assert.Equal(t, int64(11), q["orders"], "queue_depth freezes at its last good value, not zeroed")
+	assert.Equal(t, int64(2), d["orders.dlq"], "dlq_depth freezes at its last good value, not zeroed")
+}
+
 func TestConsumer_SampleDepths_ClosesEveryProbeChannel(t *testing.T) {
 	// Each passive declare runs on its own short-lived channel that is closed
 	// afterwards, so a 404 (which the broker answers by closing the channel) can
