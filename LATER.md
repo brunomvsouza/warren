@@ -28,8 +28,8 @@ Each item must contain:
 - **Suggested solution** — technical direction without prescribing the full implementation
 - **Prerequisites** — which plan task (`Txx`) must exist before this item is tackled
 
-> Note: new entries are written in English (CLAUDE.md). A few early entries below remain in
-> Portuguese as historical records.
+> Note: all entries are written in English (CLAUDE.md); the early entries that were once in
+> Portuguese have been translated.
 
 ---
 
@@ -69,20 +69,11 @@ error. The two-wrap step (`%w: %w`) must be preserved so `errors.Is`/`AMQPCode` 
 
 ---
 
-### LATER-10 — RabbitMQ image on a floating tag in the integration CI
+<!-- LATER-10 resolved (same work as LATER-65): the integration/conformance lanes no longer pull
+the floating rabbitmq:3-management tag. Dockerfile.rabbitmq-delayed pins `FROM rabbitmq:3.13-management`
+(by SHA-256) and ci.yml builds that image for the broker jobs — exactly the rabbitmq:3.13-management
+pin this entry suggested. Confirmed by Phase 9 /ship code-reviewer (S5, 2026-05-31). -->
 
-**Context:** `.github/workflows/ci.yml:43` — `rabbitmq:3-management` is a mutable tag on Docker Hub.
-A malicious push to the tag could inject a compromised image that runs on the CI runner.
-
-**Impact:** Non-reproducible CI; integration tests can break on a broker behavior change with no
-warning; theoretical supply-chain risk.
-
-**Evidence:** `/ship` review of T15/T16 — security-auditor (Low).
-
-**Suggested solution:** Pin to an immutable digest, or at least a minor tag:
-`rabbitmq:3.13-management`.
-
-**Prerequisites:** LATER-08.
 
 ---
 
@@ -150,7 +141,8 @@ topo := &warren.Topology{
 ```
 
 **Prerequisites:** LATER-20 (DLX/DLQ binding), RabbitMQ 3.10+ (quorum-queue `x-delivery-limit`
-support). CI uses `rabbitmq:3-management`, which supports quorum queues since 3.8.
+support). The integration/conformance lanes build the pinned `rabbitmq:3.13-management` image
+(Dockerfile.rabbitmq-delayed), which supports quorum queues.
 
 ---
 
@@ -1172,4 +1164,74 @@ dependency for the doc reconciliation itself.
 **Suggested solution:** Pick one: (a) match the consumer channel reliably by first reading `/api/connections` (filter `client_properties.connection_name` by the warren connection-name prefix → connection `name`), then `/api/channels` filtered by that `connection_details.name`, AND give the stats DB a generous poll window (e.g. 30s) — accepting some CI-timing fragility (cf. LATER-67); optionally raise the conformance broker to `rates_mode=detailed` so channel QoS surfaces faster; (b) assert via a thin TCP proxy that captures the `basic.qos` frame's `global` bit on the wire — most reliable, most work, and reusable for other wire-level conformance checks; (c) accept the unit-level coverage as sufficient for v0.1 and formally drop the conformance target from T44. Prefer (a) only if the flakiness can be bounded; otherwise (b) for a real wire assertion, or (c) to close the target honestly.
 
 **Prerequisites:** T44 conformance harness; the management-API helper pattern in `topology_integration_test.go` (for option a) or a new wire-proxy fixture (for option b).
+
+---
+
+### LATER-75 — Conformance suite lacks nack-requeue/`Redelivered` and basic SAC-exclusivity assertions
+
+**Context:** `conformance/conformance_test.go` proves NO_ROUTE 312, broker-nack on overflow, broker-initiated cancel, the quorum `x-delivery-limit` bound, and the 406 user-id mismatch. Two headline contracts have no real-broker assertion: (1) warren's "nack-without-requeue is the default; requeue opt-in via `ErrRequeue`" — the positive case (a single `ErrRequeue` redelivers the same message with `Delivery.Redelivered()==true`, and a plain handler error does NOT requeue) is emergent broker behavior, exactly what a conformance test should pin; the quorum test only uses `ErrRequeue` as an infinite-poison driver. (2) SingleActiveConsumer exclusivity (`x-single-active-consumer`) is shipped (`topology.go`) and sold by `examples/ordered_consume`, but no conformance test asserts that with two consumers exactly one is active and the second takes over when the active one closes.
+
+**Impact:** The two most-claimed delivery contracts have the weakest real-broker proof. A regression in the nack-requeue verdict mapping or the SAC arg injection would not be caught by the conformance lane (unit tests cover the wiring, not the broker-observed behavior).
+
+**Evidence:** Phase 9 `/ship` test-engineer (S2, 2026-05-31) — Important.
+
+**Suggested solution:** Add `TestConformance_NackRequeue_RedeliveredFlag` (classic queue: one `ErrRequeue` → same MessageID redelivered with `Redelivered()==true`; a plain error → not requeued / DLX'd) and `TestConformance_SingleActiveConsumer_Exclusivity` (declare a SAC queue, start two `ConsumeRaw` consumers, assert only one receives; close it, assert the second takes over). Both are deterministic broker behaviors (no timing flake like LATER-74).
+
+**Prerequisites:** T44 conformance harness.
+
+---
+
+### LATER-76 — Example pure-logic helpers and otel header-propagation lack unit-level assertions
+
+**Context:** `examples/idempotent_consume/main.go` (`seenCache` LRU+TTL eviction, ~lines 285-314) and `examples/ordered_consume/main.go` (`orderTracker` contiguity/dedupe verdict, ~lines 362-401) are pure, I/O-free logic that is the load-bearing assertion of each example, yet they are exercised only through the `integration`-tagged subprocess — the eviction and out-of-order branches never run in a passing happy path. Separately, `examples/otel` proves the consume span is a child of the publish span, but because publisher and consumer share one in-process TracerProvider the assertion would also pass if the parent leaked through Go memory rather than the W3C `traceparent` AMQP header the example claims to demonstrate.
+
+**Impact:** A regression that broke cache eviction, flipped the TTL comparison, weakened the order detector, or broke `traceparent` injection/extraction could ship green. These are teaching examples, so a subtly-wrong helper teaches a wrong pattern.
+
+**Evidence:** Phase 9 `/ship` test-engineer (S1, 2026-05-31) — Important.
+
+**Suggested solution:** Add plain (un-tagged) `_test.go` unit tests next to each example: table-driven cases for `seenCache` (capacity-1 eviction returns the evicted id as new; sub-ms TTL returns false then true after expiry) and `orderTracker` (in-order / duplicate / gap / regression / short slice). For otel, have the handler assert the delivery carries a `traceparent` header whose trace-id equals the publish span's (e.g. via `ConsumeRaw`), proving on-the-wire propagation rather than in-process linkage.
+
+**Prerequisites:** None (example-local tests).
+
+---
+
+### LATER-77 — Security redaction scan: walk the error chain, exercise the std logger adapter, cover encoded-secret shapes
+
+**Context:** `security_redaction_integration_test.go` / `security_redaction_scan_test.go` capture `err.Error()` (top-level, already redacted) but never walk `errors.Unwrap` (the un-redacted cause LATER-72 documents); drive logs only through the Slog adapter, leaving the equally-public `log/std.go` adapter unexercised; and match secrets by exact plaintext substring + an `amqps?://…@` regex, so a URL-encoded or transport-encoded sentinel, or a credential after a rewritten scheme, would slip past. The redaction itself is sound on every production path (traced caller-by-caller during the Phase 9 audit); these are coverage gaps in the regression suite, not live leaks.
+
+**Impact:** A future surface that formats the error chain (`%+v`, a recursive reporter), a redaction regression in `log/std.go`, or a leak in an encoded shape would not be caught by the project's credential-leak gate.
+
+**Evidence:** Phase 9 `/ship` security-auditor (S3, 2026-05-31) — Medium (×3); relates to LATER-72.
+
+**Suggested solution:** (a) Capture the full chain in the scan (`for c := err; c != nil; c = errors.Unwrap(c) { record(c.Error()) }`); (b) parametrize the redaction test over both `log.NewSlog` and `log.NewStd`, or add a fast unit test asserting each adapter level redacts a URI; (c) add `url.QueryEscape`/`url.PathEscape`/base64 variants of the sentinel to the `secrets` set and broaden the scanner regex to scheme-agnostic `://([^@/?#]*:[^@/?#]*)@`.
+
+**Prerequisites:** T45b security-scan harness; LATER-72 for the chain-walk redaction shim (if chosen instead of scanning the chain).
+
+---
+
+### LATER-78 — Coverage gate: a package with no test files is invisible to the floor; tool binaries are version- not hash-pinned
+
+**Context:** `scripts/coverage.sh` computes coverage over `go list ./... | grep -vE …` and floors only packages that emit profile blocks — a package that compiles but has no `_test.go` produces no entry and silently escapes the 80% floor (the new critical-package fail-closed check in `scripts/covercheck` only covers the four declared choke-points). Separately, `golangci-lint` (`version: v2.12` minor track), `govulncheck` (`GOVULNCHECK_VERSION`), and `benchstat` (`go install @<pseudo-version>`) are resolved at run time through the checksum DB rather than pinned by exact patch/hash like the SHA-pinned actions.
+
+**Impact:** A new non-critical package can ship with zero tests and the coverage job stays green; a broadened tool tag could silently change the enforced ruleset / advisory DB. Both are gate-integrity weaknesses, not live vulnerabilities (the tools are reputable first-party and the jobs are least-privilege/read-only).
+
+**Evidence:** Phase 9 `/ship` security-auditor (S4, 2026-05-31) — Medium + Low.
+
+**Suggested solution:** Cross-check the profiled package set against `go list` (fail if an expected package is absent from the profile), or pass `-coverpkg=./…` so untested packages surface as 0% rows and trip the floor; document the permitted exclusion list (`examples`, `scripts`, `internal/amqptest`). Pin `golangci-lint`/`govulncheck` to exact `vX.Y.Z` and add `benchstat` as a `go.mod` tool dependency so its hash lands in `go.sum`.
+
+**Prerequisites:** T41/T42 coverage gate; T43 release/bench workflows.
+
+---
+
+### LATER-79 — Branch-protection required-check names must track the renamed Go-matrix jobs
+
+**Context:** Phase 9 added a Go version matrix to `.github/workflows/ci.yml` (`go: ["1.25", "1.26"]`), so the unit-test check names became `Unit tests (Go 1.25)` / `Unit tests (Go 1.26)` rather than a single `Unit tests`. GitHub branch-protection required-status-checks are matched by exact name and live in repo settings, outside this repo's diff. This is a one-time repo-settings action, not a code change.
+
+**Impact:** If the branch-protection rule still pins the old `Unit tests` name, that required check no longer reports and the PR is either blocked forever (pending) or silently stops gating on unit tests — the difference between the gate running and the gate blocking. Same for `Coverage gate` / `Integration tests` / `Vulnerability scan` if their names changed.
+
+**Evidence:** Phase 9 `/ship` code-reviewer (S4, 2026-05-31) — Important.
+
+**Suggested solution:** When PR #20 merges, update the repository's branch-protection required-check list to the current job/check names; verify a fork PR and a same-repo PR both surface the expected required checks.
+
+**Prerequisites:** PR #20 merge; repo admin access (a settings change, not a Txx).
 
