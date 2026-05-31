@@ -45,7 +45,7 @@ make examples-smoke     # Smoke-run examples end-to-end (requires Docker)
 
 ### Local Integration Testing
 
-Use `docker-compose.integration.yml` to spin up a RabbitMQ identical to CI:
+Use `test/docker-compose.integration.yml` to spin up a RabbitMQ identical to CI:
 ```bash
 make integration-up
 AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ \

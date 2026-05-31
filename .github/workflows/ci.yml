@@ -126,7 +126,7 @@ jobs:
 
       # Build + start the plugin-enabled broker (rabbitmq:3.13-management +
       # rabbitmq_delayed_message_exchange) and wait until healthy. Reusing the same
-      # docker-compose.integration.yml as local dev keeps the CI broker identical to
+      # test/docker-compose.integration.yml as local dev keeps the CI broker identical to
       # `make integration-up`, and -- unlike the services: shorthand, which can only
       # pull a pre-built registry image -- bakes in the delayed-message plugin so the
       # delayed-delivery timing assertion actually runs instead of skipping.

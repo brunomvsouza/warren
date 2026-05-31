@@ -1020,7 +1020,7 @@ the `//go:generate` directives removed.
   - [x] `amqptest.RabbitMQ` exposes `URI() string` (with credentials), `AMQPSURI() string`, `Cleanup(t)`, and `Container() testcontainers.Container` for advanced cases.
   - [x] godoc and a README in `amqptest/` document downstream usage (`go test ./...` from another module) and the three plugin modes.
   - [x] **Lens-10 (TV-08):** the `rabbitmq_delayed_message_exchange` plugin is guaranteed present in ≥1 **required** CI lane (the pre-baked-image mode `AMQPTEST_IMAGE`), so the delayed-exchange conformance/example criteria do **not** silently `t.Skip` green; the three plugin-enablement modes stay, but the required lane uses the present-plugin mode and **fails (not skips)** if the plugin is expected but missing. dep VG-1.
-  - **Done (amqptest):** `NewRabbitMQ(t, opts…)` uses the official testcontainers RabbitMQ module (v0.42.0). The three plugin modes resolve in `plugins.go` (`resolve`, pure + env-injected): pre-baked `AMQPTEST_IMAGE` → used as-is; `AMQPTEST_DELAYED_PLUGIN_FILE` → mounted into `/opt/rabbitmq/plugins/` (mirrors `Dockerfile.rabbitmq-delayed`) and enabled after start; neither → `RequireDelayedExchange(t)` skips. **TV-08:** `RequireDelayedExchange` does **not** skip once a source is configured — a missing-but-expected plugin then fails on the `x-delayed-message` declare. `rabbitmq_auth_mechanism_ssl` is enabled after start in the non-pre-baked modes (via `rabbitmq-plugins enable`, which appends) and baked into `docker/Dockerfile.amqptest`; `RequireSSLAuth(t)` gates SASL EXTERNAL on the pre-baked image (the `external_auth` user/`ssl_cert_login` mapping is T34b's wiring). **TLS is opt-in via `WithTLS()`** — the module configures TLS as `listeners.tcp=none` (TLS-only), which would break the common plain-AMQP fixture; certs in `certs/` are embedded (`//go:embed`) and exposed via `CACertPEM`/`Client*`/`Server*` + written to a tempdir for the module's `SSLSettings`. **Verified live** against `AMQPTEST_IMAGE=warren-rabbitmq-delayed:3.13` (`TESTCONTAINERS_RYUK_DISABLED=true`): `TestNewRabbitMQ_DelayedExchange_integration` (plain AMQP + real `x-delayed-message` exchange holding a message for its `x-delay`, 25.8s) and `TestNewRabbitMQ_TLS_integration` (`amqps://` handshake against the provisioned listener with the embedded CA, 22.8s) both PASS. Root stays free of testcontainers/gomock/docker at runtime (`go list -deps` verified).
+  - **Done (amqptest):** `NewRabbitMQ(t, opts…)` uses the official testcontainers RabbitMQ module (v0.42.0). The three plugin modes resolve in `plugins.go` (`resolve`, pure + env-injected): pre-baked `AMQPTEST_IMAGE` → used as-is; `AMQPTEST_DELAYED_PLUGIN_FILE` → mounted into `/opt/rabbitmq/plugins/` (mirrors `test/Dockerfile.rabbitmq-delayed`) and enabled after start; neither → `RequireDelayedExchange(t)` skips. **TV-08:** `RequireDelayedExchange` does **not** skip once a source is configured — a missing-but-expected plugin then fails on the `x-delayed-message` declare. `rabbitmq_auth_mechanism_ssl` is enabled after start in the non-pre-baked modes (via `rabbitmq-plugins enable`, which appends) and baked into `docker/Dockerfile.amqptest`; `RequireSSLAuth(t)` gates SASL EXTERNAL on the pre-baked image (the `external_auth` user/`ssl_cert_login` mapping is T34b's wiring). **TLS is opt-in via `WithTLS()`** — the module configures TLS as `listeners.tcp=none` (TLS-only), which would break the common plain-AMQP fixture; certs in `certs/` are embedded (`//go:embed`) and exposed via `CACertPEM`/`Client*`/`Server*` + written to a tempdir for the module's `SSLSettings`. **Verified live** against `AMQPTEST_IMAGE=warren-rabbitmq-delayed:3.13` (`TESTCONTAINERS_RYUK_DISABLED=true`): `TestNewRabbitMQ_DelayedExchange_integration` (plain AMQP + real `x-delayed-message` exchange holding a message for its `x-delay`, 25.8s) and `TestNewRabbitMQ_TLS_integration` (`amqps://` handshake against the provisioned listener with the embedded CA, 22.8s) both PASS. Root stays free of testcontainers/gomock/docker at runtime (`go list -deps` verified).
 - **Verify:** `grep go.uber.org/mock go.mod` is empty (dependency removed entirely). `go list -deps github.com/brunomvsouza/warren` is free of testcontainers/gomock/docker. (The separate-module downstream smoke from the original prose is moot — `amqptest` is now `internal/`, not a public downstream fixture.)
 - **Files:** `fixture.go`, `fixture_test.go` (public root `Delivery`/`Batch` fixtures); `internal/amqptest/{rabbitmq,options,plugins,certs,doc}.go`, `internal/amqptest/amqptest_test.go`, `internal/amqptest/rabbitmq_integration_test.go`, `internal/amqptest/certs/{ca.pem,server.pem,server.key,client.pem,client.key}` + `certs/gen.go`, `internal/amqptest/docker/Dockerfile.amqptest`, `internal/amqptest/README.md`. **Deleted vs the original plan:** the whole `amqpmock/` subpackage + `go.uber.org/mock` dependency.
 - **Deps:** T03, T04, T05, T09, T17, T23.
@@ -1178,12 +1178,12 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 
 ### [x] T166a — Cluster harness skeleton + first green dial-over-3-nodes test [P1] · M
 - **Acceptance:**
-  - [x] `docker-compose.cluster.yml` forms **3 RabbitMQ nodes** into a cluster (pinned `rabbitmq:3.13.7-management`, default queue type quorum, `cluster_partition_handling = pause_minority`) with a Toxiproxy control plane fronting each node's AMQP port. *Note: `pause_minority` and `autoheal` are mutually exclusive RabbitMQ strategies; `pause_minority` is the one the T166g partition campaign asserts, so it is the configured strategy (autoheal would mask the pause). A single Toxiproxy instance hosts one proxy per node, which is why `WARREN_TOXIPROXY_URL` is singular while every node's AMQP port is independently fronted.*
+  - [x] `test/docker-compose.cluster.yml` forms **3 RabbitMQ nodes** into a cluster (pinned `rabbitmq:3.13.7-management`, default queue type quorum, `cluster_partition_handling = pause_minority`) with a Toxiproxy control plane fronting each node's AMQP port. *Note: `pause_minority` and `autoheal` are mutually exclusive RabbitMQ strategies; `pause_minority` is the one the T166g partition campaign asserts, so it is the configured strategy (autoheal would mask the pause). A single Toxiproxy instance hosts one proxy per node, which is why `WARREN_TOXIPROXY_URL` is singular while every node's AMQP port is independently fronted.*
   - [x] `Makefile` targets `cluster-up` (waits healthy) / `cluster-down` / `test-cluster` (`go test -race -tags=cluster ./...`).
   - [x] `internal/amqptest/cluster.go` discovers `WARREN_CLUSTER_NODES` (comma-separated amqp URIs), `WARREN_CLUSTER_MGMT`, `WARREN_TOXIPROXY_URL` and **`t.Fatal`s (never skips)** when any is unset — mirroring the `AMQP_TEST_URL` rule.
   - [x] A zero-run guard (mirroring the integration TV-13 guard) fails the cluster lane if no `Test*_cluster` test executed (embedded in the `test-cluster` target; T166h wires it into the scheduled workflow).
 - **Verify:** `make cluster-up && make test-cluster` is green; one smoke test `Dial(WithAddrs([3 URIs]))` → `Health(ctx)` nil; `goleak.VerifyNone`; the helper fatals with the cluster vars unset.
-- **Files:** `docker-compose.cluster.yml`, `Dockerfile.rabbitmq-*` (if a pinned cluster image is needed), `Makefile`, `internal/amqptest/cluster.go`, `cluster_smoke_cluster_test.go`.
+- **Files:** `test/docker-compose.cluster.yml`, `test/Dockerfile.rabbitmq-*` (if a pinned cluster image is needed), `Makefile`, `internal/amqptest/cluster.go`, `cluster_smoke_cluster_test.go`.
 - **Deps:** T07d (multi-conn pool), existing `WithAddrs`. **(T166-decomp, P1)**
 
 ### [ ] T166b — Cluster control toolkit: node kill/start, quorum-leader discovery, Toxiproxy client [P1] · M
@@ -1234,7 +1234,7 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
   - [ ] Rolling upgrade: mixed-version members (3.13 + 4.x pinned images), restart one node at a time under load, assert continuity (no loss, consumers resubscribe).
   - [ ] SPEC §7 amended (cluster harness + per-campaign topology labels).
 - **Verify:** both campaigns run green on the cluster lane; `make lint` clean; SPEC §7 reflects the harness + topology labels.
-- **Files:** `docker-compose.cluster.yml` (4.x member), `internal/amqptest/cluster.go`, `cluster_partition_cluster_test.go`, `cluster_rolling_upgrade_cluster_test.go`, `SPEC.md` §7.
+- **Files:** `test/docker-compose.cluster.yml` (4.x member), `internal/amqptest/cluster.go`, `cluster_partition_cluster_test.go`, `cluster_rolling_upgrade_cluster_test.go`, `SPEC.md` §7.
 - **Deps:** T166b, T166e. **(T166-decomp / LT-05-cluster, P2)**
 
 ### [ ] T166h — Cluster CI lane wiring [P2] · S
@@ -1524,7 +1524,7 @@ the recover is not a license for them to do so.
 
 ## Phase 12 — Protocol-Correctness Re-review (Lens 01: RabbitMQ 3.13 + 4.x)
 
-Closes the Lens-01 protocol findings (`spec-validation/01-rabbitmq-amqp-protocol.md`,
+Closes the Lens-01 protocol findings (`docs/spec-validation/01-rabbitmq-amqp-protocol.md`,
 `RMQ-01..RMQ-31`). Reconciliation: several *spec* findings are already
 correct in code (SPEC drifted → doc-only fixes), while `at-least-once`
 dead-lettering is unimplemented and quorum has no structural validation.
@@ -1536,9 +1536,9 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 ### [ ] T74 — Verification gates G1–G6 (real broker, 3.13 + 4.x) [P0] · S
 - **Acceptance:**
   - [ ] Ground-truth captured on **both** broker versions for: G1 `x-death` delivery-limit reason atom (`delivery-limit` vs `delivery_limit`); G2 x-death `count` accumulation shape; G3 4.x *classic* queue `x-delivery-limit` honoring; G4 valid `{quorum, overflow, at-least-once}` declare permutations; G5 broker `max_message_size` defaults per version; G6 `prefetch_size!=0` reject-vs-ignore.
-  - [ ] Results table committed (under `spec-validation/` or task notes); downstream tasks cite their gate.
+  - [ ] Results table committed (under `docs/spec-validation/` or task notes); downstream tasks cite their gate.
 - **Verify:** `make integration-up` + `AMQP_TEST_URL=… make test-integration` against the 3.13 and 4.x images.
-- **Files:** `*_integration_test.go`, `spec-validation/` (results table).
+- **Files:** `*_integration_test.go`, `docs/spec-validation/` (results table).
 - **Deps:** T07d, T14, T15. **(Lens-01 gates, P0)**
 
 ### [ ] T75 — x-death delivery-limit reason token (RMQ-01) [P0] · S
@@ -1625,8 +1625,8 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 ## Phase 13 — Distributed-Systems Re-review (Lens 02: failure modes, consistency, ordering, duplicates)
 
 Closes the Lens-02 adversarial spec validation
-(`spec-validation/02-distributed-systems.md`, `DS-01..DS-17`; brief
-`spec-validation/02-distributed-systems-plan.md`). Lens verdict: **NO-GO for the
+(`docs/spec-validation/02-distributed-systems.md`, `DS-01..DS-17`; brief
+`docs/spec-validation/02-distributed-systems-plan.md`). Lens verdict: **NO-GO for the
 §1 bar as written; GO-WITH-CHANGES** once the High findings land. Owner decisions
 (2026-05-28): pull **T62/T63/T70/T71** forward into v0.1; stand up a new **`chaos`
 build tag** (3-node cluster + fault injector + half-alive proxy) because a
@@ -1641,9 +1641,9 @@ the same PR; a SPEC §10 "Rev 12" note records the pass.
 - **Acceptance:**
   - [ ] A `chaos` build tag + `make test-chaos` target stands up a 3-node RabbitMQ cluster (configurable `cluster_partition_handling`), a fault injector (`toxiproxy`/`iptables`/`rabbitmqctl stop_app`), and a half-alive-broker proxy. (Size **L** — split into a fixture sub-task and a gate-capture sub-task before starting.)
   - [ ] Ground truth captured on **both** versions for: **G1** SAC-failover reorder/duplicate with `Prefetch>1` (classic **and** quorum); **G2** the *current* `Close` behaviour for prefetched-but-undispatched deliveries (requeue or drop?); **G3** quorum publish pinned to a minority-partition node (hang/timeout/error + duplicate-on-heal); **G4** the client signal per `pause_minority`/`autoheal`/`ignore`; **G5** a poison crash-loop defeating process-local Counter B; **G6** the `Caller`'s handling of a second reply for an already-resolved `CorrelationID`.
-  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate.
+  - [ ] Results table committed (under `docs/spec-validation/`); each downstream task cites its gate.
 - **Verify:** `make test-chaos` green on the 3.13 and 4.x cluster images; the gate table is reviewable.
-- **Files:** `docker-compose.chaos.yml`, `Makefile`, `*_chaos_test.go`, `amqptest/`, `spec-validation/` (results table).
+- **Files:** `docker-compose.chaos.yml`, `Makefile`, `*_chaos_test.go`, `amqptest/`, `docs/spec-validation/` (results table).
 - **Deps:** T07d, T14, T15. **(Lens-02 gates, P0)**
 
 ### [ ] T85 — Dedupe-pattern rework: crash-unsafe LRU + persistent example (DS-01/DS-15/DS-16) [P0] · M
@@ -1738,8 +1738,8 @@ the same PR; a SPEC §10 "Rev 12" note records the pass.
 ## Phase 14 — Interoperability & Wire-Format Re-review (Lens 03: polyglot clients, CloudEvents/Proto/JSON, field-tables)
 
 Closes the Lens-03 adversarial spec validation
-(`spec-validation/03-interoperability-wire-format.md`, findings `IW-01..IW-13`;
-brief `spec-validation/03-interoperability-wire-format-plan.md`). Lens verdict:
+(`docs/spec-validation/03-interoperability-wire-format.md`, findings `IW-01..IW-13`;
+brief `docs/spec-validation/03-interoperability-wire-format-plan.md`). Lens verdict:
 **GO-WITH-CHANGES** — no active §1 message-loss bug, but interop overclaims (IW-01
 CloudEvents 1.0 bridge, IW-08 field-table "matched 1:1"), two silent-lossy mappings
 (IW-07 `time.Time`→`T`, IW-04 JSON `int64`), and no non-Go interop test (IW-13).
@@ -1758,9 +1758,9 @@ note records the pass.
 - **Acceptance:**
   - [ ] An `interop` build tag + `make test-interop` target stands up Python `pika` + a Java client + an AMQP-1.0 CloudEvents SDK in containers, extending `amqptest` (T37). (Size **L** — split into a fixture sub-task and a gate-capture sub-task before starting.)
   - [ ] Ground truth captured on **both** versions for: **IG-1** `time.Time`→`T` second-resolution read; **IG-2** unsigned `B/u/i/L` + `Decimal` `D` + `[]byte` `x` cross-client decode (faithful / mis-typed / unreadable); **IG-3** what an AMQP-1.0 CloudEvents SDK sees for a binary-mode publish (prefix, message section, colon key); **IG-4** structured-mode reconstruction from `application/cloudevents+json` (id/source/type/time/extensions); **IG-5** JSON `int64 > 2^53` into a Go `int64` field vs `any`; **IG-6** ContentType/ContentEncoding not swapped via a non-Go consumer.
-  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate.
+  - [ ] Results table committed (under `docs/spec-validation/`); each downstream task cites its gate.
 - **Verify:** `make test-interop` green on the 3.13 and 4.x broker images; the gate table is reviewable.
-- **Files:** `docker-compose.interop.yml`, `Makefile`, `*_interop_test.go`, `amqptest/`, `spec-validation/` (results table).
+- **Files:** `docker-compose.interop.yml`, `Makefile`, `*_interop_test.go`, `amqptest/`, `docs/spec-validation/` (results table).
 - **Deps:** T37 (extend, no dup), T07d, T09, T24, T26. **(IW-13 + gates, P0)**
 
 ### [ ] T95 — `time.Time` header truncation doc + RFC3339 recommendation (IW-07) [P1] · S
@@ -1825,8 +1825,8 @@ note records the pass.
 ## Phase 15 — Event-Driven-Architecture Re-review (Lens 04: pattern expressiveness, safe-default analysis, topology completeness)
 
 Closes the Lens-04 adversarial spec validation
-(`spec-validation/04-event-driven-architecture.md`, findings `EDA-01..EDA-18`;
-brief `spec-validation/04-event-driven-architecture-plan.md`). Lens verdict:
+(`docs/spec-validation/04-event-driven-architecture.md`, findings `EDA-01..EDA-18`;
+brief `docs/spec-validation/04-event-driven-architecture-plan.md`). Lens verdict:
 **GO-WITH-CHANGES** — no *new* §1 message-loss bug (unbounded-DLQ/`Close`-loss are
 already T65/T70), but ordered keyed streams at scale are effectively unsupported
 (no consistent-hash, EDA-04), the platform-level unroutable black-hole has no
@@ -1849,9 +1849,9 @@ records the pass.
 ### [ ] T101 — Verification gates EG-1–EG-4 (real broker, existing integration lane, 3.13 + 4.x) [P0] · S
 - **Acceptance:**
   - [ ] Ground truth captured on **both** versions (existing integration lane — **no new build-tag lane**) for: **EG-1** a publish to a non-existent/mis-routed exchange **without** `Mandatory()` succeeds silently (no error, no `OnReturn`, message gone) — confirm `Mandatory()` is the only client-side net; **EG-2** a short per-message-TTL message **behind** a long-TTL message fails to expire at its own TTL on a single queue (head-of-line blocking); **EG-3** a `BatchConsumer` handler returning `nil` emits one `basic.ack` with `multiple=true` over the **whole** delivery range; **EG-4** `SingleActiveConsumer` permits exactly one active consumer (no horizontal scale) **and** an `x-consistent-hash` exchange distributes by routing-key hash across N bound queues.
-  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate.
+  - [ ] Results table committed (under `docs/spec-validation/`); each downstream task cites its gate.
 - **Verify:** The integration lane (3.13 + 4.x) green with the EG assertions; the gate table is reviewable.
-- **Files:** `*_integration_test.go`, `spec-validation/` (results table).
+- **Files:** `*_integration_test.go`, `docs/spec-validation/` (results table).
 - **Deps:** T09, T15, T18, T22. **(EDA gates, P0)**
 
 ### [ ] T102 — Consistent-hash exchange + partitioned ordered consumer (EDA-04) [P0] · M
@@ -1942,8 +1942,8 @@ records the pass.
 ## Phase 16 — SRE & Production-Operability Re-review (Lens 05: detect/respond/verify, recovery-amplification, capacity honesty)
 
 Closes the Lens-05 adversarial spec validation
-(`spec-validation/05-sre-operability.md`, findings `SRE-01..SRE-16`; brief
-`spec-validation/05-sre-operability-plan.md`). Lens verdict: **GO-WITH-CHANGES** —
+(`docs/spec-validation/05-sre-operability.md`, findings `SRE-01..SRE-16`; brief
+`docs/spec-validation/05-sre-operability-plan.md`). Lens verdict: **GO-WITH-CHANGES** —
 no *new* §1 silent-message-loss path (the registry footgun is a *loud* crash), and
 the five highest operability blockers (R10-6/8/10/11/16 = T61/T63/T65/T66/T71) are
 **already pulled into v0.1** by Lenses 01/02; this lens hardens their
@@ -1971,9 +1971,9 @@ to NO-GO.
 ### [ ] T111 — Verification gates SG-1–SG-4 (unit + existing integration/`chaos` lanes, 3.13 + 4.x) [P0] · S
 - **Acceptance:**
   - [ ] Ground truth captured (unit + the **existing** integration/`chaos` lanes — **no new build-tag lane**) for: **SG-1** whether a second `Dial` in one process panics on duplicate Prometheus registration today (confirm the registerer is currently unspecified; a private-registry default removes the panic); **SG-2** whether a publish that stalls for the full 30s `ConfirmTimeout` lands in the `+Inf` bucket of `publisher_publish_seconds` under the default `[0.5…5000]`ms buckets; **SG-3** whether a channel-only consumer death (404/`basic.cancel`/ack-error, TCP up) leaves `Connection.Health(ctx)` returning OK while the consumer is unsubscribed; **SG-4** whether per-`Publish` throughput tracks `≈ pool/RTT` under injected confirm-RTT and a confirm spike drives `ErrChannelPoolExhausted`.
-  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate.
+  - [ ] Results table committed (under `docs/spec-validation/`); each downstream task cites its gate.
 - **Verify:** Unit + integration/`chaos` lanes (3.13 + 4.x where broker-bound) green with the SG assertions; the gate table is reviewable.
-- **Files:** `metrics/*_test.go`, `connection_internal_test.go`, `*_integration_test.go`, `*_chaos_test.go`, `spec-validation/` (results table).
+- **Files:** `metrics/*_test.go`, `connection_internal_test.go`, `*_integration_test.go`, `*_chaos_test.go`, `docs/spec-validation/` (results table).
 - **Deps:** T04, T07, T07d, T18, T84 (chaos lane). **(SRE gates, P0)**
 
 ### [ ] T112 — Prometheus registry injection: `WithMetricsRegisterer` + private-registry default (SRE-10) [P0] · S
@@ -2053,8 +2053,8 @@ to NO-GO.
 ## Phase 17 — Go API & Library-Design Re-review (Lens 06: discoverability, hard-to-misuse, forever-stable surface, safe zero values)
 
 Closes the Lens-06 adversarial spec validation
-(`spec-validation/06-go-api-library-design.md`, findings `GA-01..GA-16`; brief
-`spec-validation/06-go-api-library-design-plan.md`). Lens verdict:
+(`docs/spec-validation/06-go-api-library-design.md`, findings `GA-01..GA-16`; brief
+`docs/spec-validation/06-go-api-library-design-plan.md`). Lens verdict:
 **GO-WITH-CHANGES** — the public surface is fundamentally sound (the
 `PublisherFor[M]`/`ConsumerFor[M]` generics split, mostly safe zero-value defaults,
 concrete-struct decision 9, a navigable error taxonomy), but the review found **one
@@ -2078,9 +2078,9 @@ lands in the same PR; a SPEC §10 "Rev 16" note records the pass.
 ### [ ] T119 — Verification gates GG-1–GG-4 (unit + existing integration lane, 3.13 + 4.x) [P0] · S
 - **Acceptance:**
   - [ ] Ground truth captured (unit + the **existing** integration lane for the persistence check — **no new build-tag lane**) for: **GG-1** that a zero-valued `Message[M]{Body:&x}` currently produces `amqp091.Publishing.DeliveryMode == 0` (transient) — the §6.5 `0→2` mapping is **absent** in `buildPublishing` — and that such a message does **not** survive a broker restart; **GG-2** that with `Dial(WithTracer(realTracer))` and a builder that never calls `.Tracer(...)`, the publish path emits **NoOp spans** (no builder reads `conn.opts.tracer`/`metrics`); **GG-3** that with no `WithMetrics(...)` the default `Connection` metrics recorder is **`NoOpClientMetrics`** (not Prometheus) and there is **no** caller of `NewPrometheus*` in non-test code; **GG-4** that `PublisherFor[Order](conn).Codec(codec.NewProtobuf())` **compiles** and fails only at the first `Publish` with `ErrInvalidMessage`.
-  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 16**.
+  - [ ] Results table committed (under `docs/spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 16**.
 - **Verify:** Unit + integration lane (3.13 + 4.x where broker-bound) green with the GG assertions; the gate table is reviewable.
-- **Files:** `publisher_internal_test.go`, `connection_internal_test.go`, `*_integration_test.go`, `spec-validation/` (results table).
+- **Files:** `publisher_internal_test.go`, `connection_internal_test.go`, `*_integration_test.go`, `docs/spec-validation/` (results table).
 - **Deps:** T07, T07d, T13, T18, T04. **(GA gates, P0)**
 
 ### [ ] T120 — Fix the DeliveryMode silent non-persistence (GA-01, Blocker) [P0] · S
@@ -2186,8 +2186,8 @@ lands in the same PR; a SPEC §10 "Rev 16" note records the pass.
 ## Phase 18 — Security & Threat-Modeling Re-review (Lens 07: credential confidentiality, fail-closed controls, untrusted-input boundedness, supply-chain surface)
 
 Closes the Lens-07 adversarial spec validation
-(`spec-validation/07-security-threat-modeling.md`, findings `ST-01..ST-14`; brief
-`spec-validation/07-security-threat-modeling-plan.md`). Lens verdict:
+(`docs/spec-validation/07-security-threat-modeling.md`, findings `ST-01..ST-14`; brief
+`docs/spec-validation/07-security-threat-modeling-plan.md`). Lens verdict:
 **GO-WITH-CHANGES** — the posture is fundamentally sound (the `internal/redact`
 choke-point holds on owned egress incl. wrapped errors; the codec/handler
 panic-recover is type-only `%T`; bodies are never logged and never decompressed;
@@ -2219,9 +2219,9 @@ SPEC §10 "Rev 17" note records the pass.
 ### [ ] T130 — Verification gates TG-1–TG-5 (unit + existing `integration` lane, 3.13 + 4.x) [P0] · S
 - **Acceptance:**
   - [ ] Ground truth captured (unit + the **existing** `integration` lane where broker-bound — **no new build-tag lane**) for: **TG-1** that a real `amqp091.Dial`/`DialConfig` failure with `amqp://user:secret@badhost` does **not** surface `secret` in warren's returned/wrapped error chain, any `log` adapter line, **or** the `amqp091` package `Logger` (capture the raw driver error-string shape); **TG-2** that a single ~256 MiB body is reassembled by `amqp091` **in memory before the codec runs** with **no consume-side cap** (measure consumer RSS; confirm it scales with body size independent of `FrameMax`); **TG-3** that EXTERNAL principal extraction = **CN** of the first client cert (`connection.go:122`) and how the client-side `UserID` check behaves under `ssl_cert_login_from` = `common_name` / `distinguished_name` / `subject_alternative_name`; **TG-4** whether forcing a reconnect against revoked creds makes the supervisor loop on **403 `ACCESS_REFUSED`** indefinitely (capture loop timing + log-spam) or surface/degrade; **TG-5** via `go list -deps ./...` + `go mod graph` the transitive surface `cloudevents/sdk-go/v2` adds to a **core** import and that a user cannot avoid it today.
-  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 17**.
+  - [ ] Results table committed (under `docs/spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 17**.
 - **Verify:** Unit + integration lane (3.13 + 4.x where broker-bound) green with the TG assertions; the gate table is reviewable.
-- **Files:** `connection_internal_test.go`, `consumer_internal_test.go`, `*_integration_test.go`, `spec-validation/` (results table).
+- **Files:** `connection_internal_test.go`, `consumer_internal_test.go`, `*_integration_test.go`, `docs/spec-validation/` (results table).
 - **Deps:** T07, T07c, T07d, T13, T18, T34b. **(ST gates, P0)**
 
 ### [ ] T131 — Consume-side `MaxInboundMessageSizeBytes`: close the fail-open inbound DoS (ST-06, Blocker; supersedes LATER-35) [P0] · M
@@ -2344,8 +2344,8 @@ SPEC §10 "Rev 17" note records the pass.
 ## Phase 19 — Go Concurrency & Runtime-Correctness Re-review (Lens 08: goroutine lifecycles, reader-fed/supervisor-critical callbacks, race/deadlock/leak-freedom, every "race-free"/"idempotent" claim a real primitive)
 
 Closes the Lens-08 adversarial spec validation
-(`spec-validation/08-go-concurrency-runtime.md`, findings `CR-01..CR-13`; brief
-`spec-validation/08-go-concurrency-runtime-plan.md`). Lens verdict: **GO-WITH-CHANGES**
+(`docs/spec-validation/08-go-concurrency-runtime.md`, findings `CR-01..CR-13`; brief
+`docs/spec-validation/08-go-concurrency-runtime-plan.md`). Lens verdict: **GO-WITH-CHANGES**
 — the architecture is sound (the return/confirm demux is a single goroutine over an
 *intentionally* unbuffered return channel per R10-3; every message-data buffer is bounded
 — dispatch by prefetch, confirm by batch size, pool by capacity; the confirm tracker
@@ -2379,9 +2379,9 @@ note records the pass.
 ### [ ] T143 — Verification gates CG-1–CG-6 (unit + `-race` + existing `integration` lane, 3.13 + 4.x; no new build-tag lane) [P0] · S
 - **Acceptance:**
   - [ ] Ground truth captured (unit + `-race` + the **existing** `integration` lane where broker-bound, or `amqpmock`/`amqptest` — **no new build-tag lane**) for: **CG-1** the counter-B lost update reproduces (N goroutines, `Concurrency(n>1)`, same `(channel-instance-id, MessageID)` key on one channel → stored count **below** the true increment count; `go test -race` **passes** while the count is wrong; quantify how far past `MaxRedeliveries` a poison loops); **CG-2** a blocking `OnReturn` on a mandatory-unroutable publish stalls confirms for other in-flight publishes on the same channel **and** backs up `amqp091`'s reader/heartbeats (broker drops the socket) — capture timing; **CG-3** a handler that times out then late-`Ack`s on another goroutine emits a **second frame** today → `PRECONDITION_FAILED` → channel close → sibling in-flight handlers die, and the atomic-CAS guard makes the late call a no-op; **CG-4** a **1000**-cycle connect/disconnect + confirm-churn loop under `goleak.VerifyNone` (leaked count; every §11-inventory goroutine joined); **CG-5** a panic in (a) the reconnect-loop `connect` fn and (b) the resubscribe hook on the supervisor (current blast radius: process crash / silent reconnect-disable; recover degrades instead); **CG-6** under sustained pool exhaustion Acquire is **not** FIFO (max wait / starvation).
-  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 18**.
+  - [ ] Results table committed (under `docs/spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 18**.
 - **Verify:** Unit + `-race` + integration lane (3.13 + 4.x where broker-bound) green with the CG assertions; the gate table is reviewable.
-- **Files:** `consumer_internal_test.go`, `publisher_internal_test.go`, `connection_internal_test.go`, `internal/reconnect/*_test.go`, `channelpool_internal_test.go`, `*_integration_test.go`, `spec-validation/` (results table).
+- **Files:** `consumer_internal_test.go`, `publisher_internal_test.go`, `connection_internal_test.go`, `internal/reconnect/*_test.go`, `channelpool_internal_test.go`, `*_integration_test.go`, `docs/spec-validation/` (results table).
 - **Deps:** T07, T08, T13, T18, T20, T34c, T45, T60, T70. **(CR gates, P0)**
 
 ### [ ] T144 — Callback invocation-goroutine contract + `OnReturn` dispatch decision (CR-01, High; owner decision D1) [P1] · M
@@ -2426,8 +2426,8 @@ note records the pass.
 ## Phase 20 — Performance & Capacity Re-review (Lens 09: every throughput number reduced to its Little's-Law model + back-solved RTT re-projected at 1/5/10 ms, every per-message hot-path allocation traced, every "single pass"/"efficient" claim read for real complexity)
 
 Closes the Lens-09 adversarial spec validation
-(`spec-validation/09-performance-capacity.md`, findings `PC-01..PC-15`; brief
-`spec-validation/09-performance-capacity-plan.md`). Lens verdict: **GO-WITH-CHANGES**, **no
+(`docs/spec-validation/09-performance-capacity.md`, findings `PC-01..PC-15`; brief
+`docs/spec-validation/09-performance-capacity-plan.md`). Lens verdict: **GO-WITH-CHANGES**, **no
 Blocker**. The performance architecture is sound where it counts (the `amqp091-go`
 per-connection serialization premise is real — a `sendM` mutex serialises all writes + a
 single `reader` goroutine demuxes all reads, v1.11.0 — so the multi-TCP role-split fan-out
@@ -2471,9 +2471,9 @@ Per-task SPEC amendment lands in the same PR; a SPEC §10 "Rev 19" note records 
 ### [ ] T147 — Verification gates PG-1–PG-6 (unit + `-benchmem`/`AllocsPerRun` + existing `integration`/bench lanes; no new build-tag lane) [P0] · S
 - **Acceptance:**
   - [ ] Ground truth captured (unit + `-benchmem`/`testing.AllocsPerRun` + the **existing** `integration`/bench lanes — **no new build-tag lane**) for: **PG-1** the **publish** hot-path allocs/op for `Publish` at the NoOp tracer + default config, attributing each alloc (the confirm-`Wait` `time.Timer`, the span name concat + attrs slice + `peerAddress`/`url.Parse`, the `waiter`+`done` chan, the UUIDv7 string, the JSON body, the release closure) → gates T11/T148/T10; **PG-2** the **consume** hot-path allocs/op per delivery at the NoOp tracer + **no x-death header** (confirm the `map` alloc lands on the no-DLX delivery, plus the span-arg slice + the `context.WithCancelCause`) → gates T17/T148; **PG-3** a microbench of `resolveUpTo` cost vs in-flight depth D (16/256/1024) for a `multiple=true` frame resolving **one** tag, showing per-frame cost grows **O(D)** (whole-map scan + sort) while holding `t.mu` → gates T11; **PG-4** the **single-socket** publish-confirm ceiling (1 conn, sweep `WithChannelPoolSize`) to **source** the "~50k msg/s per socket" figure + locate the `sendM`-writer knee → gates T44b/T07d; **PG-5** an injected-RTT publish-confirm bench at RTT ∈ {~0,1,5,10} ms (default pool, then `4×16`) → the §11 model-table numbers + the `ErrChannelPoolExhausted` onset under a confirm-latency spike (**extends T116's SG-4**) → gates T83/T116; **PG-6** a full-conditions bench recording RTT + **payload size** + broker version + **queue type**, demonstrating the **classic-vs-quorum** confirm-latency delta on the same target → gates T44b/T149.
-  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 19**.
+  - [ ] Results table committed (under `docs/spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 19**.
 - **Verify:** Unit + `-benchmem`/`AllocsPerRun` + integration/bench lanes green with the PG measurements captured; the gate table is reviewable.
-- **Files:** `publisher_internal_test.go`, `consumer_internal_test.go`, `internal/confirms/*_test.go`, `internal/headers/*_test.go`, `message_internal_test.go`, `metrics/prometheus_test.go`, `*_integration_test.go`, `spec-validation/` (results table).
+- **Files:** `publisher_internal_test.go`, `consumer_internal_test.go`, `internal/confirms/*_test.go`, `internal/headers/*_test.go`, `message_internal_test.go`, `metrics/prometheus_test.go`, `*_integration_test.go`, `docs/spec-validation/` (results table).
 - **Deps:** T10, T11, T17, T44b, T83, T116, T07d. **(PC gates, P0)**
 
 ### [ ] T148 — Hot-path allocation hardening: NoOp-tracer arg gating + Prometheus child caching + combined `AllocsPerRun` guard (PC-07 + PC-15) [P1] · M
@@ -2509,8 +2509,8 @@ Per-task SPEC amendment lands in the same PR; a SPEC §10 "Rev 19" note records 
 ## Phase 21 — Test-Strategy & Verifiability Re-review (Lens 10: every §9 success criterion classified falsifiable? / tested-at-what-level? / right-reason? / CI-gateable?, every load-bearing §6 contract matched to the weakest test level that can prove it, every "nightly"/"enforced in CI"/"suite passes" claim checked against the actual CI)
 
 Closes the Lens-10 adversarial spec validation
-(`spec-validation/10-test-strategy-verifiability.md`, findings `TV-01..TV-15`; brief
-`spec-validation/10-test-strategy-verifiability-plan.md`). Lens verdict: **GO-WITH-CHANGES**,
+(`docs/spec-validation/10-test-strategy-verifiability.md`, findings `TV-01..TV-15`; brief
+`docs/spec-validation/10-test-strategy-verifiability-plan.md`). Lens verdict: **GO-WITH-CHANGES**,
 **no Blocker**. The library's *behaviour* is well tested (631 unit tests, 6 fuzz targets, 212
 `goleak.VerifyNone` assertions, `-race` everywhere) and the highest-risk contracts already
 have **owned** tasks with **named tests** — so, like Lens-09, **this lens is heavily
@@ -2553,19 +2553,19 @@ amendment lands in the same PR; a SPEC §10 "Rev 20" note records the pass.
 ### [ ] T150 — Verification gates VG-1–VG-6 (unit + existing `integration` lane + a throwaway 4.x broker for VG-5; no behaviour change) [P0] · S
 - **Acceptance:**
   - [ ] Ground truth captured (gate-first) for: **VG-1** the "green by not running" baseline — every §9 checkbox marked *executes-in-current-CI* (`unit`+`integration`, Go 1.23, `rabbitmq:3-management`) vs **structurally unrun** (the nightly criteria, the conformance suite, the throughput bench, the 4.x-only contracts, the Go-1.24 row, the delayed-exchange/TLS/SASL-EXTERNAL criteria), filling the brief §11 "CI-gateable?" column with *measured* facts → gates TV-01/04/05/06/07/08; **VG-2** the unenforced coverage floor — `go test -race -cover ./...` produces a number but **no step fails** below 80%/95% (no `-coverprofile` threshold, no artifact, no PR comment); compute current per-package coverage + confirm a hypothetical sub-floor drop still passes → gates TV-03; **VG-3** the green-by-skipping integration lane — `go test -race -tags=integration ./...` with `AMQP_TEST_URL` **unset** exits **0** having asserted nothing (count the `t.Skip`ped tests) → gates TV-13; **VG-4** R10-3 mock-vs-real — whether the mock-tracker test can *ever* fail when the demux is intentionally broken (split goroutines / buffered notify chan), + how many real-broker iterations under concurrent unroutable-mandatory load trip the race ≥1× → gates TV-02 (T59); **VG-5** version-divergent contracts on 4.x vs 3.13 — stand up both `rabbitmq:3.13` + `rabbitmq:4`; assert the quorum default `x-delivery-limit` (default 20) drops the 21st delivery on 4.x + the classic-queue `x-delivery-limit`-ignore behaviour; record divergence → gates TV-05 (T81); **VG-6** chaos loss-counting — verify "zero loss" = published-set − consumed-set deduped by `MessageID` (tolerating at-least-once duplicates) by **injecting one deliberate drop** and confirming the harness reports loss == 1 → gates TV-09 (T45).
-  - [ ] Results table committed (under `spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 20**; **no behaviour change** in this task.
+  - [ ] Results table committed (under `docs/spec-validation/`); each downstream task cites its gate; first task records §10 **Rev 20**; **no behaviour change** in this task.
 - **Verify:** unit + the existing `integration` lane (+ a throwaway 4.x broker for VG-5) green with the VG measurements captured; the brief §11 "CI-gateable?" column is filled from measured reality; the gate table is reviewable.
-- **Files:** `*_internal_test.go`, `internal/confirms/*_test.go`, `*_integration_test.go`, `.github/workflows/ci.yml` (read-only inspection), `docker-compose.integration.yml` (read-only), `spec-validation/` (results table).
+- **Files:** `*_internal_test.go`, `internal/confirms/*_test.go`, `*_integration_test.go`, `.github/workflows/ci.yml` (read-only inspection), `test/docker-compose.integration.yml` (read-only), `docs/spec-validation/` (results table).
 - **Deps:** T45, T59, T81 (gate targets). **(TV gates, P0)**
 
 ### [ ] T151 — CI verification infrastructure: scheduled/nightly workflow + RabbitMQ 3.13/4.x matrix + integration-broker-required guard (TV-01 + TV-05 + TV-13) [P1] · M
 - **Acceptance:**
   - [ ] **TV-01:** a `schedule:`-triggered workflow (nightly) runs the **fuzz 10m-budget per target**, the **1000-cycle connect/disconnect stress** (T45/CR-10), and the **chaos 5-min @ 10k × 50-run** flaky harness (T45), reporting the **flaky-rate** (< 1%) — `ci.yml` today triggers only on `push`/`pull_request`, so every "nightly" criterion has **no runner**; §9 names which criteria run on this cadence (coord T152).
-  - [ ] **TV-05:** a **RabbitMQ 3.13 + 4.x matrix** axis on the `integration` lane (+ the pinned images in `docker-compose.integration.yml`), so version-divergent contracts (R10-2 quorum default `x-delivery-limit`, classic `x-delivery-limit`-ignore, Khepri `queue.declare`) are verified on the version where they bind (today a single `rabbitmq:3-management`); the matrix *verifies* T81's version-divergence docs.
+  - [ ] **TV-05:** a **RabbitMQ 3.13 + 4.x matrix** axis on the `integration` lane (+ the pinned images in `test/docker-compose.integration.yml`), so version-divergent contracts (R10-2 quorum default `x-delivery-limit`, classic `x-delivery-limit`-ignore, Khepri `queue.declare`) are verified on the version where they bind (today a single `rabbitmq:3-management`); the matrix *verifies* T81's version-divergence docs.
   - [ ] **TV-13:** an **integration-broker-required guard** that **fails** the required integration job if **zero** integration tests actually ran. (Note: as of the Phase 3 validation work the integration helpers `t.Fatal` on an unset `AMQP_TEST_URL` / `AMQP_TEST_MANAGEMENT_URL`, so the unset-URL case already fails at the test layer; this guard now covers the residual "zero tests ran for another reason" — e.g. a `-run` filter matching nothing.)
   - [ ] **Lens-13 (LT-02/03/04/05):** campaign cadence: the soak/endurance (T167) + spike/stress-to-failure/single-node-composite (T168) campaigns ride this scheduled/nightly workflow; the **multi-node cluster load harness (T166) is a distinct on-demand/nightly lane** this task's infrastructure wires; state honestly which campaigns gate **release tags** vs nightly (the heavy campaigns gate release tags, not per-PR — D5).
 - **Verify:** the nightly workflow runs on its `schedule:` and reports the flaky-rate; the integration lane runs both 3.13 and 4.x green; the residual zero-tests-ran case (e.g. a `-run` filter matching nothing) **fails** the guard — an unset `AMQP_TEST_URL`/`AMQP_TEST_MANAGEMENT_URL` already fails at the test layer; the existing `unit`/`integration` lanes stay green.
-- **Files:** `.github/workflows/*.yml`, `docker-compose.integration.yml`, `Makefile`, `README.md` (CI lane / `make` target description).
+- **Files:** `.github/workflows/*.yml`, `test/docker-compose.integration.yml`, `Makefile`, `README.md` (CI lane / `make` target description).
 - **Deps:** T150 (VG-1/VG-3/VG-5), T45, T45b, T41, T42, T37, T44, T81. **(TV-01/TV-05/TV-13, P1)** **(D2, D3)**
 
 ### [ ] T152 — Verifiability honesty capstone: §9 per-criterion classification + §7 stub-vs-real matrix + §7/§9/§6.2.1 reconciliation (TV-06 + TV-10 + TV-12 + TV-15) [P2] · S
@@ -2595,7 +2595,7 @@ amendment lands in the same PR; a SPEC §10 "Rev 20" note records the pass.
 
 ## Phase 22 — Data-Protection Compliance Re-review (Lens 11: every `Message[M]` field traced to where it persists, every default rated for privacy-by-default, every finding mapped to a GDPR *and* LGPD article, "can the library delete one message / surface residency?" answered = no)
 
-Closes the Lens-11 adversarial spec validation (`spec-validation/11-compliance-gdpr-lgpd.md`; brief `spec-validation/11-compliance-gdpr-lgpd-plan.md`; findings `DP-01..DP-15`). Verdict **GO-WITH-CHANGES** — **no Blocker.** The library is a processor that already does the hard confidentiality work (URI redaction T07c/T133, OTel size-not-content, bounded PII-free labels, strict-codec opt-in) and the security-of-processing controls are **already owned** by the security lens (never-log-payloads T134, PLAIN warning T132, at-rest boundary T141) — so **this lens is heavily cross-lens and its confidentiality half is already owned**; Lens-11 **extends** those tasks in place (cross-lens rule: a shared finding adds a `Lens-11 (DP-xx)` acceptance bullet, never re-filed) and the net-new value is the **privacy-by-design layer no prior lens owns** (erasure / storage limitation, data minimisation, international transfer, records of processing). Owner decisions (recommended, overridable): **D1** pointer-out → first-class §8 pattern + runnable `examples/pointer_out/` + §9 criterion; **D2** the auto-`<source>.dlq` gains a default/strongly-recommended TTL (inside T65); **D3** crypto-erasure / message-level payload encryption → **LATER-47**; **D4** residency = documented caveat only for v0.1; **D5** the capstone draws the controller-vs-processor boundary. **No new build-tag lane** (the example rides `examples-build`/`examples-smoke`; the DLQ-TTL default rides `integration`). Five findings extend in place (T65/T85/T132/T134/T141) + four confirmed (T07c, T133, bounded labels, OTel size-not-content + header-non-mutation); four net-new (T153–T156); one new LATER (LATER-47). **Gate task T153 runs first**; per-task SPEC amendment lands same-PR ("amend SPEC first"); §10 **Rev 21** recorded when T153 lands.
+Closes the Lens-11 adversarial spec validation (`docs/spec-validation/11-compliance-gdpr-lgpd.md`; brief `docs/spec-validation/11-compliance-gdpr-lgpd-plan.md`; findings `DP-01..DP-15`). Verdict **GO-WITH-CHANGES** — **no Blocker.** The library is a processor that already does the hard confidentiality work (URI redaction T07c/T133, OTel size-not-content, bounded PII-free labels, strict-codec opt-in) and the security-of-processing controls are **already owned** by the security lens (never-log-payloads T134, PLAIN warning T132, at-rest boundary T141) — so **this lens is heavily cross-lens and its confidentiality half is already owned**; Lens-11 **extends** those tasks in place (cross-lens rule: a shared finding adds a `Lens-11 (DP-xx)` acceptance bullet, never re-filed) and the net-new value is the **privacy-by-design layer no prior lens owns** (erasure / storage limitation, data minimisation, international transfer, records of processing). Owner decisions (recommended, overridable): **D1** pointer-out → first-class §8 pattern + runnable `examples/pointer_out/` + §9 criterion; **D2** the auto-`<source>.dlq` gains a default/strongly-recommended TTL (inside T65); **D3** crypto-erasure / message-level payload encryption → **LATER-47**; **D4** residency = documented caveat only for v0.1; **D5** the capstone draws the controller-vs-processor boundary. **No new build-tag lane** (the example rides `examples-build`/`examples-smoke`; the DLQ-TTL default rides `integration`). Five findings extend in place (T65/T85/T132/T134/T141) + four confirmed (T07c, T133, bounded labels, OTel size-not-content + header-non-mutation); four net-new (T153–T156); one new LATER (LATER-47). **Gate task T153 runs first**; per-task SPEC amendment lands same-PR ("amend SPEC first"); §10 **Rev 21** recorded when T153 lands.
 
 ### [ ] T153 — Data-protection gates DG-1..DG-5 (data-inventory ledger + defaults audit + no-PII observability baseline + DLQ-retention reality + erasure/residency reality) [P0] · S
 - **Acceptance:**
@@ -2605,8 +2605,8 @@ Closes the Lens-11 adversarial spec validation (`spec-validation/11-compliance-g
   - [ ] **DG-4** DLQ-retention reality: confirmed in `topology.go` the auto-`<source>.dlq` is declared with **no `x-message-ttl` and no `x-max-length`** by default and that `DeadLetter.TTL`/`MaxLength`/`MaxLengthBytes` bind the **source** queue (§6.6 L1642), not the DLQ.
   - [ ] **DG-5** erasure & residency reality: confirmed there is **no API path** to delete a single in-flight message (only queue-purge/delete, all-or-nothing) and that quorum replication + `WithAddrs` failover + the delayed-plugin node-local store (R10-1) are residency-opaque (no region/jurisdiction in the API).
   - [ ] **No behaviour change**; records §10 **Rev 21**.
-- **Verify:** Results table under `spec-validation/`; the brief §11 ledger + §12 audit are filled from measured code; each downstream task cites its gate.
-- **Files:** `spec-validation/` (results), read-only audit of `message.go`, `topology.go`, `otel/`, `metrics/`, `internal/headers`, `internal/redact`.
+- **Verify:** Results table under `docs/spec-validation/`; the brief §11 ledger + §12 audit are filled from measured code; each downstream task cites its gate.
+- **Files:** `docs/spec-validation/` (results), read-only audit of `message.go`, `topology.go`, `otel/`, `metrics/`, `internal/headers`, `internal/redact`.
 - **Deps:** none (gate-first). **(DP gates, P0)**
 
 ### [ ] T154 — Erasure & storage-limitation: pointer-out as the canonical privacy control + runnable example (the headline) [P1] · M
@@ -2658,18 +2658,18 @@ Closes the Lens-11 adversarial spec validation (`spec-validation/11-compliance-g
 
 ## Phase 23 — Developer-Experience & Documentation Re-review (Lens 12: can a competent Go developer go from `go get` to a working, *correct* publish/consume in the first hour without reading the source? — every load-bearing warning checked for call-site-godoc presence; the conceptual overview, the most-copied snippets, and the runnable-example gaps audited against the first hour)
 
-Closes the Lens-12 adversarial spec validation (`spec-validation/12-dx-documentation.md`; brief `spec-validation/12-dx-documentation-plan.md`; findings `DX-01..DX-17`). Verdict **GO-WITH-CHANGES** — **no Blocker.** The API is well-designed and the hardest prose is exemplary (the §6.3 poison/`AutoAck` treatment, the §6.5 `UserID`/`Delay` field notes, the six shipped examples' "What this example demonstrates" headers), and a determined reader can learn the library from `SPEC.md` — so it is not NO-GO. But **for a reliability library the documentation *is* the product**: a load-bearing warning that lives only in `SPEC.md` is, for DX purposes, invisible. **This lens is heavily cross-lens and most of its placement surface is already owned** (godoc sweeps T10/T34/T40, the `AutoAck` exemplar T35, the `Delay` godoc T57, the dedupe example T38b, the `DeliveryLimit==0` warning T58, the README quickstart T39) — Lens-12 **confirms** the exemplars and **extends** the owning tasks in place (cross-lens rule: a shared finding adds a `Lens-12 (DX-xx)` acceptance bullet, never re-filed); the net-new value is the **pit-of-success / first-hour-learning-path layer no prior lens owns**. Owner decisions (recommended, overridable): **D1** `doc.go` → canonical conceptual overview + SPEC-defined mandatory contents; **D2** top-level `MIGRATION.md`; **D3** a production-tuning page in `doc.go`/`docs/`; **D4** error-remedy in godoc-on-sentinel (no new sentinels); **D5** P1 examples = `durable_retry` + `graceful_shutdown`, rest tracked; **D6** keep `<10/<15` but make it measurable or soften. **No new build-tag lane** (new examples ride `examples-build`/`examples-smoke`; the snippet-compile gate XG-3 rides existing CI). Four findings extend in place (T10/T34/T39/T40) + five confirmed (T35, T38b, T57, T58, example godoc headers + redaction docs); seven net-new (T157–T163); one new LATER (LATER-48). **Gate task T157 runs first**; per-task SPEC amendment lands same-PR ("amend SPEC first"); §10 **Rev 22** recorded when T157 lands.
+Closes the Lens-12 adversarial spec validation (`docs/spec-validation/12-dx-documentation.md`; brief `docs/spec-validation/12-dx-documentation-plan.md`; findings `DX-01..DX-17`). Verdict **GO-WITH-CHANGES** — **no Blocker.** The API is well-designed and the hardest prose is exemplary (the §6.3 poison/`AutoAck` treatment, the §6.5 `UserID`/`Delay` field notes, the six shipped examples' "What this example demonstrates" headers), and a determined reader can learn the library from `SPEC.md` — so it is not NO-GO. But **for a reliability library the documentation *is* the product**: a load-bearing warning that lives only in `SPEC.md` is, for DX purposes, invisible. **This lens is heavily cross-lens and most of its placement surface is already owned** (godoc sweeps T10/T34/T40, the `AutoAck` exemplar T35, the `Delay` godoc T57, the dedupe example T38b, the `DeliveryLimit==0` warning T58, the README quickstart T39) — Lens-12 **confirms** the exemplars and **extends** the owning tasks in place (cross-lens rule: a shared finding adds a `Lens-12 (DX-xx)` acceptance bullet, never re-filed); the net-new value is the **pit-of-success / first-hour-learning-path layer no prior lens owns**. Owner decisions (recommended, overridable): **D1** `doc.go` → canonical conceptual overview + SPEC-defined mandatory contents; **D2** top-level `MIGRATION.md`; **D3** a production-tuning page in `doc.go`/`docs/`; **D4** error-remedy in godoc-on-sentinel (no new sentinels); **D5** P1 examples = `durable_retry` + `graceful_shutdown`, rest tracked; **D6** keep `<10/<15` but make it measurable or soften. **No new build-tag lane** (new examples ride `examples-build`/`examples-smoke`; the snippet-compile gate XG-3 rides existing CI). Four findings extend in place (T10/T34/T39/T40) + five confirmed (T35, T38b, T57, T58, example godoc headers + redaction docs); seven net-new (T157–T163); one new LATER (LATER-48). **Gate task T157 runs first**; per-task SPEC amendment lands same-PR ("amend SPEC first"); §10 **Rev 22** recorded when T157 lands.
 
 ### [ ] T157 — DX gates XG-1..XG-5 (footgun→godoc placement audit + example inventory/outcome audit + copy-paste-correctness audit + cross-reference integrity sweep + first-hour-journey audit) [P0] · S
 - **Acceptance:**
   - [ ] **XG-1** footgun→godoc placement audit: for every load-bearing footgun/contract, a table records *symptom*, *where documented today* (SPEC §+line / code comment / godoc / nowhere), *whether a task already routes it to call-site godoc*, and *the gap* (min rows: at-least-once/must-dedupe §6.2.1, `AutoAck` §6.3/T35, `Delay` §6.5/T57, `UserID` 406 §6.5, `ConfirmTimeout(0)` §6.2, `PrefetchBytes()`+`ChannelQoS()` §6.3, `DeliveryMode` default §6.5, quorum `DeliveryLimit==0` §6.3/T58, `MaxRedeliveries` counter-B §6.3, "always wire `OnCancel`" §6.3, `Mandatory()` set-not-toggle §6.2, `Prefetch < Concurrency` §6.3) → the **footgun-doc-placement table**.
   - [ ] **XG-2** example inventory & outcome-assertion audit: the §4 list (eleven) vs on-disk (six) enumerated; for each existing example, whether its smoke test asserts an **outcome** or only **exit-0**; the hard paths with no example listed → the **examples-gap list**.
   - [ ] **XG-3** copy-paste-correctness audit: every code block from README + SPEC §5 + §6.2.1 (+ §6.3/§6.5 snippets) **compiled** against the real signatures; every non-building block flagged (catches DX-04 README `*Order`, DX-05 §6.2.1 out-of-scope `d`); a permanent anti-rot mechanism recommended (tangle-and-`go build`, or a `go:build ignore` doctest harness).
-  - [ ] **XG-4** cross-reference integrity sweep: every `§x.y`/`decision N`/`RNN`/`Rev N` reference resolved; dangling/stale targets flagged; the `### Rev` heading list reconciled with the narrative (`spec-validation/README.md` cites Rev 9 with no SPEC heading) → a fix-list (no fabrication).
+  - [ ] **XG-4** cross-reference integrity sweep: every `§x.y`/`decision N`/`RNN`/`Rev N` reference resolved; dangling/stale targets flagged; the `### Rev` heading list reconciled with the narrative (`docs/spec-validation/README.md` cites Rev 9 with no SPEC heading) → a fix-list (no fabrication).
   - [ ] **XG-5** first-hour-journey audit: dial → topology → publish → consume → handle-failure → observe walked end-to-end; at each step, every place the user must already know something the docs do not teach there is recorded → the **first-hour journey walkthrough** (brief §11 is the seed).
   - [ ] **No behaviour change**; records §10 **Rev 22**.
-- **Verify:** Results tables under `spec-validation/`; the footgun-doc-placement table, examples-gap list, broken-snippet list, cross-ref fix-list, and first-hour walkthrough are filled from *measured* code/docs; each downstream task cites its gate.
-- **Files:** `spec-validation/` (results), read-only audit of `doc.go`, `README.md`, `SPEC.md`, `consumer.go`, `publisher.go`, `message.go`, `errors.go`, `examples/`.
+- **Verify:** Results tables under `docs/spec-validation/`; the footgun-doc-placement table, examples-gap list, broken-snippet list, cross-ref fix-list, and first-hour walkthrough are filled from *measured* code/docs; each downstream task cites its gate.
+- **Files:** `docs/spec-validation/` (results), read-only audit of `doc.go`, `README.md`, `SPEC.md`, `consumer.go`, `publisher.go`, `message.go`, `errors.go`, `examples/`.
 - **Deps:** none (gate-first). **(DX gates, P0)**
 
 ### [ ] T158 — Teach the mental model: `doc.go` conceptual overview + the `amqp.go`/`warren` naming note [P1] · M
@@ -2742,7 +2742,7 @@ Closes the Lens-12 adversarial spec validation (`spec-validation/12-dx-documenta
 
 ## Phase 24 — Load & Reliability-Testing Re-review (Lens 13: are the spec's load-validation campaigns and harness realistic, complete, and capable of *proving* the billions/day reliability bar under real and hostile load? — every load/stress/bench/chaos artifact classified against the seven workload shapes; every §9 reliability claim mapped to the topology its proof needs; "can the single-node testcontainers harness prove a clustered claim?" answered = no)
 
-Closes the Lens-13 adversarial spec validation (`spec-validation/13-load-testing.md`; brief `spec-validation/13-load-testing-plan.md`; findings `LT-01..LT-12`; gates `LG-1..LG-5`). Verdict **GO-WITH-CHANGES** — **no Blocker.** The v0.1 code is not defective, the chaos + benchmark + nightly-runner spine is sound and honest about cadence, and the load-bearing instrumentation + test mechanics are **already owned** (T44b/PC-04 queue-type, T45/TV-09 loss-counting, T71/R10-16 saturation metrics, T151 nightly runner) — so it is not NO-GO. But the spec's load-validation strategy **cannot prove its own billions/day-clustered bar**: every cluster-level reliability claim is validated only on a **single-node testcontainers** harness (the spec even *asserts* "connection loss is invisible" §1 L98-99 and "no `addr[0]` stampede on a full-cluster restart" T66 against a topology that cannot run them), four of the seven workload shapes (soak, spike, stress-to-failure, composite) are **never exercised** (so §1's no-silent-backpressure bar is asserted, not demonstrated), the chaos intensity is one-billion/day *at average* never at peak, the generators are uniform-small-no-op, and the load tail clips at 5000 ms while the operations that matter take 30s. **This lens is heavily cross-lens and its load-bearing substrate is already owned** — Lens-13 **confirms** the substrate (do-not-regress) and **extends** the owning tasks in place (cross-lens rule: a shared finding adds a `Lens-13 (LT-xx)` acceptance bullet, never re-filed); the net-new value is the **load-campaign layer no prior lens owns**. **Stays in lane:** no throughput-*model* re-derivation (Lens-09: T44b/T147-T149/T83/T116) and no per-criterion *falsifiability* re-audit (Lens-10: T150-T152/T151) — cited and confirmed, not re-opened. Owner decisions (recommended, overridable): **D1** the headline split — the §9 topology-honesty pass in-phase (T165, P1) *and* the multi-node harness (T166), standing env deferred (LATER-49); **D2** a ≥24h soak + a ≥1h sustained-throughput campaign on T151's on-demand/nightly cadence; **D3** spike + stress-to-failure to *demonstrate* §1 (both depend on T71's metrics); **D4** poison-storm + slow-broker + slow-consumer composites in-phase (T168), failover/upgrade composites in T166; **D5** defer the standing multi-node cluster + load-gen fleet to LATER-49, gate release tags not per-PR; **D6** a shared realistic generator in `amqptest`. **No new *required* per-PR build-tag lane** (the campaigns ride T151's scheduled workflow + on-demand `make` targets; the multi-node harness T166 is a distinct on-demand/nightly lane). Five findings extend in place (T44b/T45/T66/T71/T151) + five confirmed (T45/TV-09, T44b/PC-04, T63/R10-8, T59/R10-3, T65); six net-new (T164–T169); one new LATER (LATER-49). **Gate task T164 runs first**; per-task SPEC amendment lands same-PR ("amend SPEC first"); §10 **Rev 23** recorded when T164 lands.
+Closes the Lens-13 adversarial spec validation (`docs/spec-validation/13-load-testing.md`; brief `docs/spec-validation/13-load-testing-plan.md`; findings `LT-01..LT-12`; gates `LG-1..LG-5`). Verdict **GO-WITH-CHANGES** — **no Blocker.** The v0.1 code is not defective, the chaos + benchmark + nightly-runner spine is sound and honest about cadence, and the load-bearing instrumentation + test mechanics are **already owned** (T44b/PC-04 queue-type, T45/TV-09 loss-counting, T71/R10-16 saturation metrics, T151 nightly runner) — so it is not NO-GO. But the spec's load-validation strategy **cannot prove its own billions/day-clustered bar**: every cluster-level reliability claim is validated only on a **single-node testcontainers** harness (the spec even *asserts* "connection loss is invisible" §1 L98-99 and "no `addr[0]` stampede on a full-cluster restart" T66 against a topology that cannot run them), four of the seven workload shapes (soak, spike, stress-to-failure, composite) are **never exercised** (so §1's no-silent-backpressure bar is asserted, not demonstrated), the chaos intensity is one-billion/day *at average* never at peak, the generators are uniform-small-no-op, and the load tail clips at 5000 ms while the operations that matter take 30s. **This lens is heavily cross-lens and its load-bearing substrate is already owned** — Lens-13 **confirms** the substrate (do-not-regress) and **extends** the owning tasks in place (cross-lens rule: a shared finding adds a `Lens-13 (LT-xx)` acceptance bullet, never re-filed); the net-new value is the **load-campaign layer no prior lens owns**. **Stays in lane:** no throughput-*model* re-derivation (Lens-09: T44b/T147-T149/T83/T116) and no per-criterion *falsifiability* re-audit (Lens-10: T150-T152/T151) — cited and confirmed, not re-opened. Owner decisions (recommended, overridable): **D1** the headline split — the §9 topology-honesty pass in-phase (T165, P1) *and* the multi-node harness (T166), standing env deferred (LATER-49); **D2** a ≥24h soak + a ≥1h sustained-throughput campaign on T151's on-demand/nightly cadence; **D3** spike + stress-to-failure to *demonstrate* §1 (both depend on T71's metrics); **D4** poison-storm + slow-broker + slow-consumer composites in-phase (T168), failover/upgrade composites in T166; **D5** defer the standing multi-node cluster + load-gen fleet to LATER-49, gate release tags not per-PR; **D6** a shared realistic generator in `amqptest`. **No new *required* per-PR build-tag lane** (the campaigns ride T151's scheduled workflow + on-demand `make` targets; the multi-node harness T166 is a distinct on-demand/nightly lane). Five findings extend in place (T44b/T45/T66/T71/T151) + five confirmed (T45/TV-09, T44b/PC-04, T63/R10-8, T59/R10-3, T65); six net-new (T164–T169); one new LATER (LATER-49). **Gate task T164 runs first**; per-task SPEC amendment lands same-PR ("amend SPEC first"); §10 **Rev 23** recorded when T164 lands.
 
 ### [ ] T164 — Load gates LG-1..LG-5 (workload-shape coverage matrix + harness-fidelity map + workload-realism audit + measurement-under-load audit + load-env/cadence reality) [P0] · S
 - **Acceptance:**
@@ -2752,8 +2752,8 @@ Closes the Lens-13 adversarial spec validation (`spec-validation/13-load-testing
   - [ ] **LG-4** measurement-under-load audit: confirm the default histogram tops at **5000 ms** (§6.9 L2073-2076) vs `ConfirmTimeout` 30s + the R10-8 barrier cap (L3098-3104) so the load tail clips to `+Inf`; confirm the leading-indicator saturation metrics (pool-wait, `consumer_in_flight`, `consumer_redelivered_total`) are not-yet-present (deferred to R10-16/T71).
   - [ ] **LG-5** load-environment & cadence reality: confirm §7 names benchmarks "On-demand and on release tag" (L2222) and stress "Nightly" (L2268) with **no defined multi-node load environment** (dedicated cluster + load-gen fleet) and **no release-gating cadence**.
   - [ ] **No behaviour change**; records §10 **Rev 23**.
-- **Verify:** Results tables under `spec-validation/`; the coverage matrix + harness-adequacy map filled from *measured* spec/lane reality; each downstream task cites its gate (LG-1→LT-02/03/04/05/09/10, LG-2→LT-01/05-cluster, LG-3→LT-06, LG-4→LT-07/08, LG-5→LT-12).
-- **Files:** `spec-validation/` (results), read-only audit of `SPEC.md §7/§9/§6.9/§10`, the `amqptest`/`integration`/`chaos` lanes.
+- **Verify:** Results tables under `docs/spec-validation/`; the coverage matrix + harness-adequacy map filled from *measured* spec/lane reality; each downstream task cites its gate (LG-1→LT-02/03/04/05/09/10, LG-2→LT-01/05-cluster, LG-3→LT-06, LG-4→LT-07/08, LG-5→LT-12).
+- **Files:** `docs/spec-validation/` (results), read-only audit of `SPEC.md §7/§9/§6.9/§10`, the `amqptest`/`integration`/`chaos` lanes.
 - **Deps:** none (gate-first). **(LG gates, P0)**
 
 ### [ ] T165 — §9/§7 reliability-topology honesty pass + the §7 workload-shape coverage matrix (the cheap, mandatory half of the headline) [P1] · S

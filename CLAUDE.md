@@ -26,7 +26,7 @@ make examples-smoke     # go test -race -tags=integration ./examples/... (requir
 
 ### Local integration testing
 
-Use `docker-compose.integration.yml` to bring up a RabbitMQ identical to CI:
+Use `test/docker-compose.integration.yml` to bring up a RabbitMQ identical to CI:
 
 ```
 make integration-up                                           # start the broker (waits for healthy)
@@ -36,7 +36,7 @@ AMQP_TEST_URL=amqp://guest:guest@localhost:5672/ make examples-smoke
 make integration-down                                         # stop and remove the broker
 ```
 
-The broker is built from `Dockerfile.rabbitmq-delayed` (`rabbitmq:3.13-management`
+The broker is built from `test/Dockerfile.rabbitmq-delayed` (`rabbitmq:3.13-management`
 plus the `rabbitmq_delayed_message_exchange` community plugin, pinned by SHA-256), so
 the delayed-delivery timing assertions (`TestDelay_DelayedDelivery_integration` and
 `examples/delayed`) actually run instead of skipping. The probe-and-`t.Fatal` guard
