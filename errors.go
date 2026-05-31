@@ -49,6 +49,13 @@ var (
 	// 311, ErrContentTooLarge) only fires after the payload has been allocated
 	// and partially sent; this local guard avoids that round-trip.
 	ErrMessageTooLarge = errors.New("warren: message body exceeds MaxMessageSizeBytes")
+	// ErrRateLimited is returned when a publish cannot acquire a local rate-limit
+	// token before its context is cancelled (WithPublishRateLimit). It wraps
+	// ctx.Err() so callers can still distinguish a deadline from a cancellation via
+	// errors.Is. Classified transient: the same publish may succeed once the local
+	// token bucket refills. Throttled-but-completed publishes do NOT return this
+	// error — they only increment publisher_rate_limited_total.
+	ErrRateLimited = errors.New("warren: publish rate limited")
 
 	// Consumer errors.
 
@@ -197,7 +204,7 @@ func AMQPCode(err error) (uint16, bool) {
 // IsTransient reports whether err is classified as retryable.
 // True for: ErrTransient wraps; ErrChannelPoolExhausted; ErrPublishNacked;
 // ErrConnectionBlocked; ErrConfirmTimeout; ErrChannelClosed; ErrReconnecting;
-// AMQP codes 320, 504, 541.
+// ErrRateLimited; AMQP codes 320, 504, 541.
 //
 // Note on ErrContentTooLarge (311): NOT transient. A payload that exceeds
 // frame-max will fail on every retry unchanged — retrying it burns connections
@@ -218,6 +225,7 @@ func IsTransient(err error) bool {
 		ErrConfirmTimeout,
 		ErrChannelClosed,
 		ErrReconnecting,
+		ErrRateLimited,
 		ErrConnectionForced, // 320
 		ErrChannelError,     // 504
 		ErrInternalError,    // 541

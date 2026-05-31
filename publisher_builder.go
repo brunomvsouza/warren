@@ -35,6 +35,7 @@ type PublisherBuilder[M any] struct {
 	retryPolicy            RetryPolicy
 	retryPolicySet         bool
 	stampUserID            bool
+	publishRateLimit       int // 0 = disabled (no local rate limit)
 }
 
 // PublisherFor returns a builder for a Publisher[M] tied to conn.
@@ -178,6 +179,30 @@ func (b *PublisherBuilder[M]) PublishRetry(p RetryPolicy) *PublisherBuilder[M] {
 	return b
 }
 
+// WithPublishRateLimit caps the sustained publish rate to perSec messages per
+// second via a local token bucket, protecting the broker from an accidental
+// runaway publish loop. The bucket tolerates a burst of up to perSec messages,
+// then paces the rest evenly. Each throttled attempt increments
+// publisher_rate_limited_total{exchange}.
+//
+// A publish that cannot acquire a token before its context is cancelled (the
+// caller's ctx or the PublishTimeout deadline) returns ErrRateLimited, which is
+// transient and wraps the originating ctx error. A throttled-but-completed
+// publish returns nil — the limiter only delays it.
+//
+// Each broker attempt acquires a token: when PublishRetry is configured, every
+// retry of a single Publish call paces against the bucket too (retries are real
+// broker traffic, so the guardrail covers them), and publisher_rate_limited_total
+// increments once per throttled attempt rather than once per Publish call.
+//
+// perSec <= 0 (the default) disables the limiter. PublishBatch is not rate-limited
+// (mirroring PublishRetry's single-message scoping — see PublishBatch's godoc).
+// Last-wins.
+func (b *PublisherBuilder[M]) WithPublishRateLimit(perSec int) *PublisherBuilder[M] {
+	b.publishRateLimit = perSec
+	return b
+}
+
 // StampUserID auto-sets Message[M].UserID to conn.AuthenticatedUser() on every
 // Publish call. Use this to avoid manually populating UserID when the broker
 // validates the stamp. Last-wins against a previous StampUserID() call.
@@ -230,6 +255,7 @@ func (b *PublisherBuilder[M]) Build() (*Publisher[M], error) {
 		retryPolicy:         rp,
 		stampUserID:         b.stampUserID,
 		authUser:            b.conn.AuthenticatedUser(),
+		rateLimiter:         newRateLimiter(b.publishRateLimit),
 	}
 
 	numConns := b.conn.NumPubConns()

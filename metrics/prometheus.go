@@ -83,10 +83,12 @@ func (m *PrometheusClientMetrics) RecordDegraded(role, reason string) {
 //   - publisher_in_flight{exchange}
 //   - publisher_publish_seconds{exchange,outcome}
 //   - publisher_retry_total{exchange,reason}
+//   - publisher_rate_limited_total{exchange}
 type PrometheusPublisherMetrics struct {
 	inFlight         *prometheus.GaugeVec
 	publishSeconds   *prometheus.HistogramVec
 	retryTotal       *prometheus.CounterVec
+	rateLimitedTotal *prometheus.CounterVec
 	labelRoutingKey  bool
 	labelMessageType bool
 }
@@ -132,7 +134,11 @@ func NewPrometheusPublisherMetrics(reg prometheus.Registerer, buckets []float64,
 		Name: "publisher_retry_total",
 		Help: "Total number of AMQP publish retries.",
 	}, []string{"exchange", "reason"})
-	for _, c := range []prometheus.Collector{m.inFlight, m.publishSeconds, m.retryTotal} {
+	m.rateLimitedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "publisher_rate_limited_total",
+		Help: "Total number of AMQP publishes throttled by the local rate limiter.",
+	}, []string{"exchange"})
+	for _, c := range []prometheus.Collector{m.inFlight, m.publishSeconds, m.retryTotal, m.rateLimitedTotal} {
 		if err := reg.Register(c); err != nil {
 			return nil, err
 		}
@@ -166,6 +172,11 @@ func (m *PrometheusPublisherMetrics) RecordPublish(exchange, routingKey, message
 // RecordRetry increments publisher_retry_total for the given exchange and reason.
 func (m *PrometheusPublisherMetrics) RecordRetry(exchange, reason string) {
 	m.retryTotal.WithLabelValues(exchange, reason).Inc()
+}
+
+// RecordRateLimited increments publisher_rate_limited_total for the given exchange.
+func (m *PrometheusPublisherMetrics) RecordRateLimited(exchange string) {
+	m.rateLimitedTotal.WithLabelValues(exchange).Inc()
 }
 
 // PrometheusConsumerMetrics is a ConsumerMetrics backed by Prometheus counters and

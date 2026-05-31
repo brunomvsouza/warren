@@ -25,6 +25,9 @@ type NoOpPublisherMetrics struct{}
 // InFlightAdd discards the in-flight gauge adjustment.
 func (NoOpPublisherMetrics) InFlightAdd(_ string, _ int64) {}
 
+// RecordRateLimited discards the rate-limited counter increment.
+func (NoOpPublisherMetrics) RecordRateLimited(_ string) {}
+
 // RecordPublish discards the publish observation.
 func (NoOpPublisherMetrics) RecordPublish(_, _, _, _ string, _ time.Duration) {}
 
