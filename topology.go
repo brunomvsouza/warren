@@ -336,14 +336,25 @@ func (t *Topology) expand() *Topology {
 		}
 
 		// Bind the DLX to the DLQ so dead-lettered messages actually land in the
-		// DLQ rather than routing into limbo. The DLX is a topic exchange, so "#"
-		// matches every routing key. Skip if the caller already declared it.
-		bk := bindingKey{dlxName, dlqName, "#"}
+		// DLQ rather than routing into limbo. Choose the binding routing key to match
+		// how RabbitMQ keys dead-lettered messages:
+		//   - dl.RoutingKey set: messages are rewritten to it (x-dead-letter-routing-key
+		//     above), so bind that exact key — correct on a direct DLX too, where "#"
+		//     is a literal key, not the topic wildcard.
+		//   - dl.RoutingKey unset: messages keep their original key, so bind "#". This
+		//     is the topic-wildcard catch-all and matches the auto-created topic DLX; a
+		//     user-declared direct DLX in this case needs a routing key to route at all.
+		// Skip if the caller already declared the binding.
+		bindRoutingKey := "#"
+		if dl.RoutingKey != "" {
+			bindRoutingKey = dl.RoutingKey
+		}
+		bk := bindingKey{dlxName, dlqName, bindRoutingKey}
 		if _, exists := bindingKeys[bk]; !exists {
 			out.Bindings = append(out.Bindings, Binding{
 				Exchange:   dlxName,
 				Queue:      dlqName,
-				RoutingKey: "#",
+				RoutingKey: bindRoutingKey,
 			})
 			bindingKeys[bk] = struct{}{}
 		}

@@ -426,6 +426,28 @@ func TestTopology_expand_dlxBindsDLXToDLQ(t *testing.T) {
 	assert.True(t, found, "expand() must append Binding{orders.dlx -> orders.dlq, #}")
 }
 
+func TestTopology_expand_dlxBindsWithDeadLetterRoutingKey(t *testing.T) {
+	// When DeadLetter.RoutingKey is set, dead-lettered messages have their routing
+	// key rewritten to it (x-dead-letter-routing-key), so the DLQ binding must use
+	// that same key — otherwise the binding is broken on a direct DLX, where "#" is a
+	// literal routing key rather than the topic wildcard.
+	topo := &Topology{
+		Exchanges:   []Exchange{{Name: "orders.dlx", Kind: ExchangeDirect, Durable: true}},
+		Queues:      []Queue{{Name: "orders", Durable: true}},
+		DeadLetters: []DeadLetter{{Source: "orders", Exchange: "orders.dlx", RoutingKey: "dead"}},
+	}
+	expanded := topo.expand()
+	found := false
+	for _, b := range expanded.Bindings {
+		if b.Exchange == "orders.dlx" && b.Queue == "orders.dlq" {
+			assert.Equal(t, "dead", b.RoutingKey,
+				"DLQ binding must use the dead-letter routing key, not the topic-only \"#\" wildcard")
+			found = true
+		}
+	}
+	assert.True(t, found, "expand() must bind the DLX to the DLQ")
+}
+
 func TestTopology_expand_dlxBindsDefaultExchangeName(t *testing.T) {
 	topo := &Topology{
 		Queues:      []Queue{{Name: "orders", Durable: true}},
