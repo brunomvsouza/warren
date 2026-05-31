@@ -121,6 +121,11 @@ func (b *ConsumerBuilder[M]) MaxInFlightBytes(n int64) *ConsumerBuilder[M] {
 // typical; sub-second polling on a large cluster adds avoidable broker load. The DLQ
 // name follows warren's own DeadLetter convention ("<queue>.dlq"); a DLQ under a
 // different name is not sampled.
+//
+// The gauges hold their last sampled value: a sample that cannot reach the broker
+// (e.g. mid-reconnect) is skipped rather than zeroed, and after the consumer stops the
+// series freezes at its final value until the process exits. Alert on rate/derivative
+// or pair with consumer liveness rather than reading a single point as "current".
 func (b *ConsumerBuilder[M]) WithQueueDepthSampler(interval time.Duration) *ConsumerBuilder[M] {
 	b.depthSampleInterval = interval
 	return b
