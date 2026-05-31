@@ -236,6 +236,11 @@ type Consumer[M any] struct {
 	priority    int
 	prioritySet bool
 
+	// maxInFlightBytes is the T50 in-flight memory guardrail budget (MaxInFlightBytes()).
+	// 0 means disabled; byteLimiter is non-nil only when > 0.
+	maxInFlightBytes int64
+	byteLimiter      *byteLimiter
+
 	// exclusive requests the basic.consume exclusive flag (Exclusive()).
 	exclusive bool
 	// consumeArgs are extra basic.consume arguments (Args()); x-priority is layered
@@ -330,6 +335,8 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 		tag:              tag,
 		concurrency:      b.concurrency,
 		prefetch:         b.prefetch,
+		maxInFlightBytes: b.maxInFlightBytes,
+		byteLimiter:      newByteLimiter(b.maxInFlightBytes),
 		channelQoS:       b.channelQoS,
 		priority:         b.priority,
 		prioritySet:      b.prioritySet,
@@ -427,6 +434,58 @@ func classifyBrokerCancel(mc *managedConn, queue string) string {
 		return cancelReasonUnknown
 	}
 	return cancelReasonExclusiveRevoked
+}
+
+// byteLimiter is the in-flight memory guardrail (T50). It caps the sum of
+// len(Delivery.Body) across handlers running concurrently, bounding heap use when
+// prefetch × concurrency × body-size would otherwise blow the process up. A nil
+// *byteLimiter means the guardrail is disabled (acquire/release are no-ops).
+//
+// acquire blocks until n bytes fit under the limit; release frees them and wakes
+// waiters. A message larger than the whole budget proceeds alone (when nothing else
+// is in flight) rather than deadlocking forever.
+type byteLimiter struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	limit    int64
+	inflight int64
+}
+
+// newByteLimiter returns a limiter for the given byte budget, or nil (disabled)
+// when limit <= 0.
+func newByteLimiter(limit int64) *byteLimiter {
+	if limit <= 0 {
+		return nil
+	}
+	bl := &byteLimiter{limit: limit}
+	bl.cond = sync.NewCond(&bl.mu)
+	return bl
+}
+
+// acquire reserves n bytes, blocking until they fit under the limit. When nothing
+// is in flight it always proceeds (even for n > limit) so a single oversized message
+// cannot deadlock.
+func (bl *byteLimiter) acquire(n int64) {
+	if bl == nil {
+		return
+	}
+	bl.mu.Lock()
+	for bl.inflight > 0 && bl.inflight+n > bl.limit {
+		bl.cond.Wait()
+	}
+	bl.inflight += n
+	bl.mu.Unlock()
+}
+
+// release returns n reserved bytes and wakes any blocked acquirers.
+func (bl *byteLimiter) release(n int64) {
+	if bl == nil {
+		return
+	}
+	bl.mu.Lock()
+	bl.inflight -= n
+	bl.mu.Unlock()
+	bl.cond.Broadcast()
 }
 
 // buildConsumeArgs assembles the basic.consume argument table from the user-supplied
@@ -603,15 +662,25 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 				continue
 			}
 			sem <- struct{}{}
+			// In-flight memory guardrail (T50): reserve this body's bytes before
+			// dispatching, blocking the delivery pump (and thus prefetch refill) when
+			// the budget is exhausted. The gauge mirrors the reserved total.
+			bodyBytes := int64(len(d.Body))
+			c.byteLimiter.acquire(bodyBytes)
+			c.cm.InFlightBytesAdd(c.queue, bodyBytes)
 			wg.Add(1)
 			// Capture the current channel's done signal so in-flight handlers
 			// from this channel are cancelled if this channel closes mid-handler.
 			chanDone := cur.done
-			go func(raw amqp091.Delivery, chanDone <-chan struct{}) {
+			go func(raw amqp091.Delivery, chanDone <-chan struct{}, n int64) {
 				defer wg.Done()
 				defer func() { <-sem }()
+				defer func() {
+					c.cm.InFlightBytesAdd(c.queue, -n)
+					c.byteLimiter.release(n)
+				}()
 				c.dispatch(ctx, chanDone, raw, h, autoAck)
-			}(d, chanDone)
+			}(d, chanDone, bodyBytes)
 		}
 	}
 }

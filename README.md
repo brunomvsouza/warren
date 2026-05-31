@@ -126,7 +126,7 @@ On reconnect, a **synchronous barrier** runs before traffic resumes on that sock
 | **Connection** | Role-split TCP pool, PLAIN/EXTERNAL SASL, TLS (`amqps://`), multi-node failover, `Health` / `Close` / `ForceReconnect` |
 | **Publisher** | Publisher confirms, mandatory + returns, `PublishRetry`, confirm/publish timeouts, payload-size guardrail, concurrency-safe |
 | **Topology** | Declarative exchanges/queues/bindings, dead-letter expansion, reconnect redeclare, degraded-state callbacks |
-| **Consumer** | Prefetch, concurrency, `MaxRedeliveries`, `HandlerTimeout`, `AutoAck`, `SingleActiveConsumer`, `basic.cancel` surfacing, `ConsumeRaw` escape hatch |
+| **Consumer** | Prefetch, concurrency, `MaxInFlightBytes` memory guardrail, `MaxRedeliveries`, `HandlerTimeout`, `AutoAck`, `SingleActiveConsumer`, `basic.cancel` surfacing, `ConsumeRaw` escape hatch |
 | **Batch** | `PublishBatch` (always-all, `[]PublishResult`) and `BatchConsumerFor[M]` with size + timer flush triggers |
 | **Codec** | Lax JSON (default), strict JSON, Protobuf, CloudEvents (structured + binary) |
 | **Errors** | AMQP reply-code sentinels, `AMQPCode`, `IsTransient` / `IsPermanent` |

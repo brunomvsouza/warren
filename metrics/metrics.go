@@ -80,6 +80,7 @@ type PublisherMetrics interface {
 //   - consumer_cancelled_total{queue,reason}
 //   - consumer_max_redeliveries_total{queue,cause}
 //   - replier_drop_no_dlx_total{queue}
+//   - consumer_inflight_bytes{queue}
 type ConsumerMetrics interface {
 	// RecordResubscribed increments the resubscription counter after a reconnect.
 	RecordResubscribed(queue string)
@@ -107,4 +108,8 @@ type ConsumerMetrics interface {
 	// RecordReplierDropNoDLX increments the counter for Replier messages dropped
 	// because the request queue has no dead-letter exchange configured.
 	RecordReplierDropNoDLX(queue string)
+	// InFlightBytesAdd adjusts the consumer_inflight_bytes gauge by delta (the
+	// in-flight memory guardrail, T50): +len(body) when a delivery is dispatched,
+	// -len(body) when its handler returns.
+	InFlightBytesAdd(queue string, delta int64)
 }

@@ -20,14 +20,15 @@ type ConsumerBuilder[M any] struct {
 	conn  *Connection
 	queue string
 
-	tag         string
-	concurrency uint
-	prefetch    uint16
-	channelQoS  bool
-	priority    int
-	prioritySet bool
-	autoAck     bool
-	exclusive   bool
+	tag              string
+	concurrency      uint
+	prefetch         uint16
+	maxInFlightBytes int64
+	channelQoS       bool
+	priority         int
+	prioritySet      bool
+	autoAck          bool
+	exclusive        bool
 
 	// consumeArgs are extra basic.consume arguments (Args). x-priority is layered
 	// on top at subscribe time when Priority is set, so the typed option wins.
@@ -78,6 +79,22 @@ func (b *ConsumerBuilder[M]) Prefetch(count uint16) *ConsumerBuilder[M] {
 
 // PrefetchBytes is a no-op on RabbitMQ; preserved for AMQP 0-9-1 protocol parity.
 func (b *ConsumerBuilder[M]) PrefetchBytes(_ uint) *ConsumerBuilder[M] { return b }
+
+// MaxInFlightBytes caps the sum of in-flight message body sizes (the local
+// memory guardrail, T50). Once concurrently-dispatched handlers hold n bytes of
+// payload, the consumer stops pulling new deliveries — pausing prefetch refill —
+// until a handler returns and frees its bytes. This bounds heap use where
+// prefetch × concurrency × body-size would otherwise risk an OOM, independent of
+// the message-count backpressure that Prefetch provides.
+//
+// n <= 0 (the default) disables the guardrail. A single message larger than n is
+// not rejected: when nothing else is in flight it is dispatched alone, so memory
+// is bounded to max(n, largest single body). The current reserved total is
+// exported as the consumer_inflight_bytes{queue} gauge.
+func (b *ConsumerBuilder[M]) MaxInFlightBytes(n int64) *ConsumerBuilder[M] {
+	b.maxInFlightBytes = n
+	return b
+}
 
 // ChannelQoS applies QoS at channel scope (basic.qos global=true) rather than
 // per consumer. This is the RabbitMQ-recommended setting; the broker ignores the
