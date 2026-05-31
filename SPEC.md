@@ -1430,11 +1430,18 @@ and does **not** end `Consume`; the consumer goroutine parks until
 handing the running loop a fresh subscription. Both calls are
 idempotent (a second `Pause` while paused, or `Resume` while not paused,
 is a no-op) and both return `ErrInvalidOptions` before `Consume`/
-`ConsumeRaw` has started and `ErrAlreadyClosed` after `Close`. A TCP
-reconnect during a pause re-subscribes via the normal reconnect barrier;
-the pause flag is per-consumer in-process state and is not re-applied
-after a reconnect — re-call `Pause` if a drained state must survive a
-reconnect.
+`ConsumeRaw` has started and `ErrAlreadyClosed` after `Close`. The `ctx`
+passed to `Pause`/`Resume` scopes **only that call** (its cancellation
+aborts the in-progress handshake); the resulting subscription is bound to
+the consumer's lifetime — the `ctx` given to `Consume`/`ConsumeRaw` — so
+cancelling a request-scoped `Resume` ctx never silently stops delivery.
+
+A TCP reconnect during a pause re-subscribes via the normal reconnect
+barrier and **clears** the pause flag: the consumer is genuinely
+consuming again, so `Health` reports `Active` and a subsequent `Resume`
+is a harmless no-op rather than a duplicate `basic.consume`. The pause
+flag is per-consumer in-process state and does not survive a reconnect —
+re-call `Pause` if a drained state must persist across one.
 
 `Health(ctx)` returns `(*ConsumerHealth, error)`. The pinned-connection
 liveness check is the gate: on a connection error it returns
