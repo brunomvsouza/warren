@@ -1176,12 +1176,12 @@ SPEC §8 + §9 reliability bar: credential leakage is a defect.
 
 Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 9 and before Phase 10. Stands up a 3-node quorum cluster harness + the cluster-only-provable campaigns behind a new on-demand/nightly **`cluster` build tag**. Partition injection is a **Toxiproxy sidecar** per node (owner decision). The per-PR `integration` lane stays single-node and is unchanged; the `cluster` lane is **never a required per-PR gate** (D5). Zero-loss is the TV-09 method (published − consumed, deduped by `MessageID`). References to "T166" in **T66/T165/T164-LG-2/LATER-49** resolve to the **T166a–h** family. Each sub-task is a vertical slice that leaves the tree green.
 
-### [ ] T166a — Cluster harness skeleton + first green dial-over-3-nodes test [P1] · M
+### [x] T166a — Cluster harness skeleton + first green dial-over-3-nodes test [P1] · M
 - **Acceptance:**
-  - [ ] `docker-compose.cluster.yml` forms **3 RabbitMQ nodes** into a cluster (pinned images, quorum queues, `cluster_partition_handling = pause_minority` + `autoheal`) with a **Toxiproxy sidecar** fronting each node's AMQP port.
-  - [ ] `Makefile` targets `cluster-up` (waits healthy) / `cluster-down` / `test-cluster` (`go test -race -tags=cluster ./...`).
-  - [ ] `internal/amqptest/cluster.go` discovers `WARREN_CLUSTER_NODES` (comma-separated amqp URIs), `WARREN_CLUSTER_MGMT`, `WARREN_TOXIPROXY_URL` and **`t.Fatal`s (never skips)** when any is unset — mirroring the `AMQP_TEST_URL` rule.
-  - [ ] A zero-run guard (mirroring the integration TV-13 guard) fails the cluster lane if no `Test*_cluster` test executed.
+  - [x] `docker-compose.cluster.yml` forms **3 RabbitMQ nodes** into a cluster (pinned `rabbitmq:3.13.7-management`, default queue type quorum, `cluster_partition_handling = pause_minority`) with a Toxiproxy control plane fronting each node's AMQP port. *Note: `pause_minority` and `autoheal` are mutually exclusive RabbitMQ strategies; `pause_minority` is the one the T166g partition campaign asserts, so it is the configured strategy (autoheal would mask the pause). A single Toxiproxy instance hosts one proxy per node, which is why `WARREN_TOXIPROXY_URL` is singular while every node's AMQP port is independently fronted.*
+  - [x] `Makefile` targets `cluster-up` (waits healthy) / `cluster-down` / `test-cluster` (`go test -race -tags=cluster ./...`).
+  - [x] `internal/amqptest/cluster.go` discovers `WARREN_CLUSTER_NODES` (comma-separated amqp URIs), `WARREN_CLUSTER_MGMT`, `WARREN_TOXIPROXY_URL` and **`t.Fatal`s (never skips)** when any is unset — mirroring the `AMQP_TEST_URL` rule.
+  - [x] A zero-run guard (mirroring the integration TV-13 guard) fails the cluster lane if no `Test*_cluster` test executed (embedded in the `test-cluster` target; T166h wires it into the scheduled workflow).
 - **Verify:** `make cluster-up && make test-cluster` is green; one smoke test `Dial(WithAddrs([3 URIs]))` → `Health(ctx)` nil; `goleak.VerifyNone`; the helper fatals with the cluster vars unset.
 - **Files:** `docker-compose.cluster.yml`, `Dockerfile.rabbitmq-*` (if a pinned cluster image is needed), `Makefile`, `internal/amqptest/cluster.go`, `cluster_smoke_cluster_test.go`.
 - **Deps:** T07d (multi-conn pool), existing `WithAddrs`. **(T166-decomp, P1)**

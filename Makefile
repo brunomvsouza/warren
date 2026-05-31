@@ -18,7 +18,15 @@ GOTOOLCHAIN     ?= go$(GO_MOD_VERSION)
 # so membership stays next to the code and a rename breaks the build instead of going stale.
 STRESS_COUNT ?= 200
 
-.PHONY: help build test test-stress test-integration test-conformance test-all lint vuln tidy doc hooks clean examples-build examples-smoke integration-up integration-down cover bench
+# Cluster lane (Phase 9.5) endpoints. Defaults match the host port mapping in
+# docker-compose.cluster.yml (Toxiproxy-fronted AMQP ports 5680/5681/5682, rmq0
+# management on 15672, Toxiproxy control API on 8474). Override to point the lane
+# at a standing cluster (LATER-49).
+WARREN_CLUSTER_NODES ?= amqp://guest:guest@localhost:5680/,amqp://guest:guest@localhost:5681/,amqp://guest:guest@localhost:5682/
+WARREN_CLUSTER_MGMT  ?= http://guest:guest@localhost:15672
+WARREN_TOXIPROXY_URL ?= http://localhost:8474
+
+.PHONY: help build test test-stress test-integration test-conformance test-all lint vuln tidy doc hooks clean examples-build examples-smoke integration-up integration-down cluster-up cluster-down test-cluster cover bench
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -50,6 +58,35 @@ test-all: ## Run unit + integration + conformance tests.
 test-stress: ## Hammer scheduling-sensitive tests (stress build tag) under -race to guard determinism (override STRESS_COUNT).
 	$(GO) test -race -tags=stress -count=$(STRESS_COUNT) -run '^TestStress$$' .
 
+cluster-up: ## Start the 3-node RabbitMQ cluster + Toxiproxy via Docker Compose (waits for healthy).
+	docker compose -f docker-compose.cluster.yml up -d --wait
+
+cluster-down: ## Stop and remove the local RabbitMQ cluster + Toxiproxy.
+	docker compose -f docker-compose.cluster.yml down
+
+# Cluster lane: runs the cluster build-tag tests against the compose cluster, with
+# a zero-run guard implementing the TV-13 pattern (the planned integration TV-13
+# CI gate, T151 — note `test-integration` above has no inline guard yet, so this is
+# the first concrete instance): if no Test*_cluster function actually executed, the
+# broker-required lane asserted nothing and the target must FAIL rather than pass
+# green. The cluster helpers t.Fatal when the
+# WARREN_CLUSTER_* vars are unset, so this guards the regression where a test
+# starts to t.Skip instead. The go test exit status is preserved through the log
+# capture (no pipefail dependency, so it stays /bin/sh-portable).
+test-cluster: ## Run cluster tests (requires the compose cluster; 'make cluster-up' starts it) + zero-run guard.
+	@WARREN_CLUSTER_NODES="$(WARREN_CLUSTER_NODES)" \
+	WARREN_CLUSTER_MGMT="$(WARREN_CLUSTER_MGMT)" \
+	WARREN_TOXIPROXY_URL="$(WARREN_TOXIPROXY_URL)" \
+	$(GO) test -race -v -tags=cluster $(PKG) > cluster.log 2>&1; status=$$?; \
+	cat cluster.log; \
+	ran=$$(grep -cE '^[[:space:]]*--- (PASS|FAIL): Test[A-Za-z0-9_/]*_cluster' cluster.log) || true; \
+	echo "cluster tests executed: $${ran}"; \
+	if [ "$${ran:-0}" -eq 0 ]; then \
+		echo "zero-run guard: zero cluster tests executed against the cluster." >&2; \
+		exit 1; \
+	fi; \
+	exit $$status
+
 bench: ## Run throughput benchmarks (bench build tag; requires broker via AMQP_TEST_URL). Reports msg/s per classic+quorum.
 	$(GO) test -tags=bench -run='^$$' -bench=. -benchmem -timeout=30m $(PKG)
 
@@ -79,4 +116,4 @@ examples-smoke: ## Smoke-run example integration tests (requires broker via AMQP
 
 clean: ## Remove build and test artifacts.
 	$(GO) clean -testcache
-	rm -f coverage.out coverage.html coverage.txt
+	rm -f coverage.out coverage.html coverage.txt cluster.log integration.log conformance.log
