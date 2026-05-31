@@ -689,6 +689,13 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 			// In-flight memory guardrail (T50): reserve this body's bytes before
 			// dispatching, blocking the delivery pump (and thus prefetch refill) when
 			// the budget is exhausted. The gauge mirrors the reserved total.
+			//
+			// Like the sem send above, acquire does not observe ctx.Done(): if the
+			// budget is exhausted at shutdown, this loop parks until an in-flight
+			// handler frees bytes. That is bounded by handler completion — the
+			// dispatch goroutines run under ctx, so cancellation propagates to the
+			// handlers, which return and release. Set HandlerTimeout to bound this
+			// when handlers may block indefinitely.
 			bodyBytes := int64(len(d.Body))
 			c.byteLimiter.acquire(bodyBytes)
 			c.cm.InFlightBytesAdd(c.queue, bodyBytes)
