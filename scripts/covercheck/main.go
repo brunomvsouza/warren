@@ -31,6 +31,17 @@ const (
 
 // criticalPackages require floorCritical instead of floorDefault. Keyed by the
 // package import path.
+//
+// The 95% set is deliberately scoped to the smallest core whose blast radius on
+// an uncovered branch is silent message loss or a credential leak: the reconnect
+// barrier (drops/duplicates), the confirm tracker (at-least-once), error
+// classification (transient/permanent retry decisions), and URI redaction
+// (secrets). internal/connpool is a correctness choke-point too (the role-split
+// TCP pool, CLAUDE.md invariant #1), but it is held to the 80% default on
+// purpose: its lifecycle is additionally exercised end-to-end by the
+// reconnect-chaos and integration lanes, whereas the four packages above are
+// unit-verifiable in isolation and a unit gap there is not caught elsewhere.
+// Promote connpool here only with an audit that it clears 95% first (LATER).
 var criticalPackages = map[string]bool{
 	modulePath + "/internal/reconnect": true,
 	modulePath + "/internal/confirms":  true,
