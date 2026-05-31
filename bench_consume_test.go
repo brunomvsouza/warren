@@ -88,6 +88,22 @@ func BenchmarkConsume(b *testing.B) {
 				b.Fatal("no deliveries within warm-up window")
 			}
 
+			// Drain the backlog the producer built up during warm-up so the timed
+			// loop measures broker-paced delivery, not an in-process buffer that was
+			// already full before the clock started. `received` is 1<<16-deep and
+			// nothing consumes it until the timed loop below, so by warm-up's end it
+			// holds a large head start; without this drain the first thousands of
+			// `<-received` reads would resolve instantly and inflate the reported
+			// consume throughput. The drain exits at the first empty moment, from
+			// which point the handler goroutines refill `received` at broker pace.
+			for drained := false; !drained; {
+				select {
+				case <-received:
+				default:
+					drained = true
+				}
+			}
+
 			b.SetBytes(benchPayloadBytes)
 			b.ReportAllocs()
 			b.ResetTimer()

@@ -46,6 +46,15 @@ func BenchmarkPublishConfirmedMultiConn(b *testing.B) {
 			b.SetBytes(benchPayloadBytes)
 			b.ReportAllocs()
 			b.ResetTimer()
+			// Concurrency here is RunParallel's default p = GOMAXPROCS goroutines, so
+			// the in-flight publish count — and thus the achievable msg/s — is bounded
+			// by GOMAXPROCS, NOT by the 4 conns × 16-channel pool (64 channels) under
+			// test. On a runner with GOMAXPROCS < 64 the sockets are deliberately
+			// under-subscribed; raise GOMAXPROCS to push toward the pool ceiling. We do
+			// NOT call b.SetParallelism to oversubscribe: more concurrent publishers
+			// than pooled channels would surface ErrChannelPoolExhausted and fail the
+			// bench rather than measure it. The >=100k release-tag target therefore
+			// assumes the reference runner's core count, stated alongside the number.
 			b.RunParallel(func(pb *testing.PB) {
 				// Publisher.Publish is safe for concurrent use: each call acquires a
 				// channel from the per-connection pool, fanning load across sockets.
