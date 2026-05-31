@@ -377,13 +377,57 @@ func connIndexForTag(tag string, n int) int {
 	return int(h) % n //nolint:gosec // G115: n is bounded by WithConsumerConnections
 }
 
-// cancelReasonBrokerInitiated is the bounded "reason" label for
-// consumer_cancelled_total. The AMQP basic.cancel frame carries only the consumer
-// tag (no human-readable reason), and using that unbounded tag as a metric label
-// blew up Prometheus cardinality (one series per ctag-<uuidv7>). The metric records
-// this closed-vocabulary class instead, while the per-event tag is surfaced through
-// OnCancel and the wrapped ErrConsumerCancelled where unbounded values are harmless.
-const cancelReasonBrokerInitiated = "broker_initiated"
+// Bounded "reason" label vocabulary for consumer_cancelled_total (T49). The AMQP
+// basic.cancel frame carries only the consumer tag (no human-readable reason), and
+// using that unbounded tag as a metric label blew up Prometheus cardinality (one
+// series per ctag-<uuidv7>). The metric records one of this closed-vocabulary class
+// instead, classified by inspecting whether the queue still exists; the per-event
+// tag is surfaced through OnCancel and the wrapped ErrConsumerCancelled where
+// unbounded values are harmless.
+const (
+	// cancelReasonQueueDeleted: the source queue no longer exists (passive
+	// declare returns 404 NOT_FOUND) — the operator deleted it.
+	cancelReasonQueueDeleted = "queue_deleted"
+	// cancelReasonExclusiveRevoked: the queue still exists, so the cancel came
+	// from an exclusive-lock revocation / single-active-consumer handoff.
+	cancelReasonExclusiveRevoked = "exclusive_revoked"
+	// cancelReasonUnknown: the classification probe could not run (no live
+	// channel) or returned a non-404 error.
+	cancelReasonUnknown = "unknown"
+)
+
+// passiveQueueInspector is the QueueDeclarePassive subset of *amqp091.Channel used
+// to probe whether a queue still exists. A temporary channel opened by
+// classifyBrokerCancel type-asserts to this; the topologyChannel interface does not
+// expose it because only the cancel-classification path needs a passive declare.
+type passiveQueueInspector interface {
+	QueueDeclarePassive(name string, durable, autoDelete, exclusive, noWait bool, args amqp091.Table) (amqp091.Queue, error)
+}
+
+// classifyBrokerCancel maps a broker basic.cancel into the bounded reason enum by
+// opening a temporary channel and passively declaring the queue. A 404 means the
+// queue was deleted; success means it still exists (so the cancel was an exclusive
+// revocation); anything else (open failure, non-404 error, a channel that cannot
+// passively declare) is unknown. The probe uses its own channel so a 404 close does
+// not disturb the consumer's delivery channel.
+func classifyBrokerCancel(mc *managedConn, queue string) string {
+	ch, err := mc.openChannel()
+	if err != nil {
+		return cancelReasonUnknown
+	}
+	defer func() { _ = ch.Close() }()
+	inspector, ok := ch.(passiveQueueInspector)
+	if !ok {
+		return cancelReasonUnknown
+	}
+	if _, perr := inspector.QueueDeclarePassive(queue, false, false, false, false, nil); perr != nil {
+		if errors.Is(wrapAMQPError(perr), ErrNotFound) {
+			return cancelReasonQueueDeleted
+		}
+		return cancelReasonUnknown
+	}
+	return cancelReasonExclusiveRevoked
+}
 
 // buildConsumeArgs assembles the basic.consume argument table from the user-supplied
 // Args plus the typed Priority option. It copies consumeArgs (never mutating the
@@ -416,7 +460,8 @@ func forwardCancelReason(ch chan<- string, reason string) {
 // handleBrokerCancel runs the shared basic.cancel response, then drains in-flight
 // handlers before returning so the caller (runConsume) leaves no goroutines behind.
 func (c *Consumer[M]) handleBrokerCancel(wg *sync.WaitGroup, reason string) error {
-	err := surfaceBrokerCancel(c.onCancel, c.mc.opts.logger, c.cm, c.queue, reason)
+	metricReason := classifyBrokerCancel(c.mc, c.queue)
+	err := surfaceBrokerCancel(c.onCancel, c.mc.opts.logger, c.cm, c.queue, reason, metricReason)
 	wg.Wait()
 	return err
 }
@@ -427,16 +472,19 @@ func (c *Consumer[M]) handleBrokerCancel(wg *sync.WaitGroup, reason string) erro
 // build the ErrConsumerCancelled the consumer goroutine returns. The wrapped error
 // carries the tag (the only datum the frame provides); the library does NOT
 // auto-redeclare the queue — operators usually deleted it on purpose.
-func surfaceBrokerCancel(onCancel func(string), logger log.Logger, cm metrics.ConsumerMetrics, queue, reason string) error {
+// metricReason is the bounded reason enum (classifyBrokerCancel) recorded on the
+// metric, kept distinct from reason (the unbounded consumer tag) which only feeds
+// OnCancel and the wrapped error.
+func surfaceBrokerCancel(onCancel func(string), logger log.Logger, cm metrics.ConsumerMetrics, queue, reason, metricReason string) error {
 	if onCancel != nil {
 		onCancel(reason)
 	} else {
 		logger.Warningf(
-			"warren: broker cancelled consumer %q on queue %q (basic.cancel); Consume returns ErrConsumerCancelled and does not auto-redeclare the queue",
-			reason, queue,
+			"warren: broker cancelled consumer %q on queue %q (basic.cancel, reason=%s); Consume returns ErrConsumerCancelled and does not auto-redeclare the queue",
+			reason, queue, metricReason,
 		)
 	}
-	cm.RecordCancelled(queue, cancelReasonBrokerInitiated)
+	cm.RecordCancelled(queue, metricReason)
 	return fmt.Errorf("%w: consumer tag %q", ErrConsumerCancelled, reason)
 }
 

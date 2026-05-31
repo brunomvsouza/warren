@@ -135,7 +135,11 @@ func TestConsumer_BasicCancel_QueueDeleted_integration(t *testing.T) {
 	count, gotQueue, gotReason := cm.snapshot()
 	assert.Equal(t, 1, count, "consumer_cancelled_total must increment exactly once")
 	assert.Equal(t, q, gotQueue)
-	assert.Equal(t, "broker_initiated", gotReason, "metric reason must be the bounded broker_initiated class")
+	// T49: the queue was deleted out from under the consumer, so the bounded
+	// reason enum classifies it as "queue_deleted" (via a passive-declare probe),
+	// never the unbounded consumer tag.
+	assert.Equal(t, "queue_deleted", gotReason, "metric reason must classify the deleted queue")
+	assert.NotContains(t, gotReason, tag, "metric reason must never be the consumer tag")
 }
 
 // TestConsumer_ExclusiveConsumer_SecondRefused_integration proves the Exclusive()

@@ -196,13 +196,14 @@ type PrometheusConsumerMetrics struct {
 // Returns an error if any collector is already registered.
 //
 // Cardinality note: warren records consumer_cancelled_total with a bounded "reason"
-// class ("broker_initiated") rather than the consumer tag. The AMQP basic.cancel
-// frame carries only the tag, and using that unbounded ctag-<uuidv7> as a label
-// created one new time series per cancellation. T36 moved the per-event tag to the
-// OnCancel callback and the wrapped ErrConsumerCancelled — where unbounded values are
-// harmless — keeping this metric's cardinality finite. The collector itself still
-// accepts any reason string, so callers wiring their own metrics may use a different
-// bounded vocabulary.
+// enum ("queue_deleted", "exclusive_revoked", "unknown") rather than the consumer
+// tag. The AMQP basic.cancel frame carries only the tag, and using that unbounded
+// ctag-<uuidv7> as a label created one new time series per cancellation. T36 moved
+// the per-event tag to the OnCancel callback and the wrapped ErrConsumerCancelled —
+// where unbounded values are harmless — and T49 classifies the cancel into the
+// closed vocabulary above by probing whether the queue still exists, keeping this
+// metric's cardinality finite. The collector itself still accepts any reason string,
+// so callers wiring their own metrics may use a different bounded vocabulary.
 //
 // enabled opts in to high-cardinality labels on the consumer_handler_seconds
 // histogram: MetricsLabelMessageType adds message_type. MetricsLabelRoutingKey
@@ -298,7 +299,8 @@ func (m *PrometheusConsumerMetrics) RecordHandler(queue, messageType, outcome st
 }
 
 // RecordCancelled increments consumer_cancelled_total for the given queue and reason.
-// reason is the consumer tag reported by the broker's basic.cancel frame.
+// reason is a bounded enum ("queue_deleted", "exclusive_revoked", "unknown"), not the
+// unbounded consumer tag — see the Register cardinality note.
 func (m *PrometheusConsumerMetrics) RecordCancelled(queue, reason string) {
 	m.cancelledTotal.WithLabelValues(queue, reason).Inc()
 }
