@@ -24,6 +24,7 @@ package warren_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -76,6 +77,17 @@ func churnCycles(t *testing.T) int {
 		return n
 	}
 	return 100
+}
+
+// isTolerableStormErr reports whether a publish error is an expected consequence
+// of the ForceReconnect storm — the reconnect barrier swallowing a retried
+// publish, the channel closing under it, or a confirm timing out — as opposed to
+// a defect (pool exhaustion, unroutable, nack, a validation bug) the zero-loss
+// test must surface rather than silently drop as merely "fewer publishes".
+func isTolerableStormErr(err error) bool {
+	return errors.Is(err, warren.ErrReconnecting) ||
+		errors.Is(err, warren.ErrConfirmTimeout) ||
+		errors.Is(err, warren.ErrChannelClosed)
 }
 
 // TestChaosReconnect_ZeroLoss_integration streams confirmed messages through a
@@ -172,14 +184,25 @@ func TestChaosReconnect_ZeroLoss_integration(t *testing.T) {
 	start := time.Now()
 	dur := chaosDuration(t)
 	seq := 0
+	var unexpected []error
 	for time.Since(start) < dur {
 		id := fmt.Sprintf("chaos-%d", seq)
 		// Pin MessageID so the published set is known exactly; on a confirmed
 		// (nil) return the broker durably holds it and it MUST be consumed.
-		if perr := pub.Publish(ctx, warren.Message[chaosMsg]{Body: &chaosMsg{Seq: seq}, MessageID: id}); perr == nil {
+		switch perr := pub.Publish(ctx, warren.Message[chaosMsg]{Body: &chaosMsg{Seq: seq}, MessageID: id}); {
+		case perr == nil:
 			mu.Lock()
 			publishedSet[id] = struct{}{}
 			mu.Unlock()
+		case isTolerableStormErr(perr):
+			// The reconnect barrier swallowed this publish despite PublishRetry, or
+			// the confirm timed out under the storm — at-least-once permits it. The
+			// id is simply not recorded, so it is never asserted durable.
+		default:
+			// An error the storm does not explain (pool exhaustion, unroutable,
+			// nack, a validation bug) must NOT be silently dropped: doing so would
+			// let a real publish-path regression pass as merely "fewer publishes".
+			unexpected = append(unexpected, fmt.Errorf("seq=%d: %w", seq, perr))
 		}
 		seq++
 	}
@@ -188,14 +211,34 @@ func TestChaosReconnect_ZeroLoss_integration(t *testing.T) {
 	close(outageDone)
 	outageWG.Wait()
 
+	// Recovery gate: prove the CONSUMER pipeline is live again, not merely the
+	// publisher socket. conn.Health inspects only the first publisher connection,
+	// so it can report healthy while the consumer-side reconnect barrier (re-open
+	// channel → redeclare → re-issue basic.consume) is still settling — which would
+	// start the zero-loss drain clock against a not-yet-resubscribed consumer.
+	// Publish a sentinel through the recovered connection (PublishRetry blocks it on
+	// the barrier until the publisher side clears) and require it to be consumed:
+	// that exercises publish AND the consumer re-subscribe end to end first.
+	recoveryID := fmt.Sprintf("chaos-recovery-%d", seq)
+	require.NoError(t, pub.Publish(ctx, warren.Message[chaosMsg]{Body: &chaosMsg{Seq: seq}, MessageID: recoveryID}),
+		"a publish must succeed once the storm stops")
+	seq++
+	mu.Lock()
+	publishedSet[recoveryID] = struct{}{}
+	mu.Unlock()
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		_, ok := consumedSet[recoveryID]
+		return ok
+	}, 30*time.Second, 100*time.Millisecond,
+		"consumer must re-subscribe and deliver after the storm (recovery sentinel consumed)")
+
 	{
 		closeCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 		_ = pub.Close(closeCtx)
 		c()
 	}
-
-	require.Eventually(t, func() bool { return conn.Health(ctx) == nil },
-		30*time.Second, 100*time.Millisecond, "connection must recover to healthy after the storm")
 
 	// Drain: every confirmed publish must eventually be consumed.
 	require.Eventually(t, func() bool {
@@ -212,7 +255,17 @@ func TestChaosReconnect_ZeroLoss_integration(t *testing.T) {
 	nPub, nCon := len(publishedSet), len(consumedSet)
 	mu.Unlock()
 
-	require.Positive(t, nPub, "the workload must confirm at least one publish")
+	require.Empty(t, unexpected,
+		"publishes failed with errors the ForceReconnect storm does not explain: %v", unexpected)
+	// Non-vacuity: a regression that wedges publishing after the first reconnect
+	// barrier would confirm only a handful of messages yet still satisfy a
+	// "confirmed at least one" floor. Require a floor well above 1 so the test
+	// actually proves the publisher survived the storm. The floor is a modest
+	// absolute (not proportional to duration) to stay robust on a slow CI broker
+	// while still defeating a wedge-after-first regression.
+	const minConfirmed = 20
+	require.GreaterOrEqualf(t, nPub, minConfirmed,
+		"expected the publisher to survive the storm and confirm >= %d messages, got %d", minConfirmed, nPub)
 	require.Empty(t, lost, "zero message loss: %d confirmed, %d consumed-distinct, lost=%v", nPub, nCon, lost)
 	t.Logf("chaos zero-loss: confirmed=%d consumed-distinct=%d (duplicates tolerated) over %s storm",
 		nPub, nCon, dur)
