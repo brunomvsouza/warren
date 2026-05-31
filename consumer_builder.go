@@ -79,9 +79,9 @@ func (b *ConsumerBuilder[M]) Prefetch(count uint16) *ConsumerBuilder[M] {
 // PrefetchBytes is a no-op on RabbitMQ; preserved for AMQP 0-9-1 protocol parity.
 func (b *ConsumerBuilder[M]) PrefetchBytes(_ uint) *ConsumerBuilder[M] { return b }
 
-// ChannelQoS applies QoS per channel (global=false) rather than per consumer.
-// This is the RabbitMQ-recommended setting; the broker ignores the per-consumer
-// distinction and applies prefetch at channel scope in any case.
+// ChannelQoS applies QoS at channel scope (basic.qos global=true) rather than
+// per consumer. This is the RabbitMQ-recommended setting; the broker ignores the
+// per-consumer distinction and applies prefetch at channel scope in any case.
 func (b *ConsumerBuilder[M]) ChannelQoS() *ConsumerBuilder[M] {
 	b.channelQoS = true
 	return b
