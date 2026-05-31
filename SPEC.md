@@ -1162,6 +1162,7 @@ func (b *ConsumerBuilder[M]) Tag(consumerTag string) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) Concurrency(n uint) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) Prefetch(count uint16) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) PrefetchBytes(bytes uint) *ConsumerBuilder[M] // no-op on RabbitMQ; preserved for protocol parity
+func (b *ConsumerBuilder[M]) MaxInFlightBytes(n int64) *ConsumerBuilder[M] // local memory guardrail; caps sum of in-flight body sizes; n<=0 disables
 func (b *ConsumerBuilder[M]) ChannelQoS() *ConsumerBuilder[M]              // RabbitMQ: apply QoS per channel, not per consumer
 func (b *ConsumerBuilder[M]) Priority(p int) *ConsumerBuilder[M]           // x-priority on basic.consume; higher = preferred
 func (b *ConsumerBuilder[M]) HandlerTimeout(d time.Duration) *ConsumerBuilder[M] // per-message handler ctx deadline
@@ -1169,7 +1170,7 @@ func (b *ConsumerBuilder[M]) HandlerTimeoutVerdict(v TimeoutVerdict) *ConsumerBu
 func (b *ConsumerBuilder[M]) Exclusive() *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) AutoAck() *ConsumerBuilder[M]           // explicit opt-in; see warning below
 func (b *ConsumerBuilder[M]) Args(Headers) *ConsumerBuilder[M]
-func (b *ConsumerBuilder[M]) OnCancel(func(reason string)) *ConsumerBuilder[M] // basic.cancel from broker; reason is the cancelled consumer tag (the frame carries no description)
+func (b *ConsumerBuilder[M]) OnCancel(func(tag string)) *ConsumerBuilder[M] // basic.cancel from broker; arg is the cancelled consumer tag (the frame carries no description). The consumer_cancelled_total metric label uses a bounded reason enum, not this tag — see §6.3
 func (b *ConsumerBuilder[M]) MaxRedeliveries(n int) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) Metrics(metrics.ConsumerMetrics) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) WithoutMetrics() *ConsumerBuilder[M]
@@ -1210,6 +1211,17 @@ development workloads. For sustained > 1k msg/s/consumer against a
 remote broker, raise both. Note the trade-off: a large `Prefetch`
 means a consumer crash can leave many unacked messages, all of which
 get redelivered (and may be processed twice — see §6.2.1).
+
+`Prefetch` bounds in-flight *message count*; `MaxInFlightBytes` bounds
+in-flight *memory*. With variable or large payloads,
+`Prefetch × Concurrency × body-size` can exhaust the heap before the
+count limit bites. `MaxInFlightBytes(n)` caps the sum of in-flight body
+sizes: once running handlers hold `n` bytes the consumer stops pulling
+deliveries (pausing prefetch refill) until a handler returns and frees
+its bytes. `n<=0` (default) disables it. A single body larger than `n`
+is not rejected — when nothing else is in flight it is dispatched alone,
+so memory is bounded to `max(n, largest single body)`. The current
+reserved total is exported as the `consumer_inflight_bytes{queue}` gauge.
 
 ```go
 type TimeoutVerdict uint8
@@ -1357,12 +1369,18 @@ the queue is deleted under the consumer (or when an exclusive
 consumer is forced off). The library:
 
 - Increments `consumer_cancelled_total{queue, reason}` on every
-  received `basic.cancel`.
-- Fires `OnCancel(reason)` if set; otherwise emits a warning log.
+  received `basic.cancel`. The `reason` label is a **bounded enum**
+  (`queue_deleted` | `exclusive_revoked` | `unknown`), classified by
+  probing whether the queue still exists — **not** the consumer tag,
+  which is unbounded (`ctag-<uuidv7>`) and would explode label
+  cardinality.
+- Fires `OnCancel(tag)` if set; otherwise emits a warning log. The
+  callback receives the **consumer tag** — the only datum the
+  `basic.cancel` frame carries — where an unbounded value is harmless.
 - **Does NOT auto-redeclare the queue** — the operator likely
   deleted it for a reason. The consumer goroutine returns from
   `Consume(ctx, …)` with `ErrConsumerCancelled` (wrapped with
-  the reason). Callers that want resilient redeclare-and-resume
+  the consumer tag). Callers that want resilient redeclare-and-resume
   semantics wrap `Consume` in their own loop that also calls
   `Topology.Declare` first.
 
@@ -2132,6 +2150,10 @@ value.
   `consumer_resubscribed_total{queue}`,
   `consumer_handler_aborted_channel_closed_total{queue}`,
   `consumer_handler_timeout_total{queue}`,
+  `consumer_inflight_bytes{queue}` (gauge of the current sum of
+  in-flight message body sizes; rises while handlers run and returns to
+  zero when they complete, independent of whether `MaxInFlightBytes`
+  enforcement is enabled),
   `publisher_in_flight{exchange}`,
   `publisher_retry_total{exchange, reason}` (reason ∈
   `nacked|confirm_timeout|channel_closed|pool_exhausted|blocked|network`),
@@ -3025,10 +3047,12 @@ the Rev 5 surface still left invisible to a non-specialist user.
 
 45. **`basic.cancel` surfaces as `ErrConsumerCancelled`.** The
     library advertises `consumer_cancel_notify=true`; on receipt,
-    `OnCancel(reason)` fires and `Consume` returns
-    `ErrConsumerCancelled` so the consumer goroutine is never
-    silently dead. The metric `consumer_cancelled_total{queue,
-    reason}` is mandatory.
+    `OnCancel(tag)` fires (carrying the unbounded consumer tag) and
+    `Consume` returns `ErrConsumerCancelled` so the consumer goroutine
+    is never silently dead. The metric `consumer_cancelled_total{queue,
+    reason}` is mandatory; its `reason` label is the bounded enum
+    `queue_deleted | exclusive_revoked | unknown` (never the consumer
+    tag — see §6.3).
 
 46. **Frame max sizing guidance is documented.** Default 128 KiB
     fits typical messages; raise to 1 MiB for streaming. The
