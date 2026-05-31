@@ -355,8 +355,10 @@ type orderTracker struct {
 }
 
 // accept records seq when it is the next expected value. It returns the verdict
-// plus the sequence number expected at decision time, so an out-of-order caller
-// can report `want` without re-locking the mutex accept just released.
+// and the next-expected sequence number; only the out-of-order verdict consumes
+// that value — to report `want` without re-locking the mutex accept just
+// released (and on that path it is exactly the sequence expected at decision
+// time, since an out-of-order seq leaves nextWant unchanged).
 func (t *orderTracker) accept(seq int) (acceptResult, int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

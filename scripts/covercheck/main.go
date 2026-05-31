@@ -41,7 +41,8 @@ const (
 // purpose: its lifecycle is additionally exercised end-to-end by the
 // reconnect-chaos and integration lanes, whereas the four packages above are
 // unit-verifiable in isolation and a unit gap there is not caught elsewhere.
-// Promote connpool here only with an audit that it clears 95% first (LATER).
+// connpool currently sits at 100%, so it would clear a 95% floor; it stays at
+// the default by the rationale above, not because it cannot pass.
 var criticalPackages = map[string]bool{
 	modulePath + "/internal/reconnect": true,
 	modulePath + "/internal/confirms":  true,

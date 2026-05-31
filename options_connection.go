@@ -303,7 +303,9 @@ func WithoutMetrics() Option {
 	return func(o *connOptions) { o.metrics = metrics.NoOpClientMetrics{} }
 }
 
-// WithTracer sets the OTel tracer used for connection spans.
+// WithTracer stores a connection-level OTel tracer. It is reserved for future
+// connection-level spans and currently drives none; publish/consume spans are
+// enabled per builder via PublisherBuilder.Tracer / ConsumerBuilder.Tracer.
 // Defaults to otel.NoOpTracer when not provided.
 func WithTracer(t otel.Tracer) Option {
 	return func(o *connOptions) { o.tracer = t }

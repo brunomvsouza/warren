@@ -154,10 +154,10 @@ func dialProduction(ctx context.Context, tracer otel.Tracer) (*warren.Connection
 		}),
 		// TLS: amqps:// URIs use this config (mTLS-ready; SASL EXTERNAL is also supported).
 		warren.WithTLSConfig(&tls.Config{ServerName: "rabbit.internal", MinVersion: tls.VersionTLS12}),
-		// OpenTelemetry: WithTracer enables connection-level spans. Publish/consume
-		// trace propagation (inject on publish, extract on consume) is turned on
-		// per builder with .Tracer(tracer) on PublisherFor / ConsumerFor — see
-		// examples/otel for the load-bearing wiring.
+		// OpenTelemetry: WithTracer just stores a connection-level tracer (reserved;
+		// it drives no spans today). Publish/consume tracing — inject on publish,
+		// extract on consume — is turned on per builder with .Tracer(tracer) on
+		// PublisherFor / ConsumerFor; see examples/otel for the load-bearing wiring.
 		warren.WithTracer(tracer),
 	)
 }
@@ -307,7 +307,7 @@ conn, err := warren.Dial(ctx,
     warren.WithAddr(uri),
     warren.WithLogger(myLogger),           // log.Logger — std, slog, or custom
     warren.WithMetrics(promMetrics),       // default: Prometheus; WithoutMetrics() to disable
-    warren.WithTracer(otelTracer),         // connection spans; add .Tracer(t) per builder for publish/consume spans
+    warren.WithTracer(otelTracer),         // reserved (no spans today); add .Tracer(t) per builder for publish/consume spans
 )
 ```
 

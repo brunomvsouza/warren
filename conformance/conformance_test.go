@@ -359,15 +359,16 @@ loop:
 	_ = pub.Close(closeCtx)
 }
 
-// TestConformance_UserIDMismatch_AccessRefused406 pins the broker contract that
-// warren's client-side UserID guard (decision 39) is built on: a publish whose
-// AMQP `user-id` property does not match the authenticated connection user is
-// rejected by the broker with a 406 ACCESS_REFUSED channel exception. warren
-// validates UserID client-side and never lets the mismatched frame reach the
-// broker (turning it into a local ErrInvalidMessage), so this test deliberately
-// goes through a RAW amqp091 channel to prove the real broker behavior the guard
-// mirrors — a stub could not (TV-06: 406-on-UserID).
-func TestConformance_UserIDMismatch_AccessRefused406(t *testing.T) {
+// TestConformance_UserIDMismatch_PreconditionFailed406 pins the broker contract
+// that warren's client-side UserID guard (decision 39) is built on: a publish
+// whose AMQP `user-id` property does not match the authenticated connection user
+// is rejected by the broker with a 406 PRECONDITION_FAILED channel exception
+// (406, not 403 ACCESS_REFUSED — the broker raises precondition-failed for the
+// user-id mismatch). warren validates UserID client-side and never lets the
+// mismatched frame reach the broker (turning it into a local ErrInvalidMessage),
+// so this test deliberately goes through a RAW amqp091 channel to prove the real
+// broker behavior the guard mirrors — a stub could not (TV-06: 406-on-UserID).
+func TestConformance_UserIDMismatch_PreconditionFailed406(t *testing.T) {
 	// Registered before the raw connection's deferred Close so it runs LAST
 	// (Cleanup is LIFO, and defers run before cleanups): goleak verifies after the
 	// amqp091 connection's goroutines are joined.
@@ -404,7 +405,7 @@ func TestConformance_UserIDMismatch_AccessRefused406(t *testing.T) {
 		require.NotNil(t, amqpErr,
 			"channel must close with an AMQP error on a user-id mismatch")
 		assert.Equal(t, 406, amqpErr.Code,
-			"user-id mismatch must raise ACCESS_REFUSED (406); got %d %q", amqpErr.Code, amqpErr.Reason)
+			"user-id mismatch must raise PRECONDITION_FAILED (406); got %d %q", amqpErr.Code, amqpErr.Reason)
 	case <-time.After(10 * time.Second):
 		t.Fatal("broker did not raise a channel exception for a mismatched user-id within 10s")
 	}
