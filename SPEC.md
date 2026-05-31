@@ -1177,6 +1177,7 @@ func (b *ConsumerBuilder[M]) Concurrency(n uint) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) Prefetch(count uint16) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) PrefetchBytes(bytes uint) *ConsumerBuilder[M] // no-op on RabbitMQ; preserved for protocol parity
 func (b *ConsumerBuilder[M]) MaxInFlightBytes(n int64) *ConsumerBuilder[M] // local memory guardrail; caps sum of in-flight body sizes; n<=0 disables
+func (b *ConsumerBuilder[M]) WithQueueDepthSampler(interval time.Duration) *ConsumerBuilder[M] // poll queue + "<queue>.dlq" depth via declare-passive; exports queue_depth{queue} and dlq_depth{dlq}; interval<=0 disables
 func (b *ConsumerBuilder[M]) ChannelQoS() *ConsumerBuilder[M]              // RabbitMQ: apply QoS per channel, not per consumer
 func (b *ConsumerBuilder[M]) Priority(p int) *ConsumerBuilder[M]           // x-priority on basic.consume; higher = preferred
 func (b *ConsumerBuilder[M]) HandlerTimeout(d time.Duration) *ConsumerBuilder[M] // per-message handler ctx deadline
@@ -2179,6 +2180,11 @@ value.
   `replier_drop_no_dlx_total{queue}` (increments every time a
   `Replier` `OnError` fires for a request queue without a configured
   DLX — see §6.7),
+  `queue_depth{queue}` and `dlq_depth{dlq}` (gauges of the broker-side
+  message backlog of the consumer's source queue and its conventional
+  `<queue>.dlq` dead-letter queue, sampled via `declare-passive` only
+  when `WithQueueDepthSampler(interval)` is enabled; a queue that does
+  not exist is skipped, not reported as zero — see §6.3),
   `topology_redeclare_seconds{role}` (histogram of synchronous
   redeclare windows on reconnect — see §6.6).
 

@@ -260,6 +260,9 @@ type Consumer[M any] struct {
 	handlerTimeout time.Duration
 	timeoutVerdict TimeoutVerdict
 
+	// depthSampleInterval is the WithQueueDepthSampler polling period (T52); 0 disables it.
+	depthSampleInterval time.Duration
+
 	// MaxRedeliveries enforcement.
 	// maxRedeliveries == 0 means unbounded (feature disabled).
 	maxRedeliveries  int
@@ -331,30 +334,31 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 	mc := b.conn.ConConnAt(idx)
 
 	c := &Consumer[M]{
-		queue:            b.queue,
-		tag:              tag,
-		concurrency:      b.concurrency,
-		prefetch:         b.prefetch,
-		maxInFlightBytes: b.maxInFlightBytes,
-		byteLimiter:      newByteLimiter(b.maxInFlightBytes),
-		channelQoS:       b.channelQoS,
-		priority:         b.priority,
-		prioritySet:      b.prioritySet,
-		exclusive:        b.exclusive,
-		consumeArgs:      b.consumeArgs,
-		onCancel:         b.onCancel,
-		brokerAutoAck:    b.autoAck,
-		handlerTimeout:   b.handlerTimeout,
-		timeoutVerdict:   b.timeoutVerdict,
-		maxRedeliveries:  b.maxRedeliveries,
-		counterBDisabled: b.counterBDisabled,
-		codec:            b.c,
-		cm:               b.cm,
-		tracer:           b.tracer,
-		propagator:       otel.NewPropagator(),
-		msgType:          metricsTypeName[M](),
-		mc:               mc,
-		closedCh:         make(chan struct{}),
+		queue:               b.queue,
+		tag:                 tag,
+		concurrency:         b.concurrency,
+		prefetch:            b.prefetch,
+		maxInFlightBytes:    b.maxInFlightBytes,
+		byteLimiter:         newByteLimiter(b.maxInFlightBytes),
+		channelQoS:          b.channelQoS,
+		priority:            b.priority,
+		prioritySet:         b.prioritySet,
+		exclusive:           b.exclusive,
+		consumeArgs:         b.consumeArgs,
+		onCancel:            b.onCancel,
+		brokerAutoAck:       b.autoAck,
+		handlerTimeout:      b.handlerTimeout,
+		timeoutVerdict:      b.timeoutVerdict,
+		depthSampleInterval: b.depthSampleInterval,
+		maxRedeliveries:     b.maxRedeliveries,
+		counterBDisabled:    b.counterBDisabled,
+		codec:               b.c,
+		cm:                  b.cm,
+		tracer:              b.tracer,
+		propagator:          otel.NewPropagator(),
+		msgType:             metricsTypeName[M](),
+		mc:                  mc,
+		closedCh:            make(chan struct{}),
 	}
 	// Initialise counterState with an empty map; openDeliveryCh rotates this on every
 	// channel open so "channel close resets counter B" holds without explicit cleanup.
@@ -402,6 +406,66 @@ const (
 	// channel) or returned a non-404 error.
 	cancelReasonUnknown = "unknown"
 )
+
+// dlqNameSuffix is the conventional dead-letter-queue suffix warren's own DeadLetter
+// topology appends to a source queue ("<source>.dlq"). WithQueueDepthSampler samples
+// the DLQ under this name.
+const dlqNameSuffix = ".dlq"
+
+// runDepthSampler periodically samples the source-queue and DLQ depths until ctx is
+// cancelled (T52). It primes the gauges once immediately so they are populated before
+// the first tick, then samples every depthSampleInterval.
+func (c *Consumer[M]) runDepthSampler(ctx context.Context) {
+	ticker := time.NewTicker(c.depthSampleInterval)
+	defer ticker.Stop()
+	c.sampleDepths()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.sampleDepths()
+		}
+	}
+}
+
+// sampleDepths reads the source-queue depth (always) and the conventional
+// "<queue>.dlq" dead-letter-queue depth (only when it exists) via passive declares,
+// emitting the queue_depth and dlq_depth gauges. A queue that does not exist is
+// skipped rather than reported as zero, so no phantom series appears for a consumer
+// without a DLQ.
+func (c *Consumer[M]) sampleDepths() {
+	if depth, ok := c.sampleQueueDepth(c.queue); ok {
+		c.cm.SetQueueDepth(c.queue, depth)
+	}
+	dlq := c.queue + dlqNameSuffix
+	if depth, ok := c.sampleQueueDepth(dlq); ok {
+		c.cm.SetDLQDepth(dlq, depth)
+	}
+}
+
+// sampleQueueDepth opens a short-lived channel and passively declares name to read
+// its broker-side message count. It returns (0, false) when the channel cannot be
+// opened, the channel does not expose a passive declare, the queue does not exist, or
+// the broker rejects the declare. A fresh channel is used per call because the broker
+// closes the channel on a failed passive declare (e.g. a 404 for a missing DLQ); the
+// throwaway channel keeps that close from disturbing the delivery channel.
+func (c *Consumer[M]) sampleQueueDepth(name string) (int64, bool) {
+	topoCh, err := c.mc.openChannel()
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = topoCh.Close() }()
+	inspector, ok := topoCh.(passiveQueueInspector)
+	if !ok {
+		return 0, false
+	}
+	q, err := inspector.QueueDeclarePassive(name, false, false, false, false, nil)
+	if err != nil {
+		return 0, false
+	}
+	return int64(q.Messages), true
+}
 
 // passiveQueueInspector is the QueueDeclarePassive subset of *amqp091.Channel used
 // to probe whether a queue still exists. A temporary channel opened by
@@ -617,6 +681,24 @@ func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error {
 func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck bool) error {
 	if !c.started.CompareAndSwap(false, true) {
 		return fmt.Errorf("%w: consumer already started; create a new consumer via Build() to restart", ErrInvalidOptions)
+	}
+
+	// Queue-depth sampler (T52): run on its own context + waitgroup so every return
+	// path below (ctx cancel, basic.cancel, a fatal openDeliveryCh error) stops and
+	// joins the goroutine — no leak. It probes the broker on its own short-lived
+	// channels and is independent of the delivery pump.
+	if c.depthSampleInterval > 0 {
+		samplerCtx, cancelSampler := context.WithCancel(ctx)
+		var samplerWG sync.WaitGroup
+		samplerWG.Add(1)
+		go func() {
+			defer samplerWG.Done()
+			c.runDepthSampler(samplerCtx)
+		}()
+		defer func() {
+			cancelSampler()
+			samplerWG.Wait()
+		}()
 	}
 
 	// cancelReasonCh relays broker basic.cancel notifications from the delivery pump

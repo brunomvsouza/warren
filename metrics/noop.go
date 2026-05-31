@@ -61,3 +61,9 @@ func (NoOpConsumerMetrics) RecordReplierDropNoDLX(_ string) {}
 
 // InFlightBytesAdd discards the in-flight-bytes gauge adjustment.
 func (NoOpConsumerMetrics) InFlightBytesAdd(_ string, _ int64) {}
+
+// SetQueueDepth discards the queue-depth gauge set.
+func (NoOpConsumerMetrics) SetQueueDepth(_ string, _ int64) {}
+
+// SetDLQDepth discards the dlq-depth gauge set.
+func (NoOpConsumerMetrics) SetDLQDepth(_ string, _ int64) {}
