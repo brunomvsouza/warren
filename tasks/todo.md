@@ -1320,12 +1320,12 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 - **Files:** `consumer.go`, `metrics/metrics.go`, `metrics/noop.go`, `metrics/prometheus.go`.
 - **Deps:** T52. Resolves LATER-81.
 
-### [ ] T53 — Consumer Draining API & Liveness Probes [P2] · M
+### [x] T53 — Consumer Draining API & Liveness Probes [P2] · M
 - **Acceptance:**
-  - [ ] `(*Consumer[M]).Pause(ctx)` sends `basic.cancel` locally without closing channel. `Resume(ctx)` re-issues `basic.consume`.
-  - [ ] `(*Consumer[M]).Health() ConsumerHealth` exposes `Active`, `Paused`, `LastDeliveryAt`, `InFlightHandlers`.
-- **Verify:** Test `Pause()`, publish 100 msgs, check none received, `Resume()`, check all 100 received. Liveness probe checks.
-- **Files:** `consumer.go`, `consumer_builder.go`.
+  - [x] `(*Consumer[M]).Pause(ctx)` sends `basic.cancel` locally without closing channel. `Resume(ctx)` re-issues `basic.consume`.
+  - [x] `(*Consumer[M]).Health(ctx) (*ConsumerHealth, error)` exposes `Active`, `Paused`, `LastDeliveryAt`, `InFlightHandlers`. (Signature evolved from the prior `Health(ctx) error` and reconciled in SPEC §6/§6.3: returns `(nil, err)` when the pinned connection is unhealthy, else a populated snapshot. Replaces the bare liveness check while keeping the connection gate.)
+- **Verify:** Unit: Pause issues local `basic.cancel`, marks Paused, idempotent, rolls back on Cancel error; Resume re-issues `basic.consume`, clears Paused; pre-start/post-close error guards; snapshot reports in-flight + LastDeliveryAt. Integration (`TestConsumer_PauseResume_DrainsAndResumes_integration`): Pause drops the broker subscription, publish 100 while paused → none received, Resume → all 100 delivered; Health reflects the transitions. Pump keeps in-flight handlers alive across a local cancel (channelDone left open when paused). `-race` + goleak clean.
+- **Files:** `consumer.go`, `consumer_health_test.go`, `consumer_pause_test.go`, `consumer_pause_integration_test.go`, `rpc_replier.go`, SPEC §6/§6.3, README. (`consumer_builder.go` unchanged — no new builder options needed.)
 - **Deps:** T18, T36.
 
 ### [ ] T54 — Context Cancellation vs Transient Errors [P2] · XS
