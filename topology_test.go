@@ -408,6 +408,57 @@ func TestTopology_expand_dlxDoesNotDuplicateExistingDLQ(t *testing.T) {
 	assert.Equal(t, 1, count, "DLQ queue must appear exactly once")
 }
 
+// T47: the in-memory expansion must bind the auto-created DLX exchange to the
+// auto-created DLQ with RoutingKey "#", otherwise dead-lettered messages route
+// into limbo (DLX has no queue bound and silently drops them).
+func TestTopology_expand_dlxBindsDLXToDLQ(t *testing.T) {
+	topo := &Topology{
+		Queues:      []Queue{{Name: "orders", Durable: true}},
+		DeadLetters: []DeadLetter{{Source: "orders", Exchange: "orders.dlx"}},
+	}
+	expanded := topo.expand()
+	found := false
+	for _, b := range expanded.Bindings {
+		if b.Exchange == "orders.dlx" && b.Queue == "orders.dlq" && b.RoutingKey == "#" {
+			found = true
+		}
+	}
+	assert.True(t, found, "expand() must append Binding{orders.dlx -> orders.dlq, #}")
+}
+
+func TestTopology_expand_dlxBindsDefaultExchangeName(t *testing.T) {
+	topo := &Topology{
+		Queues:      []Queue{{Name: "orders", Durable: true}},
+		DeadLetters: []DeadLetter{{Source: "orders"}}, // default <source>.dlx + <source>.dlq
+	}
+	expanded := topo.expand()
+	found := false
+	for _, b := range expanded.Bindings {
+		if b.Exchange == "orders.dlx" && b.Queue == "orders.dlq" && b.RoutingKey == "#" {
+			found = true
+		}
+	}
+	assert.True(t, found, "expand() must bind the default DLX to the default DLQ")
+}
+
+func TestTopology_expand_dlxDoesNotDuplicateExistingBinding(t *testing.T) {
+	topo := &Topology{
+		Queues:   []Queue{{Name: "orders", Durable: true}},
+		Bindings: []Binding{{Exchange: "orders.dlx", Queue: "orders.dlq", RoutingKey: "#"}},
+		DeadLetters: []DeadLetter{
+			{Source: "orders", Exchange: "orders.dlx"},
+		},
+	}
+	expanded := topo.expand()
+	count := 0
+	for _, b := range expanded.Bindings {
+		if b.Exchange == "orders.dlx" && b.Queue == "orders.dlq" && b.RoutingKey == "#" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "DLX->DLQ binding must not be duplicated when already declared")
+}
+
 func TestTopology_expand_dlxDefaultExchangeName(t *testing.T) {
 	topo := &Topology{
 		Queues:      []Queue{{Name: "orders", Durable: true}},

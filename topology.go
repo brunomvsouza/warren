@@ -279,6 +279,14 @@ func (t *Topology) expand() *Topology {
 		queueNames[q.Name] = struct{}{}
 	}
 
+	// Index existing exchange->queue->routing-key bindings to avoid appending a
+	// duplicate DLX->DLQ binding the caller already declared.
+	type bindingKey struct{ exchange, queue, routingKey string }
+	bindingKeys := make(map[bindingKey]struct{}, len(out.Bindings))
+	for _, b := range out.Bindings {
+		bindingKeys[bindingKey{b.Exchange, b.Queue, b.RoutingKey}] = struct{}{}
+	}
+
 	// DLX expansion.
 	for _, dl := range out.DeadLetters {
 		dlxName := dl.Exchange
@@ -325,6 +333,19 @@ func (t *Topology) expand() *Topology {
 				Durable: true,
 			})
 			queueNames[dlqName] = struct{}{}
+		}
+
+		// Bind the DLX to the DLQ so dead-lettered messages actually land in the
+		// DLQ rather than routing into limbo. The DLX is a topic exchange, so "#"
+		// matches every routing key. Skip if the caller already declared it.
+		bk := bindingKey{dlxName, dlqName, "#"}
+		if _, exists := bindingKeys[bk]; !exists {
+			out.Bindings = append(out.Bindings, Binding{
+				Exchange:   dlxName,
+				Queue:      dlqName,
+				RoutingKey: "#",
+			})
+			bindingKeys[bk] = struct{}{}
 		}
 	}
 
