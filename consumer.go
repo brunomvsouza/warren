@@ -338,11 +338,16 @@ type Consumer[M any] struct {
 	// read by the delivery pump to keep in-flight handlers alive across a local cancel.
 	paused atomic.Bool
 
-	// pauseMu serializes Pause/Resume and guards live. live holds the current
-	// physical-channel handle so Pause can issue a local basic.cancel and Resume can
-	// re-issue basic.consume on the same channel without reopening it (T53).
+	// pauseMu serializes Pause/Resume and guards live + runCtx. live holds the
+	// current physical-channel handle so Pause can issue a local basic.cancel and
+	// Resume can re-issue basic.consume on the same channel without reopening it.
+	// runCtx is the consumer-lifecycle ctx (the one passed to Consume/ConsumeRaw):
+	// Resume binds its re-subscribe pump to runCtx, NOT to the (possibly
+	// request-scoped) ctx passed to Resume, so cancelling that caller ctx never
+	// silently stops delivery (T53).
 	pauseMu sync.Mutex
 	live    *liveSub
+	runCtx  context.Context
 
 	// resubCh carries replacement subscriptions from the reconnect hook and from
 	// Resume into runConsume's loop. runConsume creates it (buffered, size 1) when
@@ -832,6 +837,14 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 	}
 	resubCh := c.resubCh
 
+	// Record the consumer-lifecycle ctx so Resume's re-subscribe pump is bound to
+	// the consumer's lifetime, not to the ctx passed to Resume. Set before the first
+	// openDeliveryCh (which sets c.live); any Resume that sees c.live != nil is
+	// guaranteed to observe this write via pauseMu (T53).
+	c.pauseMu.Lock()
+	c.runCtx = ctx
+	c.pauseMu.Unlock()
+
 	c.mc.registerHook(func(hookCtx context.Context) error {
 		jitter := time.Duration(50+rand.IntN(201)) * time.Millisecond //nolint:gosec // non-crypto jitter
 		select {
@@ -941,6 +954,13 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 	// but new dispatches pick up the fresh (empty) one.
 	c.counterState.Store(&redeliveryCounter{})
 
+	// (Re)opening a delivery channel — initial connect or reconnect — means the
+	// consumer is actively subscribed again, so clear any stale pause. This keeps
+	// the Health snapshot accurate after a reconnect-during-pause and makes a
+	// subsequent Resume a harmless no-op instead of a duplicate basic.consume with
+	// the same consumer tag on a channel that already re-subscribed (T53).
+	c.paused.Store(false)
+
 	if c.deliverySubOverride != nil {
 		return *c.deliverySubOverride, nil
 	}
@@ -1014,24 +1034,36 @@ func (c *Consumer[M]) startPump(ctx context.Context, deliveries <-chan amqp091.D
 			select {
 			case d, ok := <-deliveries:
 				if !ok {
-					// basic.cancel or broker closed delivery stream.
-					// Drain cancelCh non-blockingly: both cancelCh and deliveries
-					// may become ready simultaneously; Go picks non-deterministically,
-					// so the !ok branch can win before the cancelCh case is selected.
-					// Only a real basic.cancel (ok=true) forwards a reason; a closed
-					// cancelCh (ok=false) just means the channel is shutting down.
+					// The delivery stream closed. Distinguish a genuine channel death
+					// — which also signals closeCh and/or cancelCh — from a graceful
+					// local cancel (Pause), which closes ONLY the delivery stream. Both
+					// notifications and `deliveries` may become ready at once and Go
+					// picks non-deterministically, so the !ok branch can win the race;
+					// drain both non-blockingly to recover the real reason. Only a real
+					// basic.cancel (ok=true) forwards a reason; a closed cancelCh
+					// (ok=false) just means the channel is shutting down.
+					death := false
+					select {
+					case <-closeCh:
+						death = true
+					default:
+					}
 					select {
 					case tag, ok := <-cancelCh:
 						if ok {
 							forwardCancelReason(c.cancelReasonCh, tag)
 						}
+						death = true
 					default:
 					}
-					// A graceful local cancel (Pause) ends this delivery stream without
-					// killing in-flight handlers: skip closeChannelDone so dispatch
-					// goroutines keep their live handler contexts and Resume can
-					// re-subscribe on the same channel.
-					if !c.paused.Load() {
+					// Close channelDone (cancelling in-flight handler contexts with
+					// ErrChannelClosed) on a genuine death, OR when not paused. Skip it
+					// ONLY for a graceful local cancel (paused, no death signal): there
+					// the channel is alive, so in-flight handlers keep their contexts
+					// and Resume re-subscribes on the same channel. Checking the death
+					// signals — not just the paused flag — closes the window where a
+					// real channel death races the Pause handshake.
+					if death || !c.paused.Load() {
 						closeChannelDone()
 					}
 					return
@@ -1532,7 +1564,10 @@ func (c *Consumer[M]) Pause(ctx context.Context) error {
 // Resume re-issues basic.consume on the consumer's existing channel after a
 // Pause, handing the running loop a fresh subscription. It is idempotent: a call
 // while not paused is a no-op. It errors before Consume/ConsumeRaw has started or
-// after Close (T53).
+// after Close. The ctx scopes only this call (its cancellation aborts the
+// re-subscribe handshake); the resulting subscription is bound to the consumer
+// lifetime — the ctx passed to Consume/ConsumeRaw — not to this ctx, so a
+// request-scoped Resume ctx cannot silently stop delivery (T53).
 func (c *Consumer[M]) Resume(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1549,7 +1584,7 @@ func (c *Consumer[M]) Resume(ctx context.Context) error {
 	if !c.paused.Load() {
 		return nil
 	}
-	sub, err := c.resubscribeLocked(ctx)
+	sub, err := c.resubscribeLocked()
 	if err != nil {
 		return err
 	}
@@ -1564,8 +1599,10 @@ func (c *Consumer[M]) Resume(ctx context.Context) error {
 
 // resubscribeLocked re-issues basic.consume on the live channel and starts a fresh
 // pump, reusing the channel's close/cancel notifications and done signal so the
-// physical channel (and its in-flight acks) is preserved. Caller holds pauseMu.
-func (c *Consumer[M]) resubscribeLocked(ctx context.Context) (deliverySub, error) {
+// physical channel (and its in-flight acks) is preserved. The pump is bound to
+// c.runCtx (the consumer lifecycle), not to the ctx passed to Resume, so a
+// request-scoped Resume ctx cannot tear it down. Caller holds pauseMu.
+func (c *Consumer[M]) resubscribeLocked() (deliverySub, error) {
 	live := c.live
 	if live == nil {
 		return deliverySub{}, fmt.Errorf("%w: no live subscription to resume", ErrReconnecting)
@@ -1578,7 +1615,7 @@ func (c *Consumer[M]) resubscribeLocked(ctx context.Context) (deliverySub, error
 	if err != nil {
 		return deliverySub{}, fmt.Errorf("warren: consumer resume: %w", wrapAMQPError(err))
 	}
-	out := c.startPump(ctx, deliveries, live.closeCh, live.cancelCh, live.closeDone)
+	out := c.startPump(c.runCtx, deliveries, live.closeCh, live.cancelCh, live.closeDone)
 	return deliverySub{ch: out, done: live.done}, nil
 }
 
