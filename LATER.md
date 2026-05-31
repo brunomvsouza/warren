@@ -63,20 +63,16 @@ error. The two-wrap step (`%w: %w`) must be preserved so `errors.Is`/`AMQPCode` 
 
 <!-- LATER-03 resolved: commit 7d4dde9 (test(codec): improve fuzz coverage for lax and strict JSON codecs) -->
 
-<!-- LATER-08 resolved: SHA-pinned every third-party action (checkout, setup-go, golangci-lint-action, upload-artifact, github-script) to its commit SHA with a version comment across ci.yml/bench.yml/release.yml, and pinned benchstat off @latest (Phase 9 /review I6). -->
+<!-- LATER-08 resolved: commit 57d25e4 (ci: SHA-pin third-party actions and benchstat) — every third-party action pinned to its commit SHA with a version comment across ci.yml/bench.yml/release.yml, and benchstat pinned off @latest (Phase 9 /review I6). -->
 
-<!-- LATER-09 resolved: ci.yml pins the golangci-lint binary to `version: v2.12` (no longer `latest`). -->
+<!-- LATER-09 resolved: commit 1a2f2ad (ci: bump GitHub Actions versions) — golangci-lint binary pinned to `version: v2.12` (no longer `latest`). -->
 
 ---
 
 ### LATER-10 — RabbitMQ image on a floating tag in the integration CI
 
 **Context:** `.github/workflows/ci.yml:43` — `rabbitmq:3-management` is a mutable tag on Docker Hub.
-A malicious push to the tag could inject a compromised image that runs on the CI runner. (Largely
-addressed since: the integration lane now builds a pinned, plugin-enabled image from
-`Dockerfile.rabbitmq-delayed` via `docker-compose.integration.yml` rather than pulling the floating
-tag — kept open until the base `FROM` is pinned to a digest rather than the `3.13-management` minor
-tag.)
+A malicious push to the tag could inject a compromised image that runs on the CI runner.
 
 **Impact:** Non-reproducible CI; integration tests can break on a broker behavior change with no
 warning; theoretical supply-chain risk.
