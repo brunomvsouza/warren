@@ -1,0 +1,20 @@
+[
+  {
+    "name": "rmq0",
+    "listen": "0.0.0.0:5672",
+    "upstream": "rmq0:5672",
+    "enabled": true
+  },
+  {
+    "name": "rmq1",
+    "listen": "0.0.0.0:5673",
+    "upstream": "rmq1:5672",
+    "enabled": true
+  },
+  {
+    "name": "rmq2",
+    "listen": "0.0.0.0:5674",
+    "upstream": "rmq2:5672",
+    "enabled": true
+  }
+]

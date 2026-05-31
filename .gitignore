@@ -7,6 +7,9 @@
 coverage.out
 coverage.html
 coverage.txt
+cluster.log
+integration.log
+conformance.log
 
 # Vendor
 vendor/

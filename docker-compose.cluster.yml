@@ -1,0 +1,97 @@
+# Three-node RabbitMQ quorum cluster + a Toxiproxy control plane for warren's
+# `cluster` build-tag lane (Phase 9.5 / T166a). This is the half of the §9
+# reliability claims a single-node broker cannot prove: quorum leader failover,
+# SingleActiveConsumer failover on real node death, multi-node WithAddrs rotation,
+# partition handling, and mixed-version rolling upgrade.
+#
+# Bring it up with `make cluster-up` (waits until every node is healthy) and tear
+# it down with `make cluster-down`. `make test-cluster` then points
+# WARREN_CLUSTER_NODES / WARREN_CLUSTER_MGMT / WARREN_TOXIPROXY_URL at it.
+#
+# Topology:
+#   rmq0/rmq1/rmq2  — RabbitMQ nodes, clustered via classic_config peer discovery
+#                     (see cluster/rabbitmq.conf), default queue type quorum,
+#                     cluster_partition_handling=pause_minority.
+#   toxiproxy       — a single Toxiproxy instance hosting one proxy per node
+#                     (rmq0/rmq1/rmq2), each fronting that node's AMQP 5672 port.
+#                     A single control API (port 8474, WARREN_TOXIPROXY_URL) drives
+#                     all three proxies, which is why the env var is singular even
+#                     though every node's AMQP port is independently fronted.
+#
+# Tests dial the Toxiproxy-fronted ports (host 5680/5681/5682), never the brokers'
+# own 5672 directly, so the control toolkit (T166b) can cut/heal a node's AMQP
+# connectivity without the client knowing the proxy is in the path. The management
+# API (rmq0, host 15672) and inter-node Erlang distribution stay on the internal
+# network.
+#
+# All published host ports bind to 127.0.0.1, not 0.0.0.0: the brokers run with
+# guest:guest + loopback_users=none and the Toxiproxy control API is unauthenticated,
+# so binding to all interfaces would expose a throwaway cluster to the LAN whenever a
+# developer runs `make cluster-up` on an untrusted network. The lane only needs
+# localhost; a standing remote environment (LATER-49) must widen the binding itself.
+
+x-rabbitmq: &rabbitmq-base
+  # Pinned to a specific 3.13 patch (not the floating 3.13-management tag) so the
+  # cluster lane is reproducible; T166g adds a 4.x member for the rolling-upgrade
+  # campaign.
+  image: rabbitmq:3.13.7-management
+  environment:
+    # A shared Erlang cookie is what lets the three nodes authenticate to each
+    # other and form a cluster. Fixed value — this is a throwaway test cluster.
+    RABBITMQ_ERLANG_COOKIE: warren-cluster-cookie
+  volumes:
+    - ./cluster/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+  healthcheck:
+    # check_running confirms the node booted and joined; check_port_connectivity
+    # confirms the AMQP listener is accepting. CMD-SHELL (not exec form) so the &&
+    # is interpreted by a shell. `make cluster-up` (--wait) blocks on this going
+    # healthy on every node.
+    test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_port_connectivity"]
+    interval: 10s
+    timeout: 10s
+    retries: 12
+    start_period: 30s
+
+services:
+  rmq0:
+    <<: *rabbitmq-base
+    hostname: rmq0
+    container_name: warren-rmq0
+    ports:
+      # Management UI/API for cluster-wide queries (queue leader/members). Any node
+      # answers cluster-wide; rmq0 is the documented WARREN_CLUSTER_MGMT target.
+      # Bound to 127.0.0.1 (see the all-interfaces note in the header).
+      - "127.0.0.1:15672:15672"
+
+  rmq1:
+    <<: *rabbitmq-base
+    hostname: rmq1
+    container_name: warren-rmq1
+
+  rmq2:
+    <<: *rabbitmq-base
+    hostname: rmq2
+    container_name: warren-rmq2
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.11.0
+    container_name: warren-toxiproxy
+    command: ["-host=0.0.0.0", "-config=/toxiproxy.json"]
+    volumes:
+      - ./cluster/toxiproxy.json:/toxiproxy.json:ro
+    ports:
+      # All bound to 127.0.0.1: the lane dials localhost, and the Toxiproxy control
+      # API (8474) is unauthenticated, so publishing on 0.0.0.0 would expose the
+      # brokers (guest:guest, loopback_users=none) and the proxy control plane to the
+      # LAN. A standing remote environment (LATER-49) must opt into wider binding.
+      - "127.0.0.1:8474:8474"   # Toxiproxy control API (WARREN_TOXIPROXY_URL)
+      - "127.0.0.1:5680:5672"   # -> rmq0 AMQP via proxy "rmq0"
+      - "127.0.0.1:5681:5673"   # -> rmq1 AMQP via proxy "rmq1"
+      - "127.0.0.1:5682:5674"   # -> rmq2 AMQP via proxy "rmq2"
+    depends_on:
+      rmq0:
+        condition: service_healthy
+      rmq1:
+        condition: service_healthy
+      rmq2:
+        condition: service_healthy
