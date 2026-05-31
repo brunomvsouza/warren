@@ -1105,6 +1105,8 @@ func ConsumerFor[M any](conn *Connection) *ConsumerBuilder[M]
 
 func (c *Consumer[M]) Consume(ctx context.Context, h Handler[M]) error
 func (c *Consumer[M]) ConsumeRaw(ctx context.Context, h RawHandler[M]) error
+func (c *Consumer[M]) Pause(ctx context.Context) error  // local basic.cancel; stops broker delivery without closing the channel
+func (c *Consumer[M]) Resume(ctx context.Context) error // re-issues basic.consume on the same channel
 func (c *Consumer[M]) Health(ctx context.Context) (*ConsumerHealth, error) // (nil, err) when the connection is unhealthy
 func (c *Consumer[M]) Close(ctx context.Context) error  // drains in-flight
 
@@ -1410,6 +1412,46 @@ consumer is forced off). The library:
 A leaked queue deletion (e.g. operator typo) is a real production
 incident; a silently dying consumer is worse. Always wire `OnCancel`
 in production code.
+
+#### Draining API & liveness probes — `Pause` / `Resume` / `Health`
+
+`Pause(ctx)` issues a **local** `basic.cancel` so the broker stops
+delivering to this consumer, **without closing the channel**. In-flight
+handlers and their acks on that channel are unaffected — RabbitMQ
+flushes already-prefetched deliveries to the client before the
+delivery stream ends — and subsequent messages stay on the queue. This
+is the graceful-drain primitive for a Kubernetes `preStop` hook: pause,
+let in-flight work finish, then `Close`. Unlike a broker-initiated
+`basic.cancel`, a local pause does **not** surface `ErrConsumerCancelled`
+and does **not** end `Consume`; the consumer goroutine parks until
+`Resume`.
+
+`Resume(ctx)` re-issues `basic.consume` on the **same** channel,
+handing the running loop a fresh subscription. Both calls are
+idempotent (a second `Pause` while paused, or `Resume` while not paused,
+is a no-op) and both return `ErrInvalidOptions` before `Consume`/
+`ConsumeRaw` has started and `ErrAlreadyClosed` after `Close`. A TCP
+reconnect during a pause re-subscribes via the normal reconnect barrier;
+the pause flag is per-consumer in-process state and is not re-applied
+after a reconnect — re-call `Pause` if a drained state must survive a
+reconnect.
+
+`Health(ctx)` returns `(*ConsumerHealth, error)`. The pinned-connection
+liveness check is the gate: on a connection error it returns
+`(nil, err)`, since a zeroed snapshot alongside an error would mislead a
+probe. When the connection is healthy it returns a populated
+`*ConsumerHealth`:
+
+- `Active` — started, not closed, not paused (i.e. it is, or should be,
+  receiving deliveries).
+- `Paused` — between `Pause` and `Resume`.
+- `LastDeliveryAt` — receipt time of the most recent delivery (the zero
+  `Time` if none yet). A `LastDeliveryAt` that stops advancing on a queue
+  that should be busy is a liveness signal.
+- `InFlightHandlers` — handler invocations currently executing.
+
+`snapshot()` performs no I/O, so a readiness/liveness HTTP handler may
+call `Health` concurrently with `Consume`.
 
 #### `AutoAck()` — warning
 

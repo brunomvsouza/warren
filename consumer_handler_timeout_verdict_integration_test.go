@@ -43,6 +43,10 @@ func (s *spyConsumerMetrics) RecordReplierDropNoDLX(_ string)    {}
 func (s *spyConsumerMetrics) RecordCancelled(_, _ string)        {}
 func (s *spyConsumerMetrics) RecordMaxRedeliveries(_, _ string)  {}
 func (s *spyConsumerMetrics) InFlightBytesAdd(_ string, _ int64) {}
+func (s *spyConsumerMetrics) SetQueueDepth(_ string, _ int64)    {}
+func (s *spyConsumerMetrics) SetDLQDepth(_ string, _ int64)      {}
+func (s *spyConsumerMetrics) DeleteQueueDepth(_ string)          {}
+func (s *spyConsumerMetrics) DeleteDLQDepth(_ string)            {}
 
 func (s *spyConsumerMetrics) outcomes() []string {
 	s.mu.Lock()

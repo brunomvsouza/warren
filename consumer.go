@@ -337,6 +337,39 @@ type Consumer[M any] struct {
 	// paused is true between Pause and Resume; surfaced as ConsumerHealth.Paused and
 	// read by the delivery pump to keep in-flight handlers alive across a local cancel.
 	paused atomic.Bool
+
+	// pauseMu serializes Pause/Resume and guards live. live holds the current
+	// physical-channel handle so Pause can issue a local basic.cancel and Resume can
+	// re-issue basic.consume on the same channel without reopening it (T53).
+	pauseMu sync.Mutex
+	live    *liveSub
+
+	// resubCh carries replacement subscriptions from the reconnect hook and from
+	// Resume into runConsume's loop. runConsume creates it (buffered, size 1) when
+	// nil; tests may pre-set it to drive Resume without a running loop.
+	resubCh chan deliverySub
+}
+
+// subChannel is the subset of *amqp091.Channel that the subscription lifecycle
+// needs after the channel is open: re-subscribe via Consume and locally cancel via
+// Cancel. Narrowing to an interface lets Pause/Resume be unit-tested with a fake
+// (T53).
+type subChannel interface {
+	Consume(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp091.Table) (<-chan amqp091.Delivery, error)
+	Cancel(consumer string, noWait bool) error
+}
+
+// liveSub holds the per-physical-channel state shared across a Pause/Resume cycle.
+// closeCh/cancelCh/done are registered once per physical channel and reused by every
+// pump, so a Pause/Resume cycle re-issues basic.consume on the same channel rather
+// than reopening it (preserving in-flight acks) and does not re-register notify
+// listeners on each cycle.
+type liveSub struct {
+	ch        subChannel
+	closeCh   <-chan *amqp091.Error
+	cancelCh  <-chan string
+	done      chan struct{}
+	closeDone func() // closes done exactly once (the physical channel died)
 }
 
 func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
@@ -791,8 +824,13 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 		c.cancelReasonCh = make(chan string, 1)
 	}
 
-	// resubCh carries replacement subscriptions produced by the reconnect hook.
-	resubCh := make(chan deliverySub, 1)
+	// resubCh carries replacement subscriptions produced by the reconnect hook and
+	// by Resume. Created here (unless a test pre-set it) so both producers and this
+	// loop share one channel.
+	if c.resubCh == nil {
+		c.resubCh = make(chan deliverySub, 1)
+	}
+	resubCh := c.resubCh
 
 	c.mc.registerHook(func(hookCtx context.Context) error {
 		jitter := time.Duration(50+rand.IntN(201)) * time.Millisecond //nolint:gosec // non-crypto jitter
@@ -943,7 +981,6 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 		return deliverySub{}, fmt.Errorf("warren: consumer subscribe: %w", wrapAMQPError(err))
 	}
 
-	out := make(chan amqp091.Delivery, int(c.prefetch)) //nolint:gosec // G115: prefetch bounded
 	closeCh := ch.NotifyClose(make(chan *amqp091.Error, 1))
 	cancelCh := ch.NotifyCancel(make(chan string, 1))
 
@@ -954,6 +991,23 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 	var onceDone sync.Once
 	closeChannelDone := func() { onceDone.Do(func() { close(channelDone) }) }
 
+	// Record the physical-channel state so Pause/Resume can drive this channel (T53).
+	c.pauseMu.Lock()
+	c.live = &liveSub{ch: ch, closeCh: closeCh, cancelCh: cancelCh, done: channelDone, closeDone: closeChannelDone}
+	c.pauseMu.Unlock()
+
+	out := c.startPump(ctx, deliveries, closeCh, cancelCh, closeChannelDone)
+	return deliverySub{ch: out, done: channelDone}, nil
+}
+
+// startPump launches the goroutine that fans one basic.consume's deliveries onto
+// the returned out channel, watching the physical channel's close/cancel
+// notifications. closeChannelDone fires (once) when the physical channel dies —
+// but NOT on a graceful local cancel (Pause): leaving channelDone open lets
+// in-flight handlers from this channel run to completion across a Pause/Resume
+// cycle. Reused by both the initial/reconnect subscribe and Resume.
+func (c *Consumer[M]) startPump(ctx context.Context, deliveries <-chan amqp091.Delivery, closeCh <-chan *amqp091.Error, cancelCh <-chan string, closeChannelDone func()) chan amqp091.Delivery {
+	out := make(chan amqp091.Delivery, int(c.prefetch)) //nolint:gosec // G115: prefetch bounded
 	go func() {
 		defer close(out)
 		for {
@@ -973,7 +1027,13 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 						}
 					default:
 					}
-					closeChannelDone()
+					// A graceful local cancel (Pause) ends this delivery stream without
+					// killing in-flight handlers: skip closeChannelDone so dispatch
+					// goroutines keep their live handler contexts and Resume can
+					// re-subscribe on the same channel.
+					if !c.paused.Load() {
+						closeChannelDone()
+					}
 					return
 				}
 				select {
@@ -1003,8 +1063,7 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 			}
 		}
 	}()
-
-	return deliverySub{ch: out, done: channelDone}, nil
+	return out
 }
 
 // dispatch decodes and handles a single delivery.
@@ -1433,6 +1492,94 @@ func (c *Consumer[M]) Health(ctx context.Context) (*ConsumerHealth, error) {
 	}
 	snap := c.snapshot()
 	return &snap, nil
+}
+
+// Pause issues a local basic.cancel so the broker stops delivering to this
+// consumer, without closing the channel — in-flight handlers and their acks on
+// that channel are unaffected, and the broker holds subsequent messages on the
+// queue. Use it for graceful draining (e.g. a Kubernetes preStop hook) ahead of
+// Close. Pause is idempotent: a second call while paused is a no-op. It errors
+// before Consume/ConsumeRaw has started or after Close. Resume undoes it (T53).
+func (c *Consumer[M]) Pause(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !c.started.Load() {
+		return fmt.Errorf("%w: Pause before Consume/ConsumeRaw", ErrInvalidOptions)
+	}
+	if c.isClosed() {
+		return ErrAlreadyClosed
+	}
+
+	c.pauseMu.Lock()
+	defer c.pauseMu.Unlock()
+	if c.paused.Load() {
+		return nil
+	}
+	if c.live == nil {
+		return fmt.Errorf("%w: no live subscription to pause", ErrReconnecting)
+	}
+	// Mark paused before cancelling so the pump leaves channelDone open when the
+	// delivery stream ends, keeping in-flight handlers alive.
+	c.paused.Store(true)
+	if err := c.live.ch.Cancel(c.tag, false); err != nil {
+		c.paused.Store(false)
+		return fmt.Errorf("warren: consumer pause: %w", wrapAMQPError(err))
+	}
+	return nil
+}
+
+// Resume re-issues basic.consume on the consumer's existing channel after a
+// Pause, handing the running loop a fresh subscription. It is idempotent: a call
+// while not paused is a no-op. It errors before Consume/ConsumeRaw has started or
+// after Close (T53).
+func (c *Consumer[M]) Resume(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !c.started.Load() {
+		return fmt.Errorf("%w: Resume before Consume/ConsumeRaw", ErrInvalidOptions)
+	}
+	if c.isClosed() {
+		return ErrAlreadyClosed
+	}
+
+	c.pauseMu.Lock()
+	defer c.pauseMu.Unlock()
+	if !c.paused.Load() {
+		return nil
+	}
+	sub, err := c.resubscribeLocked(ctx)
+	if err != nil {
+		return err
+	}
+	select {
+	case c.resubCh <- sub:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	c.paused.Store(false)
+	return nil
+}
+
+// resubscribeLocked re-issues basic.consume on the live channel and starts a fresh
+// pump, reusing the channel's close/cancel notifications and done signal so the
+// physical channel (and its in-flight acks) is preserved. Caller holds pauseMu.
+func (c *Consumer[M]) resubscribeLocked(ctx context.Context) (deliverySub, error) {
+	live := c.live
+	if live == nil {
+		return deliverySub{}, fmt.Errorf("%w: no live subscription to resume", ErrReconnecting)
+	}
+	// Rotate counter B state, mirroring openDeliveryCh: a fresh subscription resets
+	// in-process redelivery counts.
+	c.counterState.Store(&redeliveryCounter{})
+	args := buildConsumeArgs(c.consumeArgs, c.prioritySet, c.priority)
+	deliveries, err := live.ch.Consume(c.queue, c.tag, c.brokerAutoAck, c.exclusive, false, false, args)
+	if err != nil {
+		return deliverySub{}, fmt.Errorf("warren: consumer resume: %w", wrapAMQPError(err))
+	}
+	out := c.startPump(ctx, deliveries, live.closeCh, live.cancelCh, live.closeDone)
+	return deliverySub{ch: out, done: live.done}, nil
 }
 
 // Close signals the consumer to stop accepting new deliveries.
