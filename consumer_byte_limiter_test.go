@@ -147,3 +147,97 @@ func TestConsumer_Dispatch_EmitsInFlightBytesGauge(t *testing.T) {
 		time.Second, 10*time.Millisecond,
 		"gauge must return to zero after the handler completes")
 }
+
+// TestConsumer_Dispatch_InFlightBytesGauge_ReturnsToZeroOnPanic proves the gauge
+// decrement + limiter release run even when the handler panics: they sit in the
+// dispatch goroutine's defer (runConsume), and safeCallHandler recovers the panic
+// into a nack verdict, so neither leaks the reserved bytes (T50).
+func TestConsumer_Dispatch_InFlightBytesGauge_ReturnsToZeroOnPanic(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	cm := &countingConsumerMetrics{}
+	consumer, err := ConsumerFor[string](conn).Queue("q").Metrics(cm).Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	panicked := make(chan struct{})
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = consumer.Consume(ctx, func(context.Context, string) error {
+			close(panicked)
+			panic("boom") // recovered by safeCallHandler → nack verdict
+		})
+	}()
+
+	body := []byte(`"twelve-bytes"`)
+	deliveryCh <- amqp091.Delivery{Body: body, Acknowledger: &fakeAcknowledger{}}
+
+	<-panicked
+	assert.Equal(t, int64(len(body)), cm.inFlightBytesPeak.Load(),
+		"peak gauge must have reached the body size while the handler ran")
+	assert.Eventually(t, func() bool { return cm.inFlightBytesCur.Load() == 0 },
+		time.Second, 10*time.Millisecond,
+		"gauge must return to zero after a panicking handler is recovered")
+
+	cancel()
+	<-consumeDone
+}
+
+// TestConsumer_Dispatch_InFlightBytesGauge_ReturnsToZeroOnChannelClose proves the
+// gauge decrement + limiter release run when the AMQP channel closes mid-handler
+// (the abort path takes <-chanDone, not a normal verdict), so the reserved bytes are
+// freed on every dispatch exit path (T50).
+func TestConsumer_Dispatch_InFlightBytesGauge_ReturnsToZeroOnChannelClose(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	cm := &countingConsumerMetrics{}
+	consumer, err := ConsumerFor[string](conn).
+		Queue("q").
+		HandlerTimeout(5 * time.Second). // long: must not fire before doneCh
+		Metrics(cm).
+		Build()
+	require.NoError(t, err)
+
+	doneCh := make(chan struct{})
+	deliveryCh := make(chan amqp091.Delivery, 1)
+	consumer.deliverySubOverride = &deliverySub{ch: deliveryCh, done: doneCh}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handlerStarted := make(chan struct{})
+	handlerUnblocked := make(chan struct{})
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = consumer.Consume(ctx, func(hCtx context.Context, _ string) error {
+			close(handlerStarted)
+			<-hCtx.Done() // unblocks only via dispatch's cancelCause(ErrChannelClosed)
+			close(handlerUnblocked)
+			return hCtx.Err()
+		})
+	}()
+
+	body := []byte(`"twelve-bytes"`)
+	deliveryCh <- amqp091.Delivery{Body: body, Acknowledger: &fakeAcknowledger{}}
+
+	<-handlerStarted
+	assert.Equal(t, int64(len(body)), cm.inFlightBytesCur.Load(),
+		"gauge must equal the in-flight body size while the handler runs")
+	close(doneCh) // channel closed mid-handler → dispatch takes the <-chanDone abort branch
+	<-handlerUnblocked
+	cancel()
+	<-consumeDone
+
+	assert.Eventually(t, func() bool { return cm.inFlightBytesCur.Load() == 0 },
+		time.Second, 10*time.Millisecond,
+		"gauge must return to zero after a channel-closed-mid-handler abort")
+}

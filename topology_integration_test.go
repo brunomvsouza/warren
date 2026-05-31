@@ -356,6 +356,98 @@ func TestTopology_Declare_dlxRoutesToDLQ_integration(t *testing.T) {
 	assert.Equal(t, body, got, "DLQ must receive the original dead-lettered payload")
 }
 
+// TestTopology_Declare_directDLXRoutesToDLQ_integration is the end-to-end proof for
+// the T47 routing-key fix on a *direct* DLX. On a direct exchange "#" is a literal
+// routing key, not the topic wildcard, so the old always-"#" binding silently failed
+// to route dead-letters here. With DeadLetter.RoutingKey set, dead-lettered messages
+// are rewritten to that key and the DLQ is bound on it — so they must actually arrive.
+func TestTopology_Declare_directDLXRoutesToDLQ_integration(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	url := amqpTestURL(t)
+	ctx := context.Background()
+
+	const (
+		srcQ = "test.dlx.direct.src"
+		dlqQ = "test.dlx.direct.src.dlq"
+		dlx  = "test.dlx.direct.ex"
+		dlrk = "dead"
+	)
+	purgeQueues(t, url, srcQ, dlqQ)
+	t.Cleanup(func() {
+		deleteQueues(url, srcQ, dlqQ)
+		deleteExchanges(url, dlx)
+	})
+
+	conn, err := warren.Dial(ctx, warren.WithAddr(url))
+	require.NoError(t, err)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	}()
+
+	// User-declared DIRECT DLX (not the auto-created topic one) + a dead-letter
+	// routing key. The DLQ is auto-created and must be bound on dlrk, not "#".
+	topo := &warren.Topology{
+		Exchanges: []warren.Exchange{
+			{Name: dlx, Kind: warren.ExchangeDirect, Durable: false},
+		},
+		Queues: []warren.Queue{
+			{Name: srcQ, Durable: false},
+		},
+		DeadLetters: []warren.DeadLetter{
+			{Source: srcQ, Exchange: dlx, RoutingKey: dlrk},
+		},
+	}
+	require.NoError(t, topo.Declare(ctx, conn))
+
+	pub, err := warren.PublisherFor[string](conn).RoutingKey(srcQ).Build()
+	require.NoError(t, err)
+	body := "dead-letter-me-direct"
+	require.NoError(t, pub.Publish(ctx, warren.Message[string]{Body: &body}))
+
+	// Source consumer nacks-without-requeue → broker dead-letters to the direct DLX
+	// with the routing key rewritten to dlrk.
+	srcConsumer, err := warren.ConsumerFor[string](conn).Queue(srcQ).Prefetch(1).Build()
+	require.NoError(t, err)
+	srcCtx, srcCancel := context.WithCancel(ctx)
+	srcDone := make(chan struct{})
+	go func() {
+		defer close(srcDone)
+		_ = srcConsumer.Consume(srcCtx, func(_ context.Context, _ string) error {
+			defer srcCancel()
+			return warren.ErrPoison
+		})
+	}()
+	select {
+	case <-srcDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("source consumer did not process the message")
+	}
+
+	// The dead-lettered message must arrive in the DLQ via the direct DLX bound on dlrk.
+	dlqConsumer, err := warren.ConsumerFor[string](conn).Queue(dlqQ).Prefetch(1).Build()
+	require.NoError(t, err)
+	dlqCtx, dlqCancel := context.WithCancel(ctx)
+	dlqDone := make(chan struct{})
+	var got string
+	go func() {
+		defer close(dlqDone)
+		_ = dlqConsumer.Consume(dlqCtx, func(_ context.Context, m string) error {
+			got = m
+			dlqCancel()
+			return nil
+		})
+	}()
+	select {
+	case <-dlqDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dead-lettered message did not arrive in the DLQ via the direct DLX (routing-key binding broken)")
+	}
+	assert.Equal(t, body, got, "DLQ must receive the original dead-lettered payload")
+}
+
 func TestTopology_Declare_quorumWithDeliveryLimit_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
