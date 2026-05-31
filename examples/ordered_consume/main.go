@@ -173,10 +173,11 @@ func run() error {
 				}
 				return nil
 			}
-			switch tracker.accept(e.Seq) {
+			result, want := tracker.accept(e.Seq)
+			switch result {
 			case acceptOutOfOrder:
 				return fmt.Errorf("%s: out-of-order delivery: got seq=%d want=%d",
-					name, e.Seq, tracker.want())
+					name, e.Seq, want)
 			case acceptDuplicate:
 				log.Printf("%s: duplicate seq=%d at handoff → ack & skip", name, e.Seq)
 				return nil // ack; the standby re-received an in-flight message
@@ -353,19 +354,22 @@ type orderTracker struct {
 	order    []int // the accepted sequence, in acceptance order
 }
 
-func (t *orderTracker) accept(seq int) acceptResult {
+// accept records seq when it is the next expected value. It returns the verdict
+// plus the sequence number expected at decision time, so an out-of-order caller
+// can report `want` without re-locking the mutex accept just released.
+func (t *orderTracker) accept(seq int) (acceptResult, int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, ok := t.seen[seq]; ok {
-		return acceptDuplicate
+		return acceptDuplicate, t.nextWant
 	}
 	if seq != t.nextWant {
-		return acceptOutOfOrder
+		return acceptOutOfOrder, t.nextWant
 	}
 	t.seen[seq] = struct{}{}
 	t.order = append(t.order, seq)
 	t.nextWant++
-	return acceptNew
+	return acceptNew, t.nextWant
 }
 
 func (t *orderTracker) want() int {

@@ -30,6 +30,9 @@ func amqpTestURL(t *testing.T) string {
 // trace, and the consume span is a child of the publish span (printed by the
 // example after its in-process assertion passes).
 func TestOTelExample_integration(t *testing.T) {
+	// goleak covers THIS test process only — the example runs as a `go run .`
+	// subprocess (below), so its goroutines are out of goleak's reach. This guards
+	// the test harness itself, matching the qualifier on the other example tests.
 	defer goleak.VerifyNone(t)
 
 	url := amqpTestURL(t)

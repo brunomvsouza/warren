@@ -52,9 +52,16 @@ type Order struct {
 }
 
 const (
-	exchange       = "warren.examples.idem"
-	queue          = "warren.examples.idem.orders"
-	routingKey     = "order.created"
+	exchange   = "warren.examples.idem"
+	queue      = "warren.examples.idem.orders"
+	routingKey = "order.created"
+	// Cache sizing (production note): the cache must retain every MessageID for
+	// as long as a duplicate of it could still arrive, so size capacity ≳ peak
+	// throughput(msg/s) × dedupe-window(s) and set cacheTTL to cover the longest
+	// expected redelivery/outage gap. If capacity is too small, LRU evicts an
+	// entry before its duplicate arrives and that redelivery is reprocessed; if
+	// cacheTTL is shorter than the redelivery gap, the same happens on expiry.
+	// 10k / 15min suits this example's volume.
 	cacheCapacity  = 10_000           // bounded entry count (LRU eviction past this)
 	cacheTTL       = 15 * time.Minute // per-entry expiry
 	exampleTimeout = 60 * time.Second
