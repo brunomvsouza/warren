@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/brunomvsouza/warren/log"
 	"github.com/brunomvsouza/warren/metrics"
 )
 
@@ -94,6 +95,43 @@ func newInspectConn(t *testing.T, ch *fakeInspectChannel) *managedConn {
 	mc := &managedConn{opts: &conn.opts}
 	mc.chanFactory = func() (topologyChannel, error) { return ch, nil }
 	return mc
+}
+
+// enumAssertingMetrics fails the test if RecordCancelled ever receives a reason
+// outside the bounded cancel-reason vocabulary — a regression guard locking the
+// Prometheus-cardinality invariant (the unbounded consumer tag must never become a
+// metric label).
+type enumAssertingMetrics struct {
+	metrics.NoOpConsumerMetrics
+	t   *testing.T
+	got string
+}
+
+func (m *enumAssertingMetrics) RecordCancelled(_, reason string) {
+	switch reason {
+	case cancelReasonQueueDeleted, cancelReasonExclusiveRevoked, cancelReasonUnknown:
+	default:
+		m.t.Errorf("RecordCancelled got out-of-enum reason %q (cardinality invariant violated)", reason)
+	}
+	m.got = reason
+}
+
+func TestSurfaceBrokerCancel_RecordsBoundedClassNotTag(t *testing.T) {
+	// surfaceBrokerCancel must record the bounded class on the metric and surface the
+	// unbounded tag only on the callback / wrapped error — never let the tag reach the
+	// metric label (cardinality DoS). Drive every enum value plus a deliberately
+	// tag-shaped string through a strict sink.
+	for _, class := range []string{cancelReasonQueueDeleted, cancelReasonExclusiveRevoked, cancelReasonUnknown} {
+		cm := &enumAssertingMetrics{t: t}
+		bc := brokerCancel{tag: "ctag-0193abcd-7f00-7000-8000-000000000001", class: class}
+
+		err := surfaceBrokerCancel(nil, log.NewNoOp(), cm, "orders", bc)
+
+		require.ErrorIs(t, err, ErrConsumerCancelled)
+		assert.Contains(t, err.Error(), bc.tag, "the wrapped error must carry the unbounded consumer tag")
+		assert.Equal(t, class, cm.got, "metric must record the bounded class verbatim")
+		assert.NotEqual(t, bc.tag, cm.got, "metric must never receive the unbounded tag")
+	}
 }
 
 func TestClassifyBrokerCancel_QueueDeleted(t *testing.T) {
