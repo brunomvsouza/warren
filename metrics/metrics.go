@@ -88,6 +88,8 @@ type PublisherMetrics interface {
 //   - consumer_max_redeliveries_total{queue,cause}
 //   - replier_drop_no_dlx_total{queue}
 //   - consumer_inflight_bytes{queue}
+//   - queue_depth{queue}
+//   - dlq_depth{dlq}
 type ConsumerMetrics interface {
 	// RecordResubscribed increments the resubscription counter after a reconnect.
 	RecordResubscribed(queue string)
@@ -119,4 +121,11 @@ type ConsumerMetrics interface {
 	// in-flight memory guardrail, T50): +len(body) when a delivery is dispatched,
 	// -len(body) when its handler returns.
 	InFlightBytesAdd(queue string, delta int64)
+	// SetQueueDepth sets the queue_depth{queue} gauge to the broker-side message
+	// backlog of the consumer's source queue, sampled by WithQueueDepthSampler (T52).
+	SetQueueDepth(queue string, depth int64)
+	// SetDLQDepth sets the dlq_depth{dlq} gauge to the broker-side message backlog of
+	// the consumer's conventional "<queue>.dlq" dead-letter queue, sampled by
+	// WithQueueDepthSampler (T52). Emitted only when that DLQ exists.
+	SetDLQDepth(dlq string, depth int64)
 }

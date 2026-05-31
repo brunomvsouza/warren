@@ -306,6 +306,8 @@ func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
 	m.RecordCancelled("orders", "queue_deleted")
 	m.RecordMaxRedeliveries("orders", "x-death")
 	m.InFlightBytesAdd("orders", 4096)
+	m.SetQueueDepth("orders", 12)
+	m.SetDLQDepth("orders.dlq", 3)
 
 	names := gatherNames(t, reg)
 	assert.Contains(t, names, "consumer_resubscribed_total")
@@ -316,6 +318,47 @@ func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
 	assert.Contains(t, names, "consumer_cancelled_total")
 	assert.Contains(t, names, "consumer_max_redeliveries_total")
 	assert.Contains(t, names, "consumer_inflight_bytes")
+	assert.Contains(t, names, "queue_depth")
+	assert.Contains(t, names, "dlq_depth")
+}
+
+func TestPrometheusConsumerMetrics_depthGauges(t *testing.T) {
+	// SetQueueDepth/SetDLQDepth are absolute gauges: the last value set wins, under
+	// their own label key (queue vs dlq).
+	reg := prometheus.NewRegistry()
+	m, err := metrics.NewPrometheusConsumerMetrics(reg, nil)
+	require.NoError(t, err)
+
+	m.SetQueueDepth("orders", 100)
+	m.SetQueueDepth("orders", 42) // last-set wins
+	m.SetDLQDepth("orders.dlq", 7)
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+
+	gaugeValue := func(metricName, labelName, labelValue string) (float64, bool) {
+		for _, mf := range mfs {
+			if mf.GetName() != metricName {
+				continue
+			}
+			for _, metric := range mf.GetMetric() {
+				for _, lp := range metric.GetLabel() {
+					if lp.GetName() == labelName && lp.GetValue() == labelValue {
+						return metric.GetGauge().GetValue(), true
+					}
+				}
+			}
+		}
+		return 0, false
+	}
+
+	qd, ok := gaugeValue("queue_depth", "queue", "orders")
+	require.True(t, ok, "queue_depth{queue=orders} not found")
+	assert.Equal(t, float64(42), qd, "gauge must reflect the last value set")
+
+	dd, ok := gaugeValue("dlq_depth", "dlq", "orders.dlq")
+	require.True(t, ok, "dlq_depth{dlq=orders.dlq} not found")
+	assert.Equal(t, float64(7), dd)
 }
 
 func TestPrometheusConsumerMetrics_inFlightBytesGauge(t *testing.T) {
@@ -466,6 +509,8 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		conm.RecordCancelled("orders", "queue_deleted")
 		conm.RecordMaxRedeliveries("orders", "x-death")
 		conm.InFlightBytesAdd("orders", int64(i))
+		conm.SetQueueDepth("orders", int64(i))
+		conm.SetDLQDepth("orders.dlq", int64(i))
 	}
 
 	names := gatherNames(t, reg)
@@ -486,6 +531,8 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		"consumer_cancelled_total",
 		"consumer_max_redeliveries_total",
 		"consumer_inflight_bytes",
+		"queue_depth",
+		"dlq_depth",
 	}
 	for _, name := range mandatory {
 		assert.Contains(t, names, name, "mandatory metric %q missing from gathered output", name)

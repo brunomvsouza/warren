@@ -190,6 +190,9 @@ func (m *PrometheusPublisherMetrics) RecordRateLimited(exchange string) {
 //   - consumer_cancelled_total{queue,reason}
 //   - consumer_max_redeliveries_total{queue,cause}
 //   - replier_drop_no_dlx_total{queue}
+//   - consumer_inflight_bytes{queue}
+//   - queue_depth{queue}
+//   - dlq_depth{dlq}
 type PrometheusConsumerMetrics struct {
 	resubscribedTotal    *prometheus.CounterVec
 	handlerAbortedTotal  *prometheus.CounterVec
@@ -199,6 +202,8 @@ type PrometheusConsumerMetrics struct {
 	maxRedeliveriesTotal *prometheus.CounterVec
 	replierDropNoDLX     *prometheus.CounterVec
 	inFlightBytes        *prometheus.GaugeVec
+	queueDepth           *prometheus.GaugeVec
+	dlqDepth             *prometheus.GaugeVec
 	labelMessageType     bool
 }
 
@@ -270,6 +275,14 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64, 
 			Name: "consumer_inflight_bytes",
 			Help: "Current sum of in-flight message body sizes held by running handlers.",
 		}, []string{"queue"}),
+		queueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "queue_depth",
+			Help: "Broker-side message backlog of the consumer's source queue, sampled by WithQueueDepthSampler.",
+		}, []string{"queue"}),
+		dlqDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "dlq_depth",
+			Help: "Broker-side message backlog of the consumer's <queue>.dlq dead-letter queue, sampled by WithQueueDepthSampler.",
+		}, []string{"dlq"}),
 	}
 	for _, c := range []prometheus.Collector{
 		m.resubscribedTotal,
@@ -280,6 +293,8 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64, 
 		m.maxRedeliveriesTotal,
 		m.replierDropNoDLX,
 		m.inFlightBytes,
+		m.queueDepth,
+		m.dlqDepth,
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, err
@@ -335,4 +350,14 @@ func (m *PrometheusConsumerMetrics) RecordReplierDropNoDLX(queue string) {
 // InFlightBytesAdd adjusts the consumer_inflight_bytes gauge for the given queue by delta.
 func (m *PrometheusConsumerMetrics) InFlightBytesAdd(queue string, delta int64) {
 	m.inFlightBytes.WithLabelValues(queue).Add(float64(delta))
+}
+
+// SetQueueDepth sets the queue_depth{queue} gauge to depth.
+func (m *PrometheusConsumerMetrics) SetQueueDepth(queue string, depth int64) {
+	m.queueDepth.WithLabelValues(queue).Set(float64(depth))
+}
+
+// SetDLQDepth sets the dlq_depth{dlq} gauge to depth.
+func (m *PrometheusConsumerMetrics) SetDLQDepth(dlq string, depth int64) {
+	m.dlqDepth.WithLabelValues(dlq).Set(float64(depth))
 }

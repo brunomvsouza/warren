@@ -40,6 +40,10 @@ type ConsumerBuilder[M any] struct {
 	handlerTimeout time.Duration
 	timeoutVerdict TimeoutVerdict
 
+	// depthSampleInterval is the WithQueueDepthSampler polling period (T52).
+	// 0 (the default) disables the sampler.
+	depthSampleInterval time.Duration
+
 	maxRedeliveries  int
 	counterBDisabled bool // true when quorum queue with DeliveryLimit > 0
 
@@ -94,6 +98,31 @@ func (b *ConsumerBuilder[M]) PrefetchBytes(_ uint) *ConsumerBuilder[M] { return 
 // The current reserved total is exported as the consumer_inflight_bytes{queue} gauge.
 func (b *ConsumerBuilder[M]) MaxInFlightBytes(n int64) *ConsumerBuilder[M] {
 	b.maxInFlightBytes = n
+	return b
+}
+
+// WithQueueDepthSampler enables a background goroutine that periodically reads the
+// broker-side message backlog for the consumer's source queue, and for its
+// conventional "<queue>.dlq" dead-letter queue, via a passive queue declare —
+// exporting the native queue_depth{queue} and dlq_depth{dlq} gauges. These are the
+// leading "work is piling up" / "poison is accumulating" signals that the
+// per-message handler metrics cannot show.
+//
+// interval is the polling period; interval <= 0 (the default) disables the sampler.
+// Each sample runs on its own short-lived channel per probe, so a passive declare on
+// a missing queue — which the broker answers by closing the channel — never disturbs
+// the delivery channel. The dlq_depth gauge is emitted only when "<queue>.dlq"
+// actually exists (a 404 is skipped, not reported as zero); the source queue_depth is
+// likewise skipped if the queue itself is gone. Sampling stops when the Consume /
+// ConsumeRaw context is cancelled.
+//
+// Size interval against broker load: each tick costs one or two lightweight
+// queue.declare-passive round-trips on the consumer's connection. A few seconds is
+// typical; sub-second polling on a large cluster adds avoidable broker load. The DLQ
+// name follows warren's own DeadLetter convention ("<queue>.dlq"); a DLQ under a
+// different name is not sampled.
+func (b *ConsumerBuilder[M]) WithQueueDepthSampler(interval time.Duration) *ConsumerBuilder[M] {
+	b.depthSampleInterval = interval
 	return b
 }
 

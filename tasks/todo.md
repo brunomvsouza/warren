@@ -1296,10 +1296,10 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 - **Files:** `publisher.go`, `publisher_builder.go`.
 - **Deps:** T12, T13.
 
-### [ ] T52 — Native Queue & DLQ Observability [P2] · M
+### [x] T52 — Native Queue & DLQ Observability [P2] · M
 - **Acceptance:**
-  - [ ] `Consumer[M].WithQueueDepthSampler(interval)` option.
-  - [ ] Background goroutine does `queue.declare-passive` to emit `queue_depth{queue}` and `dlq_depth{dlq}` gauges.
+  - [x] `Consumer[M].WithQueueDepthSampler(interval)` option.
+  - [x] Background goroutine does `queue.declare-passive` to emit `queue_depth{queue}` and `dlq_depth{dlq}` gauges.
 - **Verify:** Gauge metrics reflect external enqueues correctly.
 - **Files:** `consumer.go`, `consumer_builder.go`.
 - **Deps:** T18, T19.
