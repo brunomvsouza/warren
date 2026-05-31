@@ -481,6 +481,28 @@ func TestTopology_expand_dlxDoesNotDuplicateExistingBinding(t *testing.T) {
 	assert.Equal(t, 1, count, "DLX->DLQ binding must not be duplicated when already declared")
 }
 
+func TestTopology_expand_dlxDoesNotDuplicateExistingBindingWithRoutingKey(t *testing.T) {
+	// The dedup index keys on the chosen routing key, not a hardcoded "#". When the
+	// caller pre-declares the exact DLX->DLQ binding that DeadLetter.RoutingKey would
+	// produce, expand() must not append a second (duplicate) binding.
+	topo := &Topology{
+		Exchanges: []Exchange{{Name: "orders.dlx", Kind: ExchangeDirect, Durable: true}},
+		Queues:    []Queue{{Name: "orders", Durable: true}},
+		Bindings:  []Binding{{Exchange: "orders.dlx", Queue: "orders.dlq", RoutingKey: "dead"}},
+		DeadLetters: []DeadLetter{
+			{Source: "orders", Exchange: "orders.dlx", RoutingKey: "dead"},
+		},
+	}
+	expanded := topo.expand()
+	count := 0
+	for _, b := range expanded.Bindings {
+		if b.Exchange == "orders.dlx" && b.Queue == "orders.dlq" && b.RoutingKey == "dead" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "DLX->DLQ binding must not be duplicated when the same routing-key binding is already declared")
+}
+
 func TestTopology_expand_dlxDefaultExchangeName(t *testing.T) {
 	topo := &Topology{
 		Queues:      []Queue{{Name: "orders", Durable: true}},

@@ -63,6 +63,60 @@ func TestConsumer_BasicCancel_FiresOnCancelWithTag(t *testing.T) {
 	}
 }
 
+func TestConsumer_BasicCancel_OnCancelAndMetrics_BothFire(t *testing.T) {
+	// End-to-end regression guard for the brokerCancel{tag,class} refactor and the
+	// classifyCancel skip predicate (T49): with OnCancel set AND a non-NoOp metrics
+	// sink, classifyCancel must NOT skip the probe (the metric observes the class), so
+	// both side effects fire in one pass — OnCancel receives the unbounded tag and
+	// RecordCancelled receives the bounded class. The fake conn cannot run the passive
+	// probe, so the class resolves to the bounded "unknown" enum (never the tag).
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	cm := &countingConsumerMetrics{}
+	var gotTag string
+	gotCh := make(chan struct{})
+	consumer, err := ConsumerFor[string](conn).Queue("testq").
+		Metrics(cm).
+		OnCancel(func(reason string) {
+			gotTag = reason
+			close(gotCh)
+		}).
+		Build()
+	require.NoError(t, err)
+
+	cancelCh := make(chan string, 1)
+	consumer.deliveryCh = make(chan amqp091.Delivery)
+	consumer.cancelReasonCh = cancelCh
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- consumer.Consume(t.Context(), func(context.Context, string) error { return nil })
+	}()
+
+	cancelCh <- consumer.tag
+
+	select {
+	case <-gotCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnCancel was not called")
+	}
+	assert.Equal(t, consumer.tag, gotTag, "OnCancel must receive the unbounded consumer tag")
+
+	select {
+	case got := <-errCh:
+		require.ErrorIs(t, got, ErrConsumerCancelled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Consume did not return after basic.cancel")
+	}
+
+	assert.Equal(t, 1, cm.cancelled, "RecordCancelled must fire even when OnCancel is also set")
+	assert.Equal(t, "testq", cm.cancelledQueue)
+	assert.Equal(t, cancelReasonUnknown, cm.cancelledReason,
+		"metric must record the bounded class, not the unbounded tag")
+	assert.NotContains(t, cm.cancelledReason, "ctag-", "metric reason must never be the consumer tag")
+}
+
 func TestConsumer_BasicCancel_NoOnCancel_LogsWarning(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
