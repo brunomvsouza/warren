@@ -1039,6 +1039,10 @@ type countingConsumerMetrics struct {
 	cancelledReason string
 	cancelledOnce   sync.Once
 	cancelledNotify chan struct{} // closed on first RecordCancelled call; may be nil
+
+	// inFlightBytesCur/Peak track the consumer_inflight_bytes gauge (T50).
+	inFlightBytesCur  atomic.Int64
+	inFlightBytesPeak atomic.Int64
 }
 
 func (c *countingConsumerMetrics) RecordHandler(_, messageType, outcome string, _ time.Duration) {
@@ -1062,6 +1066,18 @@ func (c *countingConsumerMetrics) RecordCancelled(queue, reason string) {
 	c.cancelledReason = reason
 	if c.cancelledNotify != nil {
 		c.cancelledOnce.Do(func() { close(c.cancelledNotify) })
+	}
+}
+
+// InFlightBytesAdd tracks the current in-flight-bytes gauge value and its peak so
+// tests can assert the T50 guardrail's gauge moves up on dispatch and back to zero.
+func (c *countingConsumerMetrics) InFlightBytesAdd(_ string, delta int64) {
+	cur := c.inFlightBytesCur.Add(delta)
+	for {
+		peak := c.inFlightBytesPeak.Load()
+		if cur <= peak || c.inFlightBytesPeak.CompareAndSwap(peak, cur) {
+			break
+		}
 	}
 }
 

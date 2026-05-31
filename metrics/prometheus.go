@@ -187,6 +187,7 @@ type PrometheusConsumerMetrics struct {
 	cancelledTotal       *prometheus.CounterVec
 	maxRedeliveriesTotal *prometheus.CounterVec
 	replierDropNoDLX     *prometheus.CounterVec
+	inFlightBytes        *prometheus.GaugeVec
 	labelMessageType     bool
 }
 
@@ -254,6 +255,10 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64, 
 			Name: "replier_drop_no_dlx_total",
 			Help: "Total number of Replier messages dropped due to missing dead-letter exchange.",
 		}, []string{"queue"}),
+		inFlightBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "consumer_inflight_bytes",
+			Help: "Current sum of in-flight message body sizes held by running handlers.",
+		}, []string{"queue"}),
 	}
 	for _, c := range []prometheus.Collector{
 		m.resubscribedTotal,
@@ -263,6 +268,7 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64, 
 		m.cancelledTotal,
 		m.maxRedeliveriesTotal,
 		m.replierDropNoDLX,
+		m.inFlightBytes,
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, err
@@ -313,4 +319,9 @@ func (m *PrometheusConsumerMetrics) RecordMaxRedeliveries(queue, cause string) {
 // RecordReplierDropNoDLX increments replier_drop_no_dlx_total for the given queue.
 func (m *PrometheusConsumerMetrics) RecordReplierDropNoDLX(queue string) {
 	m.replierDropNoDLX.WithLabelValues(queue).Inc()
+}
+
+// InFlightBytesAdd adjusts the consumer_inflight_bytes gauge for the given queue by delta.
+func (m *PrometheusConsumerMetrics) InFlightBytesAdd(queue string, delta int64) {
+	m.inFlightBytes.WithLabelValues(queue).Add(float64(delta))
 }

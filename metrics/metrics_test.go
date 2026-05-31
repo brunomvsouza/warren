@@ -300,8 +300,9 @@ func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
 	m.RecordHandlerTimeout("orders")
 	m.RecordHandler("orders", "", "ack", 5*time.Millisecond)
 	m.RecordReplierDropNoDLX("requests")
-	m.RecordCancelled("orders", "broker_initiated")
+	m.RecordCancelled("orders", "queue_deleted")
 	m.RecordMaxRedeliveries("orders", "x-death")
+	m.InFlightBytesAdd("orders", 4096)
 
 	names := gatherNames(t, reg)
 	assert.Contains(t, names, "consumer_resubscribed_total")
@@ -311,6 +312,39 @@ func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
 	assert.Contains(t, names, "replier_drop_no_dlx_total")
 	assert.Contains(t, names, "consumer_cancelled_total")
 	assert.Contains(t, names, "consumer_max_redeliveries_total")
+	assert.Contains(t, names, "consumer_inflight_bytes")
+}
+
+func TestPrometheusConsumerMetrics_inFlightBytesGauge(t *testing.T) {
+	// InFlightBytesAdd is a gauge: positive deltas raise it, negative lower it,
+	// and a +n/-n pair returns it to zero.
+	reg := prometheus.NewRegistry()
+	m, err := metrics.NewPrometheusConsumerMetrics(reg, nil)
+	require.NoError(t, err)
+
+	m.InFlightBytesAdd("orders", 5000)
+	m.InFlightBytesAdd("orders", 3000)
+	m.InFlightBytesAdd("orders", -5000)
+
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	var got float64
+	var found bool
+	for _, mf := range mfs {
+		if mf.GetName() != "consumer_inflight_bytes" {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			for _, lp := range metric.GetLabel() {
+				if lp.GetName() == "queue" && lp.GetValue() == "orders" {
+					got = metric.GetGauge().GetValue()
+					found = true
+				}
+			}
+		}
+	}
+	require.True(t, found, "consumer_inflight_bytes{queue=orders} not found")
+	assert.Equal(t, float64(3000), got, "gauge must reflect the net of the deltas")
 }
 
 func TestPrometheusConsumerMetrics_maxRedeliveriesTotal(t *testing.T) {
@@ -426,8 +460,9 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		conm.RecordHandlerTimeout("orders")
 		conm.RecordHandler("orders", "", "ack", time.Duration(i+1)*time.Millisecond)
 		conm.RecordReplierDropNoDLX("requests")
-		conm.RecordCancelled("orders", "broker_initiated")
+		conm.RecordCancelled("orders", "queue_deleted")
 		conm.RecordMaxRedeliveries("orders", "x-death")
+		conm.InFlightBytesAdd("orders", int64(i))
 	}
 
 	names := gatherNames(t, reg)
@@ -447,6 +482,7 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		"replier_drop_no_dlx_total",
 		"consumer_cancelled_total",
 		"consumer_max_redeliveries_total",
+		"consumer_inflight_bytes",
 	}
 	for _, name := range mandatory {
 		assert.Contains(t, names, name, "mandatory metric %q missing from gathered output", name)

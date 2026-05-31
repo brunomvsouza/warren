@@ -55,3 +55,6 @@ func (NoOpConsumerMetrics) RecordMaxRedeliveries(_, _ string) {}
 
 // RecordReplierDropNoDLX discards the Replier drop-no-DLX counter increment.
 func (NoOpConsumerMetrics) RecordReplierDropNoDLX(_ string) {}
+
+// InFlightBytesAdd discards the in-flight-bytes gauge adjustment.
+func (NoOpConsumerMetrics) InFlightBytesAdd(_ string, _ int64) {}

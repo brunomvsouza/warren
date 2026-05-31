@@ -1278,11 +1278,11 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 - **Files:** `metrics/prometheus.go`, `consumer.go`.
 - **Deps:** T19, T36.
 
-### [ ] T50 — In-Flight Memory Guardrail [P1] · M
+### [x] T50 — In-Flight Memory Guardrail [P1] · M
 - **Acceptance:**
-  - [ ] `ConsumerBuilder.MaxInFlightBytes(n int64)` implemented.
-  - [ ] Sits before handler execution; blocks/pauses new deliveries if `sum(len(Delivery.Body))` exceeds `n`. Decrements when handler returns.
-  - [ ] Emits `consumer_inflight_bytes{queue}` gauge.
+  - [x] `ConsumerBuilder.MaxInFlightBytes(n int64)` implemented.
+  - [x] Sits before handler execution; blocks/pauses new deliveries if `sum(len(Delivery.Body))` exceeds `n`. Decrements when handler returns.
+  - [x] Emits `consumer_inflight_bytes{queue}` gauge.
 - **Verify:** Benchmark/load-test with 64 goroutines and 5MB bodies stays within memory bounds.
 - **Files:** `consumer.go`, `consumer_builder.go`.
 - **Deps:** T18, T19.
