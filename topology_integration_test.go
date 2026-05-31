@@ -268,6 +268,94 @@ func TestTopology_Declare_dlxExpansion_integration(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestTopology_Declare_dlxRoutesToDLQ_integration is the T47 end-to-end proof
+// that the auto-expanded DeadLetter topology no longer routes dead-lettered
+// messages into limbo: before T47 the expansion created the DLX exchange and
+// the <source>.dlq queue but never bound them, so a nacked message vanished.
+// Here we publish to the source queue (via the default exchange), nack it
+// without requeue, and assert it actually arrives in the auto-created DLQ.
+func TestTopology_Declare_dlxRoutesToDLQ_integration(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	url := amqpTestURL(t)
+	ctx := context.Background()
+
+	const (
+		srcQ = "test.dlx.route.src"
+		dlqQ = "test.dlx.route.src.dlq"
+	)
+	purgeQueues(t, url, srcQ, dlqQ)
+	t.Cleanup(func() {
+		deleteQueues(url, srcQ, dlqQ)
+		deleteExchanges(url, "test.dlx.route.src.dlx")
+	})
+
+	conn, err := warren.Dial(ctx, warren.WithAddr(url))
+	require.NoError(t, err)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	}()
+
+	// No manual DLX binding: rely entirely on DeadLetter auto-expansion.
+	topo := &warren.Topology{
+		Queues: []warren.Queue{
+			{Name: srcQ, Durable: false},
+		},
+		DeadLetters: []warren.DeadLetter{
+			{Source: srcQ},
+		},
+	}
+	require.NoError(t, topo.Declare(ctx, conn))
+
+	// Publish into the source queue via the default exchange (routing key == queue name).
+	pub, err := warren.PublisherFor[string](conn).RoutingKey(srcQ).Build()
+	require.NoError(t, err)
+	body := "dead-letter-me"
+	require.NoError(t, pub.Publish(ctx, warren.Message[string]{Body: &body}))
+
+	// Source consumer: nack-without-requeue so the broker dead-letters the message.
+	srcConsumer, err := warren.ConsumerFor[string](conn).Queue(srcQ).Prefetch(1).Build()
+	require.NoError(t, err)
+	srcCtx, srcCancel := context.WithCancel(ctx)
+	srcDone := make(chan struct{})
+	go func() {
+		defer close(srcDone)
+		_ = srcConsumer.Consume(srcCtx, func(_ context.Context, _ string) error {
+			defer srcCancel()
+			return warren.ErrPoison
+		})
+	}()
+	select {
+	case <-srcDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("source consumer did not process the message")
+	}
+
+	// DLQ consumer: the dead-lettered message must land here thanks to the
+	// auto-created DLX->DLQ binding (the T47 fix).
+	dlqConsumer, err := warren.ConsumerFor[string](conn).Queue(dlqQ).Prefetch(1).Build()
+	require.NoError(t, err)
+	dlqCtx, dlqCancel := context.WithCancel(ctx)
+	dlqDone := make(chan struct{})
+	var got string
+	go func() {
+		defer close(dlqDone)
+		_ = dlqConsumer.Consume(dlqCtx, func(_ context.Context, m string) error {
+			got = m
+			dlqCancel()
+			return nil
+		})
+	}()
+	select {
+	case <-dlqDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dead-lettered message did not arrive in the auto-created DLQ (routing limbo)")
+	}
+	assert.Equal(t, body, got, "DLQ must receive the original dead-lettered payload")
+}
+
 func TestTopology_Declare_quorumWithDeliveryLimit_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 

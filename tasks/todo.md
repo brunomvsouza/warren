@@ -1255,9 +1255,9 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 
 ## Phase 10 — SRE & Resilience Hardening
 
-### [ ] T47 — DLX Binding in Topology Expansion [P0] · XS
+### [x] T47 — DLX Binding in Topology Expansion [P0] · XS
 - **Acceptance:**
-  - [ ] `expandDeadLetters` in `topology.go` appends a `Binding` between the expanded DLX exchange and DLQ queue with `RoutingKey: "#"`.
+  - [x] `expandDeadLetters` in `topology.go` appends a `Binding` between the expanded DLX exchange and DLQ queue with `RoutingKey: "#"`.
 - **Verify:** Integration test declaring a queue with DLX args, publishing a message, nacking it (no-requeue), and asserting it arrives in the DLQ.
 - **Files:** `topology.go`, `topology_integration_test.go`.
 - **Deps:** T15.
