@@ -4,6 +4,7 @@ package conformance_test
 
 import (
 	"context"
+	neturl "net/url"
 	"os"
 	"testing"
 	"time"
@@ -357,3 +358,64 @@ loop:
 	defer cancel()
 	_ = pub.Close(closeCtx)
 }
+
+// TestConformance_UserIDMismatch_AccessRefused406 pins the broker contract that
+// warren's client-side UserID guard (decision 39) is built on: a publish whose
+// AMQP `user-id` property does not match the authenticated connection user is
+// rejected by the broker with a 406 ACCESS_REFUSED channel exception. warren
+// validates UserID client-side and never lets the mismatched frame reach the
+// broker (turning it into a local ErrInvalidMessage), so this test deliberately
+// goes through a RAW amqp091 channel to prove the real broker behavior the guard
+// mirrors — a stub could not (TV-06: 406-on-UserID).
+func TestConformance_UserIDMismatch_AccessRefused406(t *testing.T) {
+	// Registered before the raw connection's deferred Close so it runs LAST
+	// (Cleanup is LIFO, and defers run before cleanups): goleak verifies after the
+	// amqp091 connection's goroutines are joined.
+	t.Cleanup(func() { goleak.VerifyNone(t) })
+	url := brokerURL(t)
+
+	// The authenticated user is whatever AMQP_TEST_URL carries (default "guest").
+	// Publishing a DIFFERENT user-id is what provokes the 406.
+	connUser := "guest"
+	if u, err := neturl.Parse(url); err == nil && u.User != nil && u.User.Username() != "" {
+		connUser = u.User.Username()
+	}
+	mismatchUser := connUser + "-not-the-connection-user"
+
+	rc, err := amqp091.Dial(url)
+	require.NoError(t, err, "raw amqp091 dial")
+	defer rc.Close() //nolint:errcheck
+	ch, err := rc.Channel()
+	require.NoError(t, err, "raw amqp091 channel")
+
+	closeCh := ch.NotifyClose(make(chan *amqp091.Error, 1))
+
+	// Default exchange: routing is irrelevant (an unroutable default-exchange
+	// publish is silently dropped, not an error) — the broker validates user-id
+	// independently and raises the channel exception regardless.
+	pubErr := ch.PublishWithContext(context.Background(), "", "warren.conf.userid.nonexistent",
+		false, false, amqp091.Publishing{UserId: mismatchUser, Body: []byte("x")})
+	// The 406 arrives asynchronously as a channel close, even if the fire-and-forget
+	// publish call itself returned nil; the NotifyClose channel carries it.
+	_ = pubErr
+
+	select {
+	case amqpErr := <-closeCh:
+		require.NotNil(t, amqpErr,
+			"channel must close with an AMQP error on a user-id mismatch")
+		assert.Equal(t, 406, amqpErr.Code,
+			"user-id mismatch must raise ACCESS_REFUSED (406); got %d %q", amqpErr.Code, amqpErr.Reason)
+	case <-time.After(10 * time.Second):
+		t.Fatal("broker did not raise a channel exception for a mismatched user-id within 10s")
+	}
+}
+
+// NOTE on the other T44 named target, basic.qos global=true for ChannelQoS():
+// AMQP does not echo the global flag back on the wire, so the only broker-side
+// observation is the management API's per-channel global_prefetch_count. Against
+// the conformance image (rabbitmq:3.13-management, rates_mode=basic) that proved
+// too unreliable to gate on — /api/channels lags several seconds to even list a
+// live channel and then reports consumer_count=0 / global_prefetch_count=0 for a
+// channel that is actively consuming with Prefetch(137)+ChannelQoS(). The
+// behavior is unit-covered (consumer.go Qos(..., global=c.channelQoS)); the
+// real-broker assertion is deferred — see LATER-74.
