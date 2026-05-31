@@ -176,6 +176,7 @@ func TestPublishOutcome_mapsSentinels(t *testing.T) {
 		{"blocked", ErrConnectionBlocked, "blocked", "ErrConnectionBlocked"},
 		{"invalid_message", ErrInvalidMessage, "error", "ErrInvalidMessage"},
 		{"channel_closed", ErrChannelClosed, "error", "ErrChannelClosed"},
+		{"rate_limited", ErrRateLimited, "rate_limited", "ErrRateLimited"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

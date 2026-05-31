@@ -1287,11 +1287,11 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 - **Files:** `consumer.go`, `consumer_builder.go`.
 - **Deps:** T18, T19.
 
-### [ ] T51 — Publisher Rate Limiting [P1] · S
+### [x] T51 — Publisher Rate Limiting [P1] · S
 - **Acceptance:**
-  - [ ] `PublisherBuilder.WithPublishRateLimit(perSec int)` token-bucket limiter implementation.
-  - [ ] `Publish` awaits token; on context cancel returns `ErrRateLimited` (transient).
-  - [ ] Metric `publisher_rate_limited_total{exchange}`.
+  - [x] `PublisherBuilder.WithPublishRateLimit(perSec int)` token-bucket limiter implementation.
+  - [x] `Publish` awaits token; on context cancel returns `ErrRateLimited` (transient).
+  - [x] Metric `publisher_rate_limited_total{exchange}`.
 - **Verify:** `WithPublishRateLimit(100)` allows max 100 msg/s.
 - **Files:** `publisher.go`, `publisher_builder.go`.
 - **Deps:** T12, T13.

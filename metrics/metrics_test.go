@@ -52,6 +52,7 @@ func TestNoOpPublisherMetrics_zeroAllocs(t *testing.T) {
 		m.InFlightAdd("events", 1)
 		m.RecordPublish("events", "", "", "ack", 5*time.Millisecond)
 		m.RecordRetry("events", "nacked")
+		m.RecordRateLimited("events")
 		m.InFlightAdd("events", -1)
 	}))
 }
@@ -143,12 +144,14 @@ func TestPrometheusPublisherMetrics_mandatoryMetrics(t *testing.T) {
 	m.InFlightAdd("events", 3)
 	m.RecordPublish("events", "", "", "ack", 10*time.Millisecond)
 	m.RecordRetry("events", "nacked")
+	m.RecordRateLimited("events")
 	m.InFlightAdd("events", -3)
 
 	names := gatherNames(t, reg)
 	assert.Contains(t, names, "publisher_in_flight")
 	assert.Contains(t, names, "publisher_publish_seconds")
 	assert.Contains(t, names, "publisher_retry_total")
+	assert.Contains(t, names, "publisher_rate_limited_total")
 }
 
 func TestPrometheusPublisherMetrics_inFlightGauge(t *testing.T) {
@@ -508,6 +511,7 @@ func BenchmarkNoOpPublisherMetrics(b *testing.B) {
 		m.InFlightAdd("events", 1)
 		m.RecordPublish("events", "", "", "ack", 5*time.Millisecond)
 		m.RecordRetry("events", "nacked")
+		m.RecordRateLimited("events")
 		m.InFlightAdd("events", -1)
 	}
 }

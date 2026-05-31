@@ -797,6 +797,7 @@ func (b *PublisherBuilder[M]) PublishTimeout(time.Duration) *PublisherBuilder[M]
 func (b *PublisherBuilder[M]) PublishBatchMaxSize(n int) *PublisherBuilder[M]                    // max messages per PublishBatch call; default 1024 (per-call cap, not a sliding in-flight window)
 func (b *PublisherBuilder[M]) MaxMessageSizeBytes(n int) *PublisherBuilder[M]                    // per-publish payload guardrail; default 16 MiB; 0 disables
 func (b *PublisherBuilder[M]) PublishRetry(p RetryPolicy) *PublisherBuilder[M]                    // automatic retry of ErrTransient publishes
+func (b *PublisherBuilder[M]) WithPublishRateLimit(perSec int) *PublisherBuilder[M]               // local token bucket; paces Publish to perSec msg/s (burst perSec); 0 disables; not applied to PublishBatch
 func (b *PublisherBuilder[M]) Metrics(metrics.PublisherMetrics) *PublisherBuilder[M]
 func (b *PublisherBuilder[M]) WithoutMetrics() *PublisherBuilder[M]
 func (b *PublisherBuilder[M]) Tracer(otel.Tracer) *PublisherBuilder[M]
@@ -1021,6 +1022,19 @@ Semantics:
 
   Consumers MUST be idempotent. See §6.2.1 for the canonical
   pattern.
+- **`WithPublishRateLimit(perSec)`.** A local token bucket that paces
+  `Publish` to `perSec` messages per second, tolerating an initial burst
+  of `perSec` then spacing the remainder evenly. It is a guardrail
+  against an accidental runaway publish loop overwhelming the broker —
+  not a substitute for broker-side flow control. A publish that cannot
+  acquire a token before its context (the caller `ctx` or `PublishTimeout`)
+  is cancelled returns `ErrRateLimited` (transient, wrapping `ctx.Err()`);
+  a throttled-but-completed publish returns `nil`. Every throttled attempt
+  increments `publisher_rate_limited_total{exchange}`. Each broker attempt
+  acquires a token, so when `PublishRetry` is configured every retry of a
+  single `Publish` paces against the bucket too. `PublishBatch` is **not**
+  rate-limited, the same single-message scoping as `PublishRetry`.
+  `perSec <= 0` (default) disables it. Last-wins.
 - Publish errors are classifiable:
   `errors.Is(err, warren.ErrTransient)` indicates the caller may retry;
   `errors.Is(err, warren.ErrPermanent)` indicates the caller should not.
@@ -1925,6 +1939,7 @@ var (
     ErrPartialBatch  = errors.New("warren: batch publish partially failed")
     ErrBatchTooLarge   = errors.New("warren: PublishBatch exceeds max in-flight budget")
     ErrMessageTooLarge = errors.New("warren: message body exceeds MaxMessageSizeBytes") // local guard; permanent
+    ErrRateLimited     = errors.New("warren: publish rate limited")                      // WithPublishRateLimit token unavailable before ctx cancel; wraps ctx.Err(); transient
 
     // Consumer
     ErrRequeue           = errors.New("warren: nack with requeue")
@@ -1994,7 +2009,7 @@ func AMQPCode(err error) (code uint16, ok bool)
 // True for: ErrTransient wraps; network errors during reconnect window;
 // ErrChannelPoolExhausted; ErrPublishNacked (the broker may stop nacking
 // once the alarm clears); ErrConnectionBlocked; ErrConfirmTimeout;
-// ErrChannelClosed; ErrReconnecting; AMQP codes 311, 320, 504, 541.
+// ErrChannelClosed; ErrReconnecting; ErrRateLimited; AMQP codes 311, 320, 504, 541.
 //
 // Note on 506 (ErrResourceError): NOT classified as transient by
 // default. "Resource error" covers both transient conditions (disk
@@ -2156,7 +2171,11 @@ value.
   enforcement is enabled),
   `publisher_in_flight{exchange}`,
   `publisher_retry_total{exchange, reason}` (reason ∈
-  `nacked|confirm_timeout|channel_closed|pool_exhausted|blocked|network`),
+  `nacked|confirm_timeout|channel_closed|pool_exhausted|blocked|reconnecting|rate_limited|network`),
+  `publisher_rate_limited_total{exchange}` (increments once per attempt
+  throttled by the local `WithPublishRateLimit` token bucket — whether it
+  then proceeded or its context was cancelled into `ErrRateLimited`; under
+  `PublishRetry` each throttled retry of a single `Publish` counts),
   `replier_drop_no_dlx_total{queue}` (increments every time a
   `Replier` `OnError` fires for a request queue without a configured
   DLX — see §6.7),

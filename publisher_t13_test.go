@@ -662,6 +662,7 @@ func TestRetryReason_allLabels(t *testing.T) {
 		{ErrChannelPoolExhausted, "pool_exhausted"},
 		{ErrConnectionBlocked, "blocked"},
 		{ErrReconnecting, "reconnecting"},
+		{ErrRateLimited, "rate_limited"},
 		{errors.New("some network error"), "network"},
 	}
 	for _, tc := range tests {

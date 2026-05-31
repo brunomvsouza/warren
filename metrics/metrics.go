@@ -56,9 +56,16 @@ type ClientMetrics interface {
 //   - publisher_in_flight{exchange}
 //   - publisher_publish_seconds{exchange,outcome[,routing_key][,message_type]}
 //   - publisher_retry_total{exchange,reason}
+//   - publisher_rate_limited_total{exchange}
 type PublisherMetrics interface {
 	// InFlightAdd adjusts the in-flight publish gauge by delta (+1 on start, -1 on finish).
 	InFlightAdd(exchange string, delta int64)
+	// RecordRateLimited increments the counter for publishes throttled by the local
+	// WithPublishRateLimit token bucket. Fired once per broker attempt that had to
+	// wait for a token (whether it then proceeded or its context was cancelled); a
+	// single Publish under PublishRetry can fire it more than once. exchange is the
+	// only label — the rate limit is a per-publisher guardrail, not per-message.
+	RecordRateLimited(exchange string)
 	// RecordPublish records a completed publish with its outcome and duration.
 	//
 	// routingKey and messageType carry the opt-in high-cardinality label values

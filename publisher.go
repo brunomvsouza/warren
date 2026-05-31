@@ -282,6 +282,9 @@ type Publisher[M any] struct {
 	// authUser is the identity from conn.AuthenticatedUser(); used for UserID
 	// validation and StampUserID without holding the conn reference per-publish.
 	authUser string
+	// rateLimiter paces publishes to WithPublishRateLimit (nil = disabled). Each
+	// broker attempt (including retries) acquires a token before any channel work.
+	rateLimiter *rateLimiter
 
 	mu     sync.Mutex
 	closed bool
@@ -407,6 +410,14 @@ func (p *Publisher[M]) Publish(ctx context.Context, msg Message[M]) error {
 			finishPublishSpan(span, err)
 			return err
 		}
+		// A context that is already done will never let a retry succeed — most
+		// notably a publish abandoned while awaiting a WithPublishRateLimit token,
+		// whose ErrRateLimited is transient yet whose ctx is already cancelled.
+		// Return without counting (and backing off for) a retry that cannot happen.
+		if ctx.Err() != nil {
+			finishPublishSpan(span, err)
+			return err
+		}
 		attempt++
 		p.pm.RecordRetry(p.exchange, retryReason(err))
 		d := p.retryPolicy.NextBackoff(attempt)
@@ -510,6 +521,11 @@ func finishPublishSpan(span otel.Span, err error) {
 // publishOutcome maps a publish error to the (outcome, error.type) pair used on
 // the publish span. The outcome mirrors the publisher_publish_seconds{outcome}
 // metric label space; error.type is the sentinel name for assertive alerting.
+//
+// The one span-only outcome is "rate_limited": a publish cancelled while awaiting
+// a WithPublishRateLimit token returns before the latency clock starts, so it is
+// never sampled into publisher_publish_seconds — it surfaces on the span (and on
+// publisher_rate_limited_total) but not in the histogram's outcome label space.
 func publishOutcome(err error) (outcome, errorType string) {
 	switch {
 	case err == nil:
@@ -532,6 +548,8 @@ func publishOutcome(err error) (outcome, errorType string) {
 		return "error", "ErrChannelClosed"
 	case errors.Is(err, ErrReconnecting):
 		return "error", "ErrReconnecting"
+	case errors.Is(err, ErrRateLimited):
+		return "rate_limited", "ErrRateLimited"
 	default:
 		return "error", "error"
 	}
@@ -650,6 +668,19 @@ func (p *Publisher[M]) recordPublish(exchange, outcome string, d time.Duration) 
 // publishOnce performs a single publish attempt (no retry logic).
 func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []byte) error {
 	exchange := p.exchange
+
+	// Acquire a rate-limit token before any channel work, so the throttle delay is
+	// excluded from the publisher_publish_seconds latency sample below (start is
+	// taken after). A throttled publish records the rate-limited signal; one
+	// cancelled while waiting returns ErrRateLimited wrapping the ctx error.
+	throttled, rlErr := p.rateLimiter.wait(ctx)
+	if throttled {
+		p.pm.RecordRateLimited(exchange)
+	}
+	if rlErr != nil {
+		return fmt.Errorf("%w: %w", ErrRateLimited, rlErr)
+	}
+
 	start := time.Now()
 
 	pool, mc := p.selectPool()
@@ -975,6 +1006,8 @@ func retryReason(err error) string {
 		return "blocked"
 	case errors.Is(err, ErrReconnecting):
 		return "reconnecting"
+	case errors.Is(err, ErrRateLimited):
+		return "rate_limited"
 	default:
 		return "network"
 	}

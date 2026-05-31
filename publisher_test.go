@@ -189,8 +189,9 @@ type capturePublisherMetrics struct {
 		exchange string
 		delta    int64
 	}
-	records []struct{ exchange, routingKey, messageType, outcome string }
-	retries []struct{ exchange, reason string }
+	records     []struct{ exchange, routingKey, messageType, outcome string }
+	retries     []struct{ exchange, reason string }
+	rateLimited []string // exchange of each RecordRateLimited call
 }
 
 func (m *capturePublisherMetrics) InFlightAdd(exchange string, delta int64) {
@@ -211,6 +212,12 @@ func (m *capturePublisherMetrics) RecordPublish(exchange, routingKey, messageTyp
 func (m *capturePublisherMetrics) RecordRetry(exchange, reason string) {
 	m.mu.Lock()
 	m.retries = append(m.retries, struct{ exchange, reason string }{exchange, reason})
+	m.mu.Unlock()
+}
+
+func (m *capturePublisherMetrics) RecordRateLimited(exchange string) {
+	m.mu.Lock()
+	m.rateLimited = append(m.rateLimited, exchange)
 	m.mu.Unlock()
 }
 
