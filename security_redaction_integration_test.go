@@ -6,18 +6,23 @@ package warren_test
 // against a real broker, capture every observable surface — log lines (through
 // the real redacting Slog adapter), returned error messages, OpenTelemetry span
 // attributes, and Prometheus metric labels — and assert that no clear-text
-// credential survives into any of them.
+// credential survives into any of them. The log and error surfaces are actively
+// fed a credential, so their assertion has teeth; the span/metric surfaces carry
+// no URI in warren today, so scanning them is a forward tripwire that catches a
+// future regression which starts labelling a span or metric with a connection URI.
 //
 // Lens-10 TV-14 — exercise, not just scan: a grep only catches output that was
-// actually produced, so the run must FORCE the highest-risk leak path before
-// scanning. The likeliest leak (Lens-07) is the connect-failure path: warren
-// formats and logs the URL it dialed, and any wrap of the underlying amqp091-go
-// error rides alongside it. This test therefore dials with a distinctive
-// sentinel credential that the broker rejects, then scans the full returned
-// error chain and the redacted log surface alongside the steady-state surfaces.
-// (amqp091's own auth error does not embed the dial URL in the versions we pin,
-// so it is warren's own formatting/logging — not the driver string — that must
-// redact; this asserts exactly that.)
+// actually produced, so the run drives the credentialed workload and then FORCES
+// a connect failure with sentinel credentials the broker rejects. Honest scope of
+// that forced path: in the amqp091-go versions we pin, the initial-dial auth
+// failure returns a bare "username or password not allowed" with no URL, and
+// connectOnce emits no log on that path (the logger is wired only into the
+// post-establishment supervisor) — so this sub-test proves the connect-failure
+// error chain carries no credential, rather than exercising warren's own
+// URL-formatting redaction. That formatting choke-point (redact.URI /
+// redact.Error) is covered by redact's unit + fuzz tests and by the steady-state
+// log surface scanned here; driving it through a post-establishment reconnect
+// failure, and walking the wrapped error chain (LATER-72), are tracked separately.
 //
 // Anti-vacuity (VG-6 analogue): scanForSecrets is self-tested against a planted
 // leak so a passing run means "redacted", never "the scanner is broken"; and the
@@ -221,9 +226,13 @@ drainLoop:
 
 	// — Force the connect-failure error path (TV-14) ——————————————————————————
 	// A real auth failure: same broker host, sentinel credentials the broker
-	// rejects. warren must redact the URL in whatever it returns/logs; if it wraps
-	// the raw amqp091 error with the un-redacted dial URL, the sentinel password
-	// leaks here and the scan below catches it.
+	// rejects. This asserts the connect-failure error chain carries no credential.
+	// (In the amqp091-go versions we pin the auth error is a bare "username or
+	// password not allowed" with no URL, and the initial-dial path emits no log, so
+	// this proves the chain stays clean rather than exercising warren's
+	// URL-formatting redaction directly. If a future warren wrap were to fold the
+	// un-redacted dial URL into the returned error, the sentinel password would
+	// leak here and the scan would catch it.)
 	badURL := withUserinfo(wu, sentinelUser, sentinelPass)
 	badCtx, badCancel := context.WithTimeout(ctx, 15*time.Second)
 	badConn, badErr := warren.Dial(badCtx,
