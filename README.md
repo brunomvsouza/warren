@@ -4,11 +4,11 @@
 > **This project is in active, early development.** 
 > While the goal is to provide a highly reliable operational layer, stability is **not yet guaranteed**. Although we aim to maintain a stable public API as defined in [`SPEC.md`](SPEC.md), occasional breaking changes may still occur prior to `v1.0.0`. Use in production environments at your own risk.
 
-**A production-grade, generics-typed Go client for RabbitMQ (AMQP 0-9-1).**
+**A generics-typed Go client for RabbitMQ (AMQP 0-9-1), with reliability as a first-class design goal.**
 
-Warren wraps [`github.com/rabbitmq/amqp091-go`](https://github.com/rabbitmq/amqp091-go) with a type-safe API and a **hardened operational layer** built for high-scale reliability. It embeds the "SRE batteries" every production team needs: supervised reconnect with publisher confirms, centralized topology declaration, pluggable codecs, channel pooling across role-split TCP connections, **intelligent error classification (transient vs. permanent)**, **safety guardrails (credential redaction, fail-fast validation, payload caps)**, and native observability (logging, Prometheus, OpenTelemetry).
+Warren wraps [`github.com/rabbitmq/amqp091-go`](https://github.com/rabbitmq/amqp091-go) with a type-safe API and an operational layer that aims to cover the reliability concerns production teams usually end up building themselves: supervised reconnect with publisher confirms, centralized topology declaration, pluggable codecs, channel pooling across role-split TCP connections, error classification (transient vs. permanent) derived from AMQP reply codes, safety guardrails (credential redaction, fail-fast validation, payload caps), and native observability (logging, Prometheus, OpenTelemetry). How well it meets that goal is still being proven — see the status note below.
 
-> **Current Status:** Active development toward [`v0.1.0`](SPEC.md). Implementation follows [`tasks/plan.md`](tasks/plan.md). **Connection**, **Publisher**, **Topology**, **Consumer** (with `MaxRedeliveries` + handler timeouts), **batch publish/consume**, the **JSON / Protobuf / CloudEvents codecs**, **end-to-end OpenTelemetry tracing** (publisher + consumer), and the **RPC + delayed-message patterns** are usable today; the test tooling is in progress.
+> **Current Status:** Active development toward [`v0.1.0`](SPEC.md). Implementation follows [`tasks/plan.md`](tasks/plan.md). **Connection**, **Publisher**, **Topology**, **Consumer** (with `MaxRedeliveries` + handler timeouts), **batch publish/consume**, the **JSON / Protobuf / CloudEvents codecs**, **end-to-end OpenTelemetry tracing** (publisher + consumer), and the **RPC + delayed-message patterns** are usable today. The feature surface is in place; final release and CI hardening are the remaining work before the first tag.
 
 [![CI](https://github.com/brunomvsouza/warren/actions/workflows/ci.yml/badge.svg)](https://github.com/brunomvsouza/warren/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/brunomvsouza/warren)](https://goreportcard.com/report/github.com/brunomvsouza/warren)
@@ -231,14 +231,14 @@ On reconnect, Warren runs a **synchronous barrier** before resuming traffic on t
 
 ## Reliability & SRE
 
-Warren is built with "production-first" principles, embedding several reliability patterns directly into the core:
+Warren leans on a few reliability patterns baked into the core. These are design goals backed by tests, not guarantees of zero message loss — the delivery contract is at-least-once (see above):
 
-- **Synchronous Reconnect Barrier:** Guaranteed restoration of all topology (exchanges, queues, bindings) before traffic resumes, preventing message loss or misrouting on fresh connections.
-- **Intelligent Error Classification:** Native `IsTransient(err)` and `IsPermanent(err)` helpers allow your application to implement robust retry logic based on actual AMQP reply codes.
+- **Synchronous Reconnect Barrier:** Restores all attached topology (exchanges, queues, bindings) before traffic resumes on a freshly reconnected socket, so a publish does not race ahead of the queue or binding it depends on. This reduces the window for misrouting on reconnect; it does not turn at-least-once into exactly-once.
+- **Error Classification:** `IsTransient(err)` and `IsPermanent(err)` map AMQP reply codes to a transient/permanent split, so your retry logic can key off the actual broker response instead of string matching.
 - **Safety Guardrails:** 
-    - **Fail-Fast Validation:** Validates `UserID` and message headers client-side to prevent "channel-close" errors that crash publisher sockets.
-    - **Payload Size Caps:** Rejects oversized messages before they hit the broker, protecting your infrastructure from OOM.
-    - **Credential Redaction:** Every log line, metric label, and trace span is automatically passed through `internal/redact` to strip secrets.
+    - **Fail-Fast Validation:** Validates `UserID` and message headers client-side to catch a common class of "channel-close" errors before they reach the broker and tear down a publisher socket.
+    - **Payload Size Caps:** Rejects oversized messages client-side, before they reach the broker.
+    - **Credential Redaction:** The URIs Warren emits to logs, metric labels, trace spans, and error strings are routed through `internal/redact` to strip `userinfo`. This covers the credentials Warren itself formats — it is not a blanket scrubber for secrets your own code may log.
 - **Degraded State Awareness:** If the topology fails to redeclare persistently, the connection enters a `degraded` state, triggering `OnTopoDegraded` callbacks and metrics, and providing a `ForceReconnect` escape hatch for operators.
 
 ---
@@ -261,12 +261,14 @@ Warren is built with "production-first" principles, embedding several reliabilit
 
 ### On the roadmap
 
-The `v0.1.0` surface is feature-complete — connection/reliability (TLS / `amqps://`,
+The `v0.1.0` feature surface is in place — connection/reliability (TLS / `amqps://`,
 SASL EXTERNAL, multi-node failover, supervised reconnect), publishing, topology,
-consuming, codecs, RPC, delayed publish, full observability, and the test/release
+consuming, codecs, RPC, delayed publish, observability, and the test/release
 tooling (real-broker conformance suite, reconnect chaos test, throughput
-benchmarks, coverage gate, CI + release automation) have all landed. Cutting the
-tag is the last step.
+benchmarks, coverage gate, CI + release automation). What remains is the
+hardening and validation that earns the first tag: shaking the suite out against
+real brokers, closing the gaps tracked in [`LATER.md`](LATER.md), and the release
+automation itself.
 
 See [`tasks/todo.md`](tasks/todo.md) for the live checklist and post-v0.1 ideas.
 
@@ -311,7 +313,7 @@ conn, err := warren.Dial(ctx,
 )
 ```
 
-Credentials in AMQP URIs are **never** emitted in clear text — redaction is enforced at `internal/redact` for logs, metrics, spans, and error strings.
+Warren aims to never emit AMQP URI credentials in clear text: the URIs it formats for logs, metrics, spans, and error strings are routed through `internal/redact`, which strips `userinfo`. This applies to the URIs Warren itself produces — secrets your own code logs are your responsibility.
 
 ---
 
