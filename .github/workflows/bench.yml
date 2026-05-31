@@ -24,11 +24,11 @@ jobs:
       AMQP_TEST_URL: amqp://guest:guest@localhost:5672/
       AMQP_TEST_MANAGEMENT_URL: http://guest:guest@localhost:15672
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 1
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: "1.25"
 
@@ -65,7 +65,8 @@ jobs:
       - name: Relative regression gate (vs reference baseline, if present)
         run: |
           if [ -f testdata/bench-baseline.txt ]; then
-            go install golang.org/x/perf/cmd/benchstat@latest
+            # Pinned (not @latest) so the regression gate is reproducible run to run.
+            go install golang.org/x/perf/cmd/benchstat@v0.0.0-20260512194132-3cf34090a3db
             benchstat testdata/bench-baseline.txt bench.txt | tee benchstat.txt
           else
             echo "no testdata/bench-baseline.txt committed yet — reporting only (no gate)"
@@ -83,7 +84,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: benchmark-results
           path: |
