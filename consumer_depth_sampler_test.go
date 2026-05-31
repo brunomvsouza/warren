@@ -3,6 +3,7 @@ package warren
 import (
 	"context"
 	"maps"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -80,6 +81,10 @@ type captureDepthMetrics struct {
 	// sampleCh, when non-nil, receives one token per SetQueueDepth (non-blocking,
 	// best-effort) so a test can count ticks without a sleep.
 	sampleCh chan struct{}
+	// queueDeleted/dlqDeleted record DeleteQueueDepth/DeleteDLQDepth calls (T52b) so a
+	// test can assert the series are dropped when the sampler stops.
+	queueDeleted []string
+	dlqDeleted   []string
 }
 
 func newCaptureDepthMetrics() *captureDepthMetrics {
@@ -110,11 +115,30 @@ func (m *captureDepthMetrics) SetDLQDepth(dlq string, depth int64) {
 	m.mu.Unlock()
 }
 
+func (m *captureDepthMetrics) DeleteQueueDepth(queue string) {
+	m.mu.Lock()
+	m.queueDeleted = append(m.queueDeleted, queue)
+	m.mu.Unlock()
+}
+
+func (m *captureDepthMetrics) DeleteDLQDepth(dlq string) {
+	m.mu.Lock()
+	m.dlqDeleted = append(m.dlqDeleted, dlq)
+	m.mu.Unlock()
+}
+
 // snapshot returns copies of the captured gauge maps for race-free assertion.
 func (m *captureDepthMetrics) snapshot() (queue, dlq map[string]int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return maps.Clone(m.queueDepths), maps.Clone(m.dlqDepths)
+}
+
+// deletions returns copies of the recorded DeleteQueueDepth/DeleteDLQDepth args.
+func (m *captureDepthMetrics) deletions() (queue, dlq []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.queueDeleted), slices.Clone(m.dlqDeleted)
 }
 
 // newDepthSamplerConsumer builds a string consumer wired to a fake depth channel so
@@ -423,6 +447,119 @@ func TestConsumer_DepthSampler_Lifecycle_StopsOnCtxCancel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Consume did not return after ctx cancel")
 	}
+}
+
+func TestDepthSampleDelay_BacksOffDoublingAndCaps(t *testing.T) {
+	// T52a: with no failures the delay is the base interval; each consecutive all-failed
+	// sample doubles it, capped at maxDepthSampleBackoff and never overflowing.
+	base := 100 * time.Millisecond
+	assert.Equal(t, base, depthSampleDelay(base, 0), "no failures → base interval")
+	assert.Equal(t, 200*time.Millisecond, depthSampleDelay(base, 1))
+	assert.Equal(t, 400*time.Millisecond, depthSampleDelay(base, 2))
+	assert.Equal(t, 800*time.Millisecond, depthSampleDelay(base, 3))
+	assert.Equal(t, maxDepthSampleBackoff, depthSampleDelay(base, 10),
+		"100ms<<10 = 102.4s exceeds the 30s cap → clamped")
+	assert.Equal(t, maxDepthSampleBackoff, depthSampleDelay(base, 1_000_000),
+		"an absurd failure count stays capped — the loop bound prevents shift overflow")
+}
+
+func TestDepthSampleDelay_NeverBelowConfiguredInterval(t *testing.T) {
+	// T52a: a configured interval already slower than the cap is preserved — backoff
+	// must never speed sampling up below what the operator asked for.
+	base := time.Hour
+	assert.Equal(t, base, depthSampleDelay(base, 0))
+	assert.Equal(t, base, depthSampleDelay(base, 5),
+		"backoff ceiling is max(base, cap); it never drops below the configured interval")
+}
+
+func TestConsumer_RunDepthSampler_ClampsSubFloorIntervalWithWarning(t *testing.T) {
+	// T52a: a sub-100ms interval is clamped to the floor and warned exactly once. Run
+	// with an already-cancelled ctx — the clamp+warn happen before the ctx check, so the
+	// warning fires while no probe is issued (deterministic, no goroutine).
+	ch := newFakeDepthChannel()
+	ch.counts["orders"] = 1
+	cm := newCaptureDepthMetrics()
+	conn := newFakeConsumerConn(t)
+	conn.conConns[0].chanFactory = func() (topologyChannel, error) { return ch, nil }
+	var warnings []string
+	conn.opts.logger = &captureLogger{onWarning: func(msg string) { warnings = append(warnings, msg) }}
+	c, err := ConsumerFor[string](conn).
+		Queue("orders").
+		Metrics(cm).
+		WithQueueDepthSampler(time.Millisecond). // below the 100ms floor
+		Build()
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.runDepthSampler(ctx)
+
+	require.Len(t, warnings, 1, "a sub-floor interval must warn exactly once")
+	assert.Contains(t, warnings[0], "floor", "the warning must explain the clamp")
+	assert.Zero(t, ch.passiveCallCount("orders"), "an already-cancelled ctx still issues no probe")
+}
+
+func TestConsumer_SampleDepths_ReportsWhetherAnyGaugeEmitted(t *testing.T) {
+	// T52a: sampleDepths reports true iff it emitted a gauge — the signal that drives the
+	// backoff. Source present → true (even when the DLQ 404s); everything absent → false.
+	ch := newFakeDepthChannel()
+	ch.counts["orders"] = 4
+	ch.errs["orders.dlq"] = &amqp091.Error{Code: 404, Reason: "NOT_FOUND"}
+	cm := newCaptureDepthMetrics()
+	c := newDepthSamplerConsumer(t, ch, cm)
+	assert.True(t, c.sampleDepths(), "a successful source probe counts as emitted")
+
+	ch.mu.Lock()
+	ch.errs["orders"] = &amqp091.Error{Code: 404, Reason: "NOT_FOUND"}
+	ch.mu.Unlock()
+	assert.False(t, c.sampleDepths(), "when every probe fails the sample emitted nothing → backoff")
+}
+
+func TestConsumer_DepthSampler_DeletesGaugesOnStop(t *testing.T) {
+	// T52b: when the sampler stops, both depth series are deleted so a process cycling
+	// consumers over distinct queue names cannot accumulate stale frozen series.
+	defer goleak.VerifyNone(t)
+
+	ch := newFakeDepthChannel()
+	ch.counts["orders"] = 11
+	ch.counts["orders.dlq"] = 2
+	cm := newCaptureDepthMetrics()
+	cm.notify = make(chan struct{})
+
+	conn := newFakeConsumerConn(t)
+	conn.conConns[0].chanFactory = func() (topologyChannel, error) { return ch, nil }
+	c, err := ConsumerFor[string](conn).
+		Queue("orders").
+		Metrics(cm).
+		WithQueueDepthSampler(5 * time.Millisecond).
+		Build()
+	require.NoError(t, err)
+	c.deliveryCh = make(chan amqp091.Delivery)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = c.Consume(ctx, func(context.Context, string) error { return nil })
+	}()
+
+	select {
+	case <-cm.notify:
+	case <-time.After(2 * time.Second):
+		t.Fatal("depth sampler never primed")
+	}
+
+	cancel()
+	select {
+	case <-consumeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Consume did not return after ctx cancel")
+	}
+
+	// The teardown runs after the sampler goroutine joins, so the deletions are visible.
+	qDel, dDel := cm.deletions()
+	assert.Equal(t, []string{"orders"}, qDel, "queue_depth{orders} must be deleted on stop")
+	assert.Equal(t, []string{"orders.dlq"}, dDel, "dlq_depth{orders.dlq} must be deleted on stop")
 }
 
 func TestConsumer_RunDepthSampler_SkipsWhenCtxAlreadyCancelled(t *testing.T) {

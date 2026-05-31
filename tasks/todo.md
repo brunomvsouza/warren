@@ -1304,6 +1304,22 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 - **Files:** `consumer.go`, `consumer_builder.go`.
 - **Deps:** T18, T19.
 
+### [x] T52a — Failure-aware depth sampler (interval floor + backoff) [P2] · S
+- **Acceptance:**
+  - [x] Sub-100ms `WithQueueDepthSampler` intervals clamp to a 100ms floor with a one-time warning.
+  - [x] When every probe in a sample fails (source + DLQ), the sampler backs off exponentially up to a 30s cap (never below the configured interval); any successful probe resets to the base interval.
+- **Verify:** A permanently-missing queue settles at the capped (not base) probe rate; a recovered queue returns to base. `depthSampleDelay` unit-tested for the doubling + cap + floor.
+- **Files:** `consumer.go`, `consumer_builder.go`.
+- **Deps:** T52. Resolves LATER-80.
+
+### [x] T52b — Delete depth gauge series on sampler stop [P2] · S
+- **Acceptance:**
+  - [x] `ConsumerMetrics` exposes deletion of `queue_depth{queue}` / `dlq_depth{dlq}`; NoOp is a no-op, Prometheus calls `DeleteLabelValues`.
+  - [x] The consumer deletes both series when the sampler goroutine stops, so no frozen/stale series survives teardown.
+- **Verify:** After a consumer with a sampler stops, the gauge series is gone from the registry.
+- **Files:** `consumer.go`, `metrics/metrics.go`, `metrics/noop.go`, `metrics/prometheus.go`.
+- **Deps:** T52. Resolves LATER-81.
+
 ### [ ] T53 — Consumer Draining API & Liveness Probes [P2] · M
 - **Acceptance:**
   - [ ] `(*Consumer[M]).Pause(ctx)` sends `basic.cancel` locally without closing channel. `Resume(ctx)` re-issues `basic.consume`.

@@ -361,6 +361,40 @@ func TestPrometheusConsumerMetrics_depthGauges(t *testing.T) {
 	assert.Equal(t, float64(7), dd)
 }
 
+func TestPrometheusConsumerMetrics_DeleteDepthSeries_RemovesFromRegistry(t *testing.T) {
+	// T52b: deleting a depth series removes it from the registry so it cannot linger as
+	// a stale frozen value after the consumer stops. Deleting an unset series is a no-op.
+	reg := prometheus.NewRegistry()
+	m, err := metrics.NewPrometheusConsumerMetrics(reg, nil)
+	require.NoError(t, err)
+
+	seriesCount := func(metricName string) int {
+		mfs, gErr := reg.Gather()
+		require.NoError(t, gErr)
+		for _, mf := range mfs {
+			if mf.GetName() == metricName {
+				return len(mf.GetMetric())
+			}
+		}
+		return 0
+	}
+
+	m.SetQueueDepth("orders", 12)
+	m.SetDLQDepth("orders.dlq", 3)
+	require.Equal(t, 1, seriesCount("queue_depth"))
+	require.Equal(t, 1, seriesCount("dlq_depth"))
+
+	m.DeleteQueueDepth("orders")
+	m.DeleteDLQDepth("orders.dlq")
+	assert.Zero(t, seriesCount("queue_depth"), "queue_depth series removed after delete")
+	assert.Zero(t, seriesCount("dlq_depth"), "dlq_depth series removed after delete")
+
+	assert.NotPanics(t, func() {
+		m.DeleteQueueDepth("never-set")
+		m.DeleteDLQDepth("never-set.dlq")
+	}, "deleting an unset series is a harmless no-op")
+}
+
 func TestPrometheusConsumerMetrics_inFlightBytesGauge(t *testing.T) {
 	// InFlightBytesAdd is a gauge: positive deltas raise it, negative lower it,
 	// and a +n/-n pair returns it to zero.

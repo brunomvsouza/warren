@@ -128,4 +128,11 @@ type ConsumerMetrics interface {
 	// the consumer's conventional "<queue>.dlq" dead-letter queue, sampled by
 	// WithQueueDepthSampler (T52). Emitted only when that DLQ exists.
 	SetDLQDepth(dlq string, depth int64)
+	// DeleteQueueDepth removes the queue_depth{queue} series when the sampler stops
+	// (T52b), so a long-lived process that cycles through distinct queue names does
+	// not accumulate stale frozen series. A no-op for a series that was never set.
+	DeleteQueueDepth(queue string)
+	// DeleteDLQDepth removes the dlq_depth{dlq} series when the sampler stops (T52b),
+	// the dead-letter counterpart of DeleteQueueDepth.
+	DeleteDLQDepth(dlq string)
 }
