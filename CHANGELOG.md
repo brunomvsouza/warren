@@ -40,9 +40,9 @@ First public release line. Everything below is new.
 - `PublishRetry(RetryPolicy)` for automatic transient-error retries.
 - Client-side `UserID` validation (turns the broker's 406 footgun into a local
   `ErrInvalidMessage`); `StampUserID()` to stamp the authenticated user.
-- `PublishBatch` — always-all, single-channel, returns `[]PublishResult` with a
-  per-message `ErrBatchTooLarge` guard (`PublishRetry` does **not** apply to
-  `PublishBatch`).
+- `PublishBatch` — always-all, single-channel, returns `[]PublishResult`;
+  rejects the whole call with `ErrBatchTooLarge` when the batch exceeds
+  `PublishBatchMaxSize` (`PublishRetry` does **not** apply to `PublishBatch`).
 
 #### Topology
 - `Topology.Declare(ctx, conn)` + `AttachTo(conn)` (deep-snapshotted for
