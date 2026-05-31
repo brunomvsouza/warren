@@ -77,6 +77,9 @@ type captureDepthMetrics struct {
 	dlqDepths   map[string]int64
 	notify      chan struct{}
 	notifyOnce  sync.Once
+	// sampleCh, when non-nil, receives one token per SetQueueDepth (non-blocking,
+	// best-effort) so a test can count ticks without a sleep.
+	sampleCh chan struct{}
 }
 
 func newCaptureDepthMetrics() *captureDepthMetrics {
@@ -92,6 +95,12 @@ func (m *captureDepthMetrics) SetQueueDepth(queue string, depth int64) {
 	m.mu.Unlock()
 	if m.notify != nil {
 		m.notifyOnce.Do(func() { close(m.notify) })
+	}
+	if m.sampleCh != nil {
+		select {
+		case m.sampleCh <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -276,5 +285,68 @@ func TestConsumer_DepthSampler_Lifecycle_StopsOnCtxCancel(t *testing.T) {
 	case <-consumeDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Consume did not return after ctx cancel")
+	}
+}
+
+func TestConsumer_RunDepthSampler_SkipsWhenCtxAlreadyCancelled(t *testing.T) {
+	// A context already cancelled when the sampler goroutine starts must produce no
+	// probe at all — not even the priming sample — so a consumer torn down in the same
+	// breath as it starts never issues a stray declare.
+	ch := newFakeDepthChannel()
+	ch.counts["orders"] = 9
+	cm := newCaptureDepthMetrics()
+	c := newDepthSamplerConsumer(t, ch, cm)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before runDepthSampler observes it
+
+	c.runDepthSampler(ctx) // returns immediately
+
+	q, d := cm.snapshot()
+	assert.Empty(t, q, "no queue_depth sample when ctx is already cancelled")
+	assert.Empty(t, d, "no dlq_depth sample when ctx is already cancelled")
+	assert.Zero(t, ch.passiveCallCount("orders"), "no passive declare when ctx is already cancelled")
+}
+
+func TestConsumer_RunDepthSampler_TicksRepeatedly(t *testing.T) {
+	// The sampler primes once, then re-samples on every tick. Drive runDepthSampler
+	// directly with a short interval and await two emissions (prime + at least one
+	// tick), proving the ticker branch of the loop fires rather than only the prime.
+	defer goleak.VerifyNone(t)
+
+	ch := newFakeDepthChannel()
+	ch.counts["orders"] = 5
+	cm := newCaptureDepthMetrics()
+	cm.sampleCh = make(chan struct{}, 8)
+
+	conn := newFakeConsumerConn(t)
+	conn.conConns[0].chanFactory = func() (topologyChannel, error) { return ch, nil }
+	c, err := ConsumerFor[string](conn).
+		Queue("orders").
+		Metrics(cm).
+		WithQueueDepthSampler(5 * time.Millisecond).
+		Build()
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.runDepthSampler(ctx)
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-cm.sampleCh:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("sampler emitted %d samples; expected at least 2 (prime + tick)", i)
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runDepthSampler did not return after ctx cancel")
 	}
 }

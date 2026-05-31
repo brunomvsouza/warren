@@ -414,10 +414,17 @@ const dlqNameSuffix = ".dlq"
 
 // runDepthSampler periodically samples the source-queue and DLQ depths until ctx is
 // cancelled (T52). It primes the gauges once immediately so they are populated before
-// the first tick, then samples every depthSampleInterval.
+// the first tick, then samples every depthSampleInterval. A context already cancelled
+// when the goroutine starts skips even the priming sample, so a consumer torn down in
+// the same breath as it starts issues no stray declare.
 func (c *Consumer[M]) runDepthSampler(ctx context.Context) {
 	ticker := time.NewTicker(c.depthSampleInterval)
 	defer ticker.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
 	c.sampleDepths()
 	for {
 		select {
