@@ -1262,10 +1262,10 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 - **Files:** `topology.go`, `topology_integration_test.go`.
 - **Deps:** T15.
 
-### [ ] T48 — Strict JSON Codec & Trailing Data [P0] · XS
+### [x] T48 — Strict JSON Codec & Trailing Data [P0] · XS
 - **Acceptance:**
-  - [ ] `codec.NewJSON()` and `codec.NewJSONStrict()` evaluates `dec.More()` after first decode and returns `ErrInvalidMessage` if true.
-  - [ ] `FuzzCodecJSONStrict` target added to `json_fuzz_test.go`.
+  - [x] `codec.NewJSON()` and `codec.NewJSONStrict()` evaluates `dec.More()` after first decode and returns `ErrInvalidMessage` if true.
+  - [x] `FuzzCodecJSONStrict` target added to `json_fuzz_test.go`.
 - **Verify:** Decodes `{"id":1}{"id":2}` return `ErrInvalidMessage`. Fuzz target runs without panics.
 - **Files:** `codec/json.go`, `codec/json_test.go`, `codec/json_fuzz_test.go`.
 - **Deps:** T09.
