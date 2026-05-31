@@ -166,6 +166,18 @@ func (a *analysis) check() (violations []violation, report []string) {
 			violations = append(violations, violation{trimModule(pkg), s.pct(), floor})
 		}
 	}
+	// Critical PACKAGES absent from the profile fail closed, mirroring the
+	// critical-FILE rule below: a choke-point package dropped from the profile (a
+	// rename, a widened coverage.sh exclusion, or a build-tag change that zeroes
+	// its test files) must surface as a violation rather than silently voiding the
+	// 95% floor. Without this the package floor — unlike the file floor — would
+	// fail open, leaving the AMQP-correctness/credential-safety choke-points
+	// unenforced if one ever dropped out of the profiled set.
+	for pkg := range criticalPackages {
+		if _, ok := a.packages[pkg]; !ok {
+			violations = append(violations, violation{trimModule(pkg), 0, floorCritical})
+		}
+	}
 	for file := range criticalFiles {
 		s := a.files[file]
 		if s == nil {
