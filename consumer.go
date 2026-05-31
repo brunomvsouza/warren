@@ -436,6 +436,30 @@ func classifyBrokerCancel(mc *managedConn, queue string) string {
 	return cancelReasonExclusiveRevoked
 }
 
+// classifyCancel resolves the bounded reason class for a basic.cancel, skipping the
+// broker round-trip when no observer would use the result. The class is consumed in
+// exactly two places: the fallback warning log (only when onCancel is unset) and the
+// consumer_cancelled_total metric. When onCancel is set AND the metrics sink is the
+// NoOp default, the class is discarded by both — so the probe is pure overhead and we
+// return cancelReasonUnknown without opening a channel.
+func classifyCancel(mc *managedConn, queue string, onCancel func(string), cm metrics.ConsumerMetrics) string {
+	if onCancel != nil {
+		if _, isNoOp := cm.(metrics.NoOpConsumerMetrics); isNoOp {
+			return cancelReasonUnknown
+		}
+	}
+	return classifyBrokerCancel(mc, queue)
+}
+
+// brokerCancel pairs the two datums a basic.cancel response needs, so they cannot be
+// transposed at a call site: tag is the unbounded consumer tag from the frame (it
+// feeds OnCancel and the wrapped ErrConsumerCancelled, where unbounded values are
+// harmless), and class is the bounded reason enum recorded on the metric label.
+type brokerCancel struct {
+	tag   string
+	class string
+}
+
 // byteLimiter is the in-flight memory guardrail (T50). It caps the sum of
 // len(Delivery.Body) across handlers running concurrently, bounding heap use when
 // prefetch × concurrency × body-size would otherwise blow the process up. A nil
@@ -518,9 +542,9 @@ func forwardCancelReason(ch chan<- string, reason string) {
 
 // handleBrokerCancel runs the shared basic.cancel response, then drains in-flight
 // handlers before returning so the caller (runConsume) leaves no goroutines behind.
-func (c *Consumer[M]) handleBrokerCancel(wg *sync.WaitGroup, reason string) error {
-	metricReason := classifyBrokerCancel(c.mc, c.queue)
-	err := surfaceBrokerCancel(c.onCancel, c.mc.opts.logger, c.cm, c.queue, reason, metricReason)
+func (c *Consumer[M]) handleBrokerCancel(wg *sync.WaitGroup, tag string) error {
+	bc := brokerCancel{tag: tag, class: classifyCancel(c.mc, c.queue, c.onCancel, c.cm)}
+	err := surfaceBrokerCancel(c.onCancel, c.mc.opts.logger, c.cm, c.queue, bc)
 	wg.Wait()
 	return err
 }
@@ -531,20 +555,20 @@ func (c *Consumer[M]) handleBrokerCancel(wg *sync.WaitGroup, reason string) erro
 // build the ErrConsumerCancelled the consumer goroutine returns. The wrapped error
 // carries the tag (the only datum the frame provides); the library does NOT
 // auto-redeclare the queue — operators usually deleted it on purpose.
-// metricReason is the bounded reason enum (classifyBrokerCancel) recorded on the
-// metric, kept distinct from reason (the unbounded consumer tag) which only feeds
-// OnCancel and the wrapped error.
-func surfaceBrokerCancel(onCancel func(string), logger log.Logger, cm metrics.ConsumerMetrics, queue, reason, metricReason string) error {
+// bc carries the unbounded consumer tag (bc.tag, fed to OnCancel and the wrapped
+// error) and the bounded reason enum (bc.class, recorded on the metric label),
+// kept in one struct so the two strings cannot be swapped at a call site.
+func surfaceBrokerCancel(onCancel func(string), logger log.Logger, cm metrics.ConsumerMetrics, queue string, bc brokerCancel) error {
 	if onCancel != nil {
-		onCancel(reason)
+		onCancel(bc.tag)
 	} else {
 		logger.Warningf(
 			"warren: broker cancelled consumer %q on queue %q (basic.cancel, reason=%s); Consume returns ErrConsumerCancelled and does not auto-redeclare the queue",
-			reason, queue, metricReason,
+			bc.tag, queue, bc.class,
 		)
 	}
-	cm.RecordCancelled(queue, metricReason)
-	return fmt.Errorf("%w: consumer tag %q", ErrConsumerCancelled, reason)
+	cm.RecordCancelled(queue, bc.class)
+	return fmt.Errorf("%w: consumer tag %q", ErrConsumerCancelled, bc.tag)
 }
 
 // Consume starts consuming from the configured queue, decoding each message

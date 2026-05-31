@@ -7,7 +7,56 @@ import (
 	amqp091 "github.com/rabbitmq/amqp091-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/brunomvsouza/warren/metrics"
 )
+
+// newCountingInspectConn returns a managedConn whose chanFactory both serves the
+// passive-declare probe and counts how many times a channel was opened, so a test
+// can assert whether the broker round-trip ran.
+func newCountingInspectConn(ch *fakeInspectChannel, opened *int) *managedConn {
+	conn := &Connection{}
+	mc := &managedConn{opts: &conn.opts}
+	mc.chanFactory = func() (topologyChannel, error) { *opened++; return ch, nil }
+	return mc
+}
+
+func TestClassifyCancel_SkipsProbeWhenClassUnobserved(t *testing.T) {
+	// OnCancel is set (so the warning log never references the class) and the metrics
+	// sink is the NoOp default (so RecordCancelled discards it): no observer needs the
+	// class, so classifyCancel must skip the broker round-trip entirely.
+	var opened int
+	mc := newCountingInspectConn(&fakeInspectChannel{}, &opened)
+
+	reason := classifyCancel(mc, "q", func(string) {}, metrics.NoOpConsumerMetrics{})
+
+	assert.Equal(t, cancelReasonUnknown, reason)
+	assert.Zero(t, opened, "no broker channel must be opened when the class is unobserved")
+}
+
+func TestClassifyCancel_ProbesWhenLogNeedsClass(t *testing.T) {
+	// OnCancel is unset, so the fallback warning log prints the class — it must probe
+	// even though the metrics sink is the NoOp default.
+	var opened int
+	mc := newCountingInspectConn(&fakeInspectChannel{}, &opened)
+
+	reason := classifyCancel(mc, "q", nil, metrics.NoOpConsumerMetrics{})
+
+	assert.Equal(t, cancelReasonExclusiveRevoked, reason)
+	assert.Equal(t, 1, opened, "must probe when OnCancel is unset (the log needs the class)")
+}
+
+func TestClassifyCancel_ProbesWhenMetricsObserveClass(t *testing.T) {
+	// A real (non-NoOp) metrics sink records the class, so classifyCancel must probe
+	// even though OnCancel is set.
+	var opened int
+	mc := newCountingInspectConn(&fakeInspectChannel{}, &opened)
+
+	reason := classifyCancel(mc, "q", func(string) {}, &countingConsumerMetrics{})
+
+	assert.Equal(t, cancelReasonExclusiveRevoked, reason)
+	assert.Equal(t, 1, opened, "must probe when a non-NoOp metrics sink records the class")
+}
 
 // fakeInspectChannel is a topologyChannel that also answers QueueDeclarePassive,
 // used to exercise classifyBrokerCancel without a live broker.
