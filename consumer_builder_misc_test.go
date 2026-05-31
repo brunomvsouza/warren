@@ -159,8 +159,11 @@ func TestConsumer_Health_ReturnsErrNotConnected_OnFakeConn(t *testing.T) {
 
 	// The fake conn has no live socket (raw == nil) and is not reconnecting, so
 	// Health delegates to managedConn.health and reports ErrNotConnected — a
-	// concrete, asserted outcome rather than "did not panic".
-	require.ErrorIs(t, c.Health(context.Background()), ErrNotConnected)
+	// concrete, asserted outcome rather than "did not panic". The snapshot is nil
+	// when the connection check fails (T53).
+	h, err := c.Health(context.Background())
+	require.ErrorIs(t, err, ErrNotConnected)
+	require.Nil(t, h)
 }
 
 // — Compile-time interface assertion ————————————————————————————————
