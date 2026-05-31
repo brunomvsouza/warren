@@ -1,0 +1,29 @@
+# Fixed project name so the integration broker is addressable by a stable name
+# regardless of the directory Compose is invoked from (the default project name is
+# the compose file's parent dir — `test` — after this file moved under test/).
+name: warren-integration
+
+services:
+  rabbitmq:
+    # Deterministic container name (not the project_service_index default) so
+    # `docker logs warren-rabbitmq` / `docker exec warren-rabbitmq ...` work without
+    # first looking the name up — same convention as the cluster compose nodes.
+    container_name: warren-rabbitmq
+    # Built from Dockerfile.rabbitmq-delayed (rabbitmq:3.13-management +
+    # rabbitmq_delayed_message_exchange) so the delayed-delivery timing assertions
+    # actually run instead of skipping. CI builds the same image, keeping the local
+    # broker identical to the integration lane. The build context is this file's own
+    # directory (test/), so `dockerfile:` names the sibling Dockerfile; it only FROMs
+    # + ADDs a pinned remote .ez, never COPYing from the context.
+    build:
+      context: .
+      dockerfile: Dockerfile.rabbitmq-delayed
+    image: warren-rabbitmq-delayed:3.13
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

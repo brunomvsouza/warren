@@ -70,7 +70,7 @@ error. The two-wrap step (`%w: %w`) must be preserved so `errors.Is`/`AMQPCode` 
 ---
 
 <!-- LATER-10 resolved (same work as LATER-65): the integration/conformance lanes no longer pull
-the floating rabbitmq:3-management tag. Dockerfile.rabbitmq-delayed pins `FROM rabbitmq:3.13-management`
+the floating rabbitmq:3-management tag. test/Dockerfile.rabbitmq-delayed pins `FROM rabbitmq:3.13-management`
 (by SHA-256) and ci.yml builds that image for the broker jobs — exactly the rabbitmq:3.13-management
 pin this entry suggested. Confirmed by Phase 9 /ship code-reviewer (S5, 2026-05-31). -->
 
@@ -142,7 +142,7 @@ topo := &warren.Topology{
 
 **Prerequisites:** LATER-20 (DLX/DLQ binding), RabbitMQ 3.10+ (quorum-queue `x-delivery-limit`
 support). The integration/conformance lanes build the pinned `rabbitmq:3.13-management` image
-(Dockerfile.rabbitmq-delayed), which supports quorum queues.
+(test/Dockerfile.rabbitmq-delayed), which supports quorum queues.
 
 ---
 
@@ -452,7 +452,7 @@ ergonomics + interop gap relative to JSON/CloudEvents where the body is
 self-describing.
 
 **Evidence:** Lens-03 interoperability/wire-format spec validation, 2026-05-28
-(finding IW-05; `spec-validation/03-interoperability-wire-format-plan.md`). Owner
+(finding IW-05; `docs/spec-validation/03-interoperability-wire-format-plan.md`). Owner
 decision (2026-05-28): defer the discriminator to LATER, document the constraint now.
 
 **Suggested solution:** Offer an opt-in discriminator strategy that does not break
@@ -488,7 +488,7 @@ that want Confluent-style schema-registry guarantees (compatibility checks, sche
 on the wire) must hand-roll them on top of the codec interface.
 
 **Evidence:** Lens-04 event-driven-architecture spec validation, 2026-05-28 (finding
-EDA-13; `spec-validation/04-event-driven-architecture-plan.md`). Owner decision
+EDA-13; `docs/spec-validation/04-event-driven-architecture-plan.md`). Owner decision
 (2026-05-28): document the boundary + versioned-type convention now (T106), defer a
 pluggable registry hook to LATER.
 
@@ -526,7 +526,7 @@ cross-check `ErrUnroutable` by hand; a naive `switch AMQPCode(err)` mishandles t
 channel-close failure. The two frame classes deserve distinct, self-describing accessors.
 
 **Evidence:** Lens-06 Go-API/library-design spec validation, 2026-05-28 (finding GA-08;
-`spec-validation/06-go-api-library-design-plan.md`). Owner-deferred: T126 ships the §6.8
+`docs/spec-validation/06-go-api-library-design-plan.md`). Owner-deferred: T126 ships the §6.8
 caveat now; the typed accessor is non-blocking.
 
 **Suggested solution:** Add a dedicated `ReturnCode(err) (uint16, bool)` that returns a
@@ -560,7 +560,7 @@ authenticates correctly (the broker decides), and CN is the RabbitMQ default. Th
 not a correctness/security hole once documented.
 
 **Evidence:** Lens-07 security & threat-modeling spec validation, 2026-05-29 (finding ST-04;
-`spec-validation/07-security-threat-modeling-plan.md`). Owner decision D4: doc-only for v0.1;
+`docs/spec-validation/07-security-threat-modeling-plan.md`). Owner decision D4: doc-only for v0.1;
 configurable extraction deferred.
 
 **Suggested solution:** Add a `WithExternalPrincipalFrom(...)` connection option (or a small
@@ -592,7 +592,7 @@ T145 (Phase 19, Lens-08 CR-07) ships the **doc-only** mitigation (document the p
 recommend caller-side fan-out limiting) but adds no aggregate cap.
 
 **Evidence:** Lens-08 Go concurrency & runtime-correctness spec validation, 2026-05-29 (finding CR-07;
-`spec-validation/08-go-concurrency-runtime-plan.md`). Owner decision D4: document the per-call boundary
+`docs/spec-validation/08-go-concurrency-runtime-plan.md`). Owner decision D4: document the per-call boundary
 for v0.1; the aggregate window deferred.
 
 **Suggested solution:** Add a `WithMaxInFlightConfirms(n int)` connection (or publisher) option that
@@ -628,7 +628,7 @@ deep wins carry codec-API and dependency implications (a pooled `Encode` changes
 `timeMu`-free generator means a custom UUIDv7 source rather than google/uuid), so they are consciously deferred.
 
 **Evidence:** Lens-09 performance & capacity spec validation, 2026-05-29 (§12 hot-path allocation ledger;
-`spec-validation/09-performance-capacity-plan.md`). Owner decision D1: land the cheap wins in Phase 20; defer
+`docs/spec-validation/09-performance-capacity-plan.md`). Owner decision D1: land the cheap wins in Phase 20; defer
 the deep wins.
 
 **Suggested solution:** (1) A pooled-buffer codec `Encode` path — a `sync.Pool` of `bytes.Buffer` + a reused
@@ -664,7 +664,7 @@ close the last attacker-influenced-input gap and lock the no-panic / bounded-all
 header path, matching the bar the other 6 targets already hold.
 
 **Evidence:** Lens-10 test-strategy & verifiability spec validation, 2026-05-29 (brief §5 WS-5 + §13 finding row
-"LATER-46 residual fuzz"; `spec-validation/10-test-strategy-verifiability-plan.md`). The lens routes the
+"LATER-46 residual fuzz"; `docs/spec-validation/10-test-strategy-verifiability-plan.md`). The lens routes the
 load-bearing byte-parsers to the existing 6 targets and defers this one residual.
 
 **Suggested solution:** Add `FuzzHeadersExtract` in `internal/headers` that feeds randomized `amqp091.Table`
@@ -697,7 +697,7 @@ a large, opinionated feature with key-management implications, and T141 already 
 encryption is out of scope for v0.1.
 
 **Evidence:** Lens-11 data-protection compliance spec validation, 2026-05-29 (brief
-`spec-validation/11-compliance-gdpr-lgpd-plan.md` §13 findings table DP-01/DP-07, §10 owner decision D3, §14
+`docs/spec-validation/11-compliance-gdpr-lgpd-plan.md` §13 findings table DP-01/DP-07, §10 owner decision D3, §14
 out-of-scope). The lens routes the documentation-level mitigations to T154/T141 and defers the cryptographic
 control here.
 
@@ -732,7 +732,7 @@ accelerator, not a correctness gap. Without it, operators must assemble dashboar
 themselves from the metric reference.
 
 **Evidence:** Lens-12 DX & documentation spec validation, 2026-05-29 (brief
-`spec-validation/12-dx-documentation-plan.md` §13 findings table DX-10, §14 examples-gap list item 6, §10 owner
+`docs/spec-validation/12-dx-documentation-plan.md` §13 findings table DX-10, §14 examples-gap list item 6, §10 owner
 decision D5, §16 out-of-scope). The lens routes the minimal example to T163 and defers the full cookbook here.
 
 **Suggested solution:** Ship a `examples/observability/` (or a `docs/observability/` companion) containing: a
@@ -766,7 +766,7 @@ is an ops/infra investment (cost, hosting, ops cadence), not a code or correctne
 campaign specs (T166) already make the campaigns runnable.
 
 **Evidence:** Lens-13 load & reliability-testing spec validation, 2026-05-29 (brief
-`spec-validation/13-load-testing-plan.md` §13 findings table LT-01/02/12, §14 minimum-campaign-set item 5, §15 open
+`docs/spec-validation/13-load-testing-plan.md` §13 findings table LT-01/02/12, §14 minimum-campaign-set item 5, §15 open
 question Q1, §10 owner decision D5, §16 out-of-scope). The lens lands the harness contract + campaign specs in T166
 and defers the standing environment here.
 
@@ -971,10 +971,10 @@ contract accordingly (SPEC §2 Tech Stack, §9 success criterion, §10 decision 
 CLAUDE). The *planning* docs for the not-yet-implemented Phase 9 CI work still describe the old
 `Go matrix (1.23, 1.24)`: `tasks/plan.md` (T42, T150, T151 and their VG-1..VG-6 gate references),
 `tasks/todo.md` (the T42 checkbox and the VG-1/VG-3 ground-truth rows), and the dated lens brief
-`spec-validation/10-test-strategy-verifiability-plan.md` (TV-07 "Go 1.24 not in the CI matrix",
+`docs/spec-validation/10-test-strategy-verifiability-plan.md` (TV-07 "Go 1.24 not in the CI matrix",
 plus several "Go 1.23 only" CI-reality observations).
 
-**Impact:** Low and bounded. The dated `spec-validation/*.md` briefs are **historical review
+**Impact:** Low and bounded. The dated `docs/spec-validation/*.md` briefs are **historical review
 records** — at review time (2026-05-28/29) CI genuinely ran 1.23 only, so rewriting them would
 falsify the record; they should stay as-is. The `tasks/plan.md`/`tasks/todo.md` matrix references
 are forward-looking specs for unstarted work, so the only real risk is that whoever implements
@@ -988,7 +988,7 @@ cross-referenced planning blocks and dated historical briefs.
 **Suggested solution:** When Phase 9 (T42/T150/T151) is picked up, update the matrix floor in
 `tasks/plan.md` + `tasks/todo.md` from `1.23/1.24` to the then-current Go-team-supported minors
 (1.25/1.26 today), and resolve the TV-07 finding against the real matrix. Leave the dated
-`spec-validation/10-*.md` brief intact as a historical artifact (or add a dated addendum noting the
+`docs/spec-validation/10-*.md` brief intact as a historical artifact (or add a dated addendum noting the
 floor moved), rather than rewriting its review-time observations.
 
 **Prerequisites:** Coordinates with T42/T150/T151 (Phase 9 CI matrix + verification gates). No
@@ -1040,9 +1040,9 @@ dependency for the doc reconciliation itself.
 
 ---
 
-<!-- LATER-65 resolved (option b): Dockerfile.rabbitmq-delayed bakes the
+<!-- LATER-65 resolved (option b): test/Dockerfile.rabbitmq-delayed bakes the
      rabbitmq_delayed_message_exchange plugin (pinned by SHA-256) into a
-     rabbitmq:3.13-management broker; docker-compose.integration.yml builds it and the
+     rabbitmq:3.13-management broker; test/docker-compose.integration.yml builds it and the
      ci.yml integration job provisions it via `make integration-up`, so
      TestDelay_DelayedDelivery_integration and the examples/delayed smoke test now run
      the 2s–2.5s window assertion on every integration lane instead of skipping. The
@@ -1141,7 +1141,7 @@ dependency for the doc reconciliation itself.
 
 ### LATER-73 — Root package coverage sits ~0.4pt above the 80% floor (gate-flap risk)
 
-**Context:** `scripts/covercheck` enforces per-package ≥80% and critical-path ≥95%. The root `warren` package currently measures ~80.4% — a ~0.4-percentage-point margin above the default floor. Any root-package edit that adds a few uncovered statements (a new error branch, an option, a guard) can tip it under 80% and fail the coverage gate on an otherwise-correct change.
+**Context:** `internal/cmd/covercheck` enforces per-package ≥80% and critical-path ≥95%. The root `warren` package currently measures ~80.4% — a ~0.4-percentage-point margin above the default floor. Any root-package edit that adds a few uncovered statements (a new error branch, an option, a guard) can tip it under 80% and fail the coverage gate on an otherwise-correct change.
 
 **Impact:** Low but recurring friction: the gate can flap red on small, correct additions to root-package files, forcing an unrelated coverage top-up in the same PR. It is a thin-margin maintainability issue, not a correctness gap.
 
@@ -1211,7 +1211,7 @@ dependency for the doc reconciliation itself.
 
 ### LATER-78 — Coverage gate: a package with no test files is invisible to the floor; tool binaries are version- not hash-pinned
 
-**Context:** `scripts/coverage.sh` computes coverage over `go list ./... | grep -vE …` and floors only packages that emit profile blocks — a package that compiles but has no `_test.go` produces no entry and silently escapes the 80% floor (the new critical-package fail-closed check in `scripts/covercheck` only covers the four declared choke-points). Separately, `golangci-lint` (`version: v2.12` minor track), `govulncheck` (`GOVULNCHECK_VERSION`), and `benchstat` (`go install @<pseudo-version>`) are resolved at run time through the checksum DB rather than pinned by exact patch/hash like the SHA-pinned actions.
+**Context:** `scripts/coverage.sh` computes coverage over `go list ./... | grep -vE …` and floors only packages that emit profile blocks — a package that compiles but has no `_test.go` produces no entry and silently escapes the 80% floor (the new critical-package fail-closed check in `internal/cmd/covercheck` only covers the four declared choke-points). Separately, `golangci-lint` (`version: v2.12` minor track), `govulncheck` (`GOVULNCHECK_VERSION`), and `benchstat` (`go install @<pseudo-version>`) are resolved at run time through the checksum DB rather than pinned by exact patch/hash like the SHA-pinned actions.
 
 **Impact:** A new non-critical package can ship with zero tests and the coverage job stays green; a broadened tool tag could silently change the enforced ruleset / advisory DB. Both are gate-integrity weaknesses, not live vulnerabilities (the tools are reputable first-party and the jobs are least-privilege/read-only).
 

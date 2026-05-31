@@ -30,6 +30,12 @@
 # developer runs `make cluster-up` on an untrusted network. The lane only needs
 # localhost; a standing remote environment (LATER-49) must widen the binding itself.
 
+# Fixed project name so the cluster is addressable by a stable name regardless of the
+# directory Compose is invoked from (the default would be the compose file's parent
+# dir — `test` — after this file moved under test/). Each node also pins its own
+# container_name (warren-rmq0/1/2, warren-toxiproxy) below for the same debug ergonomics.
+name: warren-cluster
+
 x-rabbitmq: &rabbitmq-base
   # Pinned to a specific 3.13 patch (not the floating 3.13-management tag) so the
   # cluster lane is reproducible; T166g adds a 4.x member for the rolling-upgrade

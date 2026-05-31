@@ -19,7 +19,7 @@ GOTOOLCHAIN     ?= go$(GO_MOD_VERSION)
 STRESS_COUNT ?= 200
 
 # Cluster lane (Phase 9.5) endpoints. Defaults match the host port mapping in
-# docker-compose.cluster.yml (Toxiproxy-fronted AMQP ports 5680/5681/5682, rmq0
+# test/docker-compose.cluster.yml (Toxiproxy-fronted AMQP ports 5680/5681/5682, rmq0
 # management on 15672, Toxiproxy control API on 8474). Override to point the lane
 # at a standing cluster (LATER-49).
 WARREN_CLUSTER_NODES ?= amqp://guest:guest@localhost:5680/,amqp://guest:guest@localhost:5681/,amqp://guest:guest@localhost:5682/
@@ -41,10 +41,10 @@ cover: ## Generate coverage.out and enforce per-package (>=80%) + critical-path 
 	GO=$(GO) ./scripts/coverage.sh coverage.out
 
 integration-up: ## Start RabbitMQ broker locally via Docker Compose (waits for healthy).
-	docker compose -f docker-compose.integration.yml up -d --wait
+	docker compose -f test/docker-compose.integration.yml up -d --wait
 
 integration-down: ## Stop and remove the local RabbitMQ broker.
-	docker compose -f docker-compose.integration.yml down
+	docker compose -f test/docker-compose.integration.yml down
 
 test-integration: ## Run integration tests (requires AMQP_TEST_URL + AMQP_TEST_MANAGEMENT_URL; 'make integration-up' starts the broker).
 	$(GO) test -race -tags=integration $(PKG)
@@ -59,10 +59,10 @@ test-stress: ## Hammer scheduling-sensitive tests (stress build tag) under -race
 	$(GO) test -race -tags=stress -count=$(STRESS_COUNT) -run '^TestStress$$' .
 
 cluster-up: ## Start the 3-node RabbitMQ cluster + Toxiproxy via Docker Compose (waits for healthy).
-	docker compose -f docker-compose.cluster.yml up -d --wait
+	docker compose -f test/docker-compose.cluster.yml up -d --wait
 
 cluster-down: ## Stop and remove the local RabbitMQ cluster + Toxiproxy.
-	docker compose -f docker-compose.cluster.yml down
+	docker compose -f test/docker-compose.cluster.yml down
 
 # Cluster lane: runs the cluster build-tag tests against the compose cluster, with
 # a zero-run guard implementing the TV-13 pattern (the planned integration TV-13
