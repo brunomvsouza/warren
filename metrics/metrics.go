@@ -95,8 +95,9 @@ type ConsumerMetrics interface {
 	// MetricsLabelMessageType was enabled at construction and ignores it otherwise.
 	RecordHandler(queue, messageType, outcome string, d time.Duration)
 	// RecordCancelled increments the broker-initiated cancel counter.
-	// reason is the consumer tag reported by basic.cancel; it identifies which
-	// consumer the broker cancelled (useful when multiple consumers share a queue).
+	// reason is a bounded enum classifying the basic.cancel — warren passes
+	// "queue_deleted", "exclusive_revoked", or "unknown" (never the unbounded
+	// consumer tag, which would explode label cardinality).
 	RecordCancelled(queue, reason string)
 	// RecordMaxRedeliveries increments the max-redeliveries counter.
 	// cause distinguishes the enforcement paths emitted by this library:

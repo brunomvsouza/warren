@@ -411,7 +411,7 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 			// OnCancel, record the metric, and return ErrConsumerCancelled (SPEC §6.3).
 			pending = pending[:0]
 			stopFlushTimer()
-			return surfaceBrokerCancel(c.onCancel, c.mc.opts.logger, c.cm, c.queue, reason)
+			return surfaceBrokerCancel(c.onCancel, c.mc.opts.logger, c.cm, c.queue, reason, classifyBrokerCancel(c.mc, c.queue))
 
 		case <-flushCh:
 			flushCh = nil
@@ -432,7 +432,7 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 				case <-ctx.Done():
 					return nil
 				case reason := <-c.cancelReasonCh:
-					return surfaceBrokerCancel(c.onCancel, c.mc.opts.logger, c.cm, c.queue, reason)
+					return surfaceBrokerCancel(c.onCancel, c.mc.opts.logger, c.cm, c.queue, reason, classifyBrokerCancel(c.mc, c.queue))
 				case cur = <-resubCh:
 				}
 				continue

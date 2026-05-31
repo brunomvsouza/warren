@@ -1270,10 +1270,10 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 - **Files:** `codec/json.go`, `codec/json_test.go`, `codec/json_fuzz_test.go`.
 - **Deps:** T09.
 
-### [ ] T49 — Consumer Tag Cardinality Explosion [P1] · S
+### [x] T49 — Consumer Tag Cardinality Explosion [P1] · S
 - **Acceptance:**
-  - [ ] The Prometheus metric `consumer_cancelled_total` uses a static string (enum) for the `reason` label instead of the raw UUID consumer-tag.
-  - [ ] Reason mapping: checks if queue exists via `QueueInspect`; if missing → `"queue_deleted"`, else → `"exclusive_revoked"`, default `"unknown"`.
+  - [x] The Prometheus metric `consumer_cancelled_total` uses a static string (enum) for the `reason` label instead of the raw UUID consumer-tag.
+  - [x] Reason mapping: checks if queue exists via `QueueInspect`; if missing → `"queue_deleted"`, else → `"exclusive_revoked"`, default `"unknown"`.
 - **Verify:** Unit test asserting `reason` label is one of the enums, not a `ctag-` UUID.
 - **Files:** `metrics/prometheus.go`, `consumer.go`.
 - **Deps:** T19, T36.

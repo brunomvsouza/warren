@@ -862,8 +862,9 @@ func TestConsumer_Consume_HandlerTimeout_CompletesBeforeDeadline_HandlerError_Na
 
 func TestConsumer_Consume_BasicCancel_RecordsCancelledAndReturns(t *testing.T) {
 	// When the broker sends basic.cancel (simulated via cancelReasonCh injection),
-	// the metric increments with the bounded "broker_initiated" reason class and
-	// Consume returns ErrConsumerCancelled wrapping the consumer tag (SPEC §6.3).
+	// the metric increments with a bounded reason enum (T49) — here "unknown",
+	// since the fake connection cannot run the passive-declare probe — and Consume
+	// returns ErrConsumerCancelled wrapping the consumer tag (SPEC §6.3).
 	defer goleak.VerifyNone(t)
 
 	conn := newFakeConsumerConn(t)
@@ -898,8 +899,10 @@ func TestConsumer_Consume_BasicCancel_RecordsCancelledAndReturns(t *testing.T) {
 	assert.Contains(t, consumeErr.Error(), consumer.tag, "the returned error must carry the cancelled consumer tag")
 	assert.Equal(t, 1, cm.cancelled, "RecordCancelled must be called once for basic.cancel")
 	assert.Equal(t, "testq", cm.cancelledQueue, "RecordCancelled queue must be the consumer queue")
-	assert.Equal(t, cancelReasonBrokerInitiated, cm.cancelledReason,
-		"metric reason must be the bounded broker_initiated class, not the unbounded consumer tag")
+	assert.Equal(t, cancelReasonUnknown, cm.cancelledReason,
+		"metric reason must be the bounded enum, not the unbounded consumer tag")
+	assert.NotContains(t, cm.cancelledReason, "ctag-",
+		"metric reason must never be the consumer-tag UUID (cardinality explosion)")
 }
 
 func TestConsumer_Consume_DeliveryChannelClosed_WaitsForCtxCancel(t *testing.T) {

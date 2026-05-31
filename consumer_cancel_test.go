@@ -15,9 +15,10 @@ import (
 //
 // When the broker sends basic.cancel (queue deleted, exclusive lock revoked) the
 // library must: fire OnCancel(reason=tag) if set (else warn), increment the bounded
-// consumer_cancelled_total{queue, reason="broker_initiated"} metric, and return
-// Consume with ErrConsumerCancelled wrapping the tag — never silently die. The
-// library does NOT auto-redeclare the queue.
+// consumer_cancelled_total{queue, reason} metric with a closed-vocabulary enum
+// ("queue_deleted"/"exclusive_revoked"/"unknown", T49), and return Consume with
+// ErrConsumerCancelled wrapping the tag — never silently die. The library does NOT
+// auto-redeclare the queue.
 
 func TestConsumer_BasicCancel_FiresOnCancelWithTag(t *testing.T) {
 	defer goleak.VerifyNone(t)
