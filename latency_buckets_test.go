@@ -131,7 +131,7 @@ func quantileFromBuckets(buckets []cumulativeBucket, count uint64, q float64) fl
 // computed from cumulative buckets: total minus the cumulative count of the largest
 // bucket whose upper bound is ≤ threshold. For an exact count, threshold should be a
 // bucket boundary (otherwise samples in the gap between the boundary and threshold
-// are counted as "above"). The node-down tail campaign uses it to prove a genuinely
+// are counted as "above"). The partition-tail campaign uses it to prove a genuinely
 // slow confirm landed in a finite high bucket — non-vacuity the all-nodes-up
 // baseline cannot show. buckets must be ascending (selectPublishLatencyBuckets sorts).
 func samplesAbove(buckets []cumulativeBucket, count uint64, threshold float64) uint64 {
@@ -201,18 +201,19 @@ func TestSamplesAbove_countsStrictlyAboveBoundary(t *testing.T) {
 }
 
 // VG-6 detector: a single slow sample in a high bucket must be counted as exactly
-// one above the healthy boundary — this is the non-vacuity signal the node-down
-// tail campaign relies on (it proves a real tens-of-seconds confirm was recorded).
+// one above the healthy boundary — this is the non-vacuity signal the partition-tail
+// campaign relies on (it proves a real multi-second confirm was recorded). Uses a
+// total of 12 so the helper is exercised with a count other than the cases above.
 func TestSamplesAbove_detectsLoneTailSample(t *testing.T) {
-	buckets := []cumulativeBucket{{upperBound: 0.5, cumulative: 9}, {upperBound: 20, cumulative: 9}, {upperBound: 35, cumulative: 10}}
-	assert.Equal(t, uint64(1), samplesAbove(buckets, 10, 0.5), "exactly the one slow sample must count as above 0.5s")
+	buckets := []cumulativeBucket{{upperBound: 0.5, cumulative: 11}, {upperBound: 20, cumulative: 11}, {upperBound: 35, cumulative: 12}}
+	assert.Equal(t, uint64(1), samplesAbove(buckets, 12, 0.5), "exactly the one slow sample must count as above 0.5s")
 }
 
 func TestSamplesAbove_overflowGuard(t *testing.T) {
 	// A threshold at/above the top finite bucket reports the +Inf overflow (count
 	// minus the top bucket's cumulative); never negative when cumulative == count.
-	buckets := []cumulativeBucket{{upperBound: 1, cumulative: 8}}
-	assert.Equal(t, uint64(2), samplesAbove(buckets, 10, 1), "two samples overflowed past the only finite bucket")
+	buckets := []cumulativeBucket{{upperBound: 1, cumulative: 6}}
+	assert.Equal(t, uint64(2), samplesAbove(buckets, 8, 1), "two samples overflowed past the only finite bucket")
 }
 
 // --- selectPublishLatencyBuckets / publishLatencyBuckets -------------------

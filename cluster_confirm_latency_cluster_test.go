@@ -53,13 +53,29 @@ import (
 	"github.com/brunomvsouza/warren/metrics"
 )
 
-// confirmLatencyConfirmTimeout is the publish path's hard upper bound — the
-// ConfirmTimeout the publisher is built with. The campaign's bucket list is sized
-// against this so the top finite bucket provably exceeds it: a confirmed publish
-// cannot take longer than this (plus the bounded reconnect-barrier wait, which is
-// not exercised here since no node dies), so a top finite bucket above it captures
-// the entire possible latency range with room to spare.
+// confirmLatencyConfirmTimeout is the all-nodes-up baseline's publish-path hard
+// upper bound — the ConfirmTimeout it builds the publisher with. The campaign's
+// bucket list is sized against this so the top finite bucket provably exceeds it: a
+// confirmed publish cannot take longer than this (plus the bounded reconnect-barrier
+// wait, which the partition-tail sibling below DOES exercise), so a top finite bucket
+// above it captures the entire possible latency range with room to spare.
 const confirmLatencyConfirmTimeout = 30 * time.Second
+
+// partitionTailConfirmTimeout is the partition-tail sibling's per-attempt confirm
+// cap. It bounds only the confirm wait (tracker.Wait), NOT the reconnect-barrier wait
+// the cut drives (waitBarrier is taken before the confirm and is uncapped by it), so
+// it can stay well under the 35 s top finite bucket while a few seconds of barrier
+// wait is what populates the tail. A confirmed publish that paid the barrier wait
+// plus a fast post-heal confirm therefore lands comfortably below the top bucket,
+// keeping the success series' "no +Inf clip" guarantee true by construction.
+const partitionTailConfirmTimeout = 15 * time.Second
+
+// tailThresholdSeconds is the boundary (a member of confirmLatencyBucketsSeconds, so
+// samplesAbove is exact) separating healthy quorum confirms — sub-100 ms, p999 in the
+// tens of ms — from a confirm that waited out the reconnect barrier during the
+// partition. At least one recorded latency above it proves the tail was actually
+// driven, the non-vacuity the all-nodes-up baseline cannot show.
+const tailThresholdSeconds = 0.5
 
 // confirmLatencyBucketsSeconds overrides the default publish-latency histogram
 // buckets (SPEC §9's WithLatencyBuckets override, threaded as the buckets argument
@@ -261,4 +277,231 @@ func TestClusterQuorumConfirmLatency_TailNotClipped_cluster(t *testing.T) {
 	t.Logf("quorum confirm latency (3-node Raft majority commit, n=%d confirmed, transient=%d): "+
 		"p50=%.3fms p99=%.3fms p999=%.3fms — tail captured, no +Inf clip",
 		sampleCount, gotTransient, p50*1e3, p99*1e3, p999*1e3)
+}
+
+// TestClusterQuorumConfirmLatency_PartitionTail_cluster drives the SLOW end of the
+// confirm-latency distribution that the all-nodes-up baseline cannot reach. Under
+// streaming confirmed load it briefly CUTS the client's connectivity to every node
+// (Toxiproxy disable on all three node proxies) and then HEALS it. Each in-flight
+// publish attempt blocks in the reconnect barrier (publishOnce's waitBarrier, taken
+// after start and uncapped by ConfirmTimeout) for the whole cut, so once the barrier
+// clears its recorded latency (time.Since(start)) spans the cut: a deterministic
+// multi-second confirm that lands under outcome="success" once it confirms post-heal.
+//
+// Cutting only the client AMQP proxies — not the inter-node 25672 distribution —
+// isolates the CLIENT without partitioning the cluster, so the tail is the publish
+// path's bounded reconnect-barrier wait (named in confirmLatencyConfirmTimeout's doc),
+// reproducible BY CONSTRUCTION from the cut duration. This is deliberately not a clean
+// leader kill: with a healthy majority the Raft re-election completes in ~1-2 s and no
+// single publish ATTEMPT ever accumulates a multi-second latency (publishOnce records
+// per attempt, and the fast retries after a kill each record a short sample), so a
+// kill cannot reliably populate the tail buckets — a cut of a controlled duration can.
+//
+// Asserts:
+//   - the success series captures its tail in a FINITE bucket (no +Inf clip) — true by
+//     construction since the barrier wait plus a fast post-heal confirm stays below
+//     the 35 s top finite bucket;
+//   - at least one confirm/attempt was recorded above tailThresholdSeconds: the
+//     non-vacuity the baseline lacks, proving the multi-second tail was actually
+//     measured and landed in a finite bucket, not the implicit +Inf overflow.
+//
+// This is a confirm-LATENCY campaign, so it carries no consumer — zero-loss across a
+// disruption is the quorum-failover / reconnect-storm campaigns' job.
+func TestClusterQuorumConfirmLatency_PartitionTail_cluster(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	nodes := amqptest.ClusterNodes(t)
+	require.GreaterOrEqual(t, len(nodes), 3,
+		"cluster lane expects at least 3 nodes in WARREN_CLUSTER_NODES")
+	amqptest.WaitClusterReady(t, len(nodes), 90*time.Second)
+
+	const queue = "test.cluster.confirm.latency.partition"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	deleteQuorumQueueCluster(nodes[0], queue)
+	t.Cleanup(func() { deleteQuorumQueueCluster(nodes[0], queue) })
+
+	conn, err := warren.Dial(ctx,
+		warren.WithAddrs([]string{nodes[0], nodes[1], nodes[2]}),
+		warren.WithPublisherConnections(2),
+		warren.WithConsumerConnections(1),
+		warren.WithChannelPoolSize(8),
+		warren.WithReconnectBackoff(clusterFastBackoff),
+	)
+	require.NoError(t, err)
+	defer func() {
+		closeCtx, c := context.WithTimeout(context.Background(), 15*time.Second)
+		defer c()
+		_ = conn.Close(closeCtx)
+	}()
+
+	topo := &warren.Topology{
+		Queues: []warren.Queue{{Name: queue, Durable: true, Type: warren.QueueTypeQuorum}},
+	}
+	require.NoError(t, topo.Declare(ctx, conn))
+	require.NoError(t, topo.AttachTo(conn)) // redeclare on the reconnect barrier the heal triggers
+
+	before := amqptest.QuorumLeader(t, queue)
+	require.Equal(t, "quorum", before.Type)
+	require.Len(t, before.Members, 3, "quorum queue must span all three cluster nodes (3-node majority commit)")
+
+	// Prometheus publisher metrics with the OVERRIDDEN, tail-covering buckets.
+	reg := prometheus.NewRegistry()
+	pm, err := metrics.NewPrometheusPublisherMetrics(reg, confirmLatencyBucketsSeconds)
+	require.NoError(t, err)
+
+	pub, err := warren.PublisherFor[clusterFailoverMsg](conn).
+		RoutingKey(queue). // default exchange "" → route straight to the quorum queue
+		ConfirmTimeout(partitionTailConfirmTimeout).
+		PublishRetry(clusterPublishRetry).
+		Metrics(pm).
+		Build()
+	require.NoError(t, err)
+	defer func() {
+		closeCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+		defer c()
+		_ = pub.Close(closeCtx)
+	}()
+
+	// Toxiproxy control plane. Re-enable every proxy no matter how the test exits, so
+	// a failed assertion (or panic) can never leave the cluster cut for later tests.
+	toxi := amqptest.NewToxiproxy(t)
+	proxies := []string{"rmq0", "rmq1", "rmq2"}
+	t.Cleanup(func() {
+		for _, p := range proxies {
+			_ = toxi.EnableProxy(p)
+		}
+	})
+
+	// — Continuous confirmed load across the cut ———————————————————————————————
+	// Several publisher goroutines keep many publishes in flight so the cut catches
+	// each of them in waitBarrier. Each owns a disjoint MessageID space.
+	const (
+		loadPublishers   = 6
+		warmupFloor      = 30 // confirmed BEFORE the cut (fast, all nodes reachable)
+		postHealFloor    = 30 // additional confirmed AFTER the heal (barrier cleared)
+		perWorkerIDSpace = 1_000_000
+		cutDuration      = 4 * time.Second // > tailThresholdSeconds, < the 35 s top bucket
+	)
+	var (
+		mu         sync.Mutex
+		successes  int
+		transient  int
+		unexpected []error
+		wg         sync.WaitGroup
+	)
+	pubDone := make(chan struct{})
+	confirmedCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return successes
+	}
+	for g := 0; g < loadPublishers; g++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-pubDone:
+					return
+				case <-ctx.Done():
+					return
+				default:
+				}
+				seq := worker*perWorkerIDSpace + i
+				id := fmt.Sprintf("confirm-latency-partition-%d", seq)
+				switch perr := pub.Publish(ctx, warren.Message[clusterFailoverMsg]{
+					Body:      &clusterFailoverMsg{Seq: seq},
+					MessageID: id,
+				}); {
+				case perr == nil:
+					mu.Lock()
+					successes++
+					mu.Unlock()
+				case isTolerableFailoverErr(perr):
+					// The cut tripped the reconnect barrier / confirm gap; recorded under
+					// outcome="error" (or not at all if it errored in waitBarrier), never
+					// asserted durable.
+					mu.Lock()
+					transient++
+					mu.Unlock()
+				default:
+					mu.Lock()
+					unexpected = append(unexpected, fmt.Errorf("seq=%d: %w", seq, perr))
+					mu.Unlock()
+				}
+			}
+		}(g)
+	}
+
+	// Warm up: a healthy batch confirmed before the cut (populates the low buckets).
+	require.Eventually(t, func() bool { return confirmedCount() >= warmupFloor },
+		60*time.Second, 50*time.Millisecond,
+		"publisher must confirm a warmup batch before the partition")
+	preCut := confirmedCount()
+
+	// Cut every node's client proxy, hold so the in-flight attempts pile up in the
+	// reconnect barrier, then heal. The cut window is what the tail measures.
+	for _, p := range proxies {
+		require.NoError(t, toxi.DisableProxy(p), "cut proxy %s", p)
+	}
+	time.Sleep(cutDuration)
+	for _, p := range proxies {
+		require.NoError(t, toxi.EnableProxy(p), "heal proxy %s", p)
+	}
+
+	// The publisher must resume confirming after the heal — proof the barrier cleared
+	// and the blocked attempts drained, not wedged.
+	require.Eventually(t, func() bool { return confirmedCount() >= preCut+postHealFloor },
+		90*time.Second, 100*time.Millisecond,
+		"publisher must resume confirming after the partition heals")
+
+	// Stop the load and join before reading the histogram.
+	close(pubDone)
+	wg.Wait()
+
+	mu.Lock()
+	gotSuccess, gotTransient, surface := successes, transient, append([]error(nil), unexpected...)
+	mu.Unlock()
+	require.Empty(t, surface,
+		"publishes failed with errors the partition does not explain: %v", surface)
+
+	// — Read the histogram back ————————————————————————————————————————————————
+	quantileTopGuard := confirmLatencyBucketsSeconds[len(confirmLatencyBucketsSeconds)-1]
+	successBuckets, successCount := publishLatencyBuckets(t, reg, "success")
+	errorBuckets, errorCount := publishLatencyBuckets(t, reg, "error")
+	require.NotEmpty(t, successBuckets, "publisher_publish_seconds{outcome=success} histogram must be present")
+	require.Equal(t, uint64(gotSuccess), successCount, "every confirmed publish must be one success sample")
+
+	// Success series: no +Inf clip — a confirmed publish's attempt (barrier wait + a
+	// fast post-heal confirm) stays below the top finite bucket by construction.
+	sTop := successBuckets[len(successBuckets)-1]
+	require.Equal(t, quantileTopGuard, sTop.upperBound,
+		"observed top success bucket must equal the configured top bucket (%.0fs)", quantileTopGuard)
+	assert.Greater(t, sTop.upperBound, partitionTailConfirmTimeout.Seconds(),
+		"the top finite bucket (%.0fs) must exceed the confirm timeout (%s) so a confirmed publish cannot clip to +Inf",
+		sTop.upperBound, partitionTailConfirmTimeout)
+	assert.Equal(t, successCount, sTop.cumulative,
+		"no confirmed publish may fall into the implicit +Inf bucket (largest finite bucket holds %d of %d)",
+		sTop.cumulative, successCount)
+
+	// Non-vacuity tail: the cut must have driven at least one confirm/attempt — under
+	// either outcome — above the healthy boundary, captured in a finite bucket.
+	successTail := samplesAbove(successBuckets, successCount, tailThresholdSeconds)
+	errorTail := samplesAbove(errorBuckets, errorCount, tailThresholdSeconds)
+	require.GreaterOrEqualf(t, successTail+errorTail, uint64(1),
+		"the partition must drive at least one confirm/attempt above %.2gs (success-tail=%d error-tail=%d, errorCount=%d); "+
+			"all-nodes-up confirms sit far below this, so a vacuous tail means the reconnect-barrier wait was never measured",
+		tailThresholdSeconds, successTail, errorTail, errorCount)
+
+	p50 := quantileFromBuckets(successBuckets, successCount, 0.50)
+	p99 := quantileFromBuckets(successBuckets, successCount, 0.99)
+	p999 := quantileFromBuckets(successBuckets, successCount, 0.999)
+	assert.Falsef(t, math.IsInf(p99, 1), "success p99 read as +Inf — the tail was clipped")
+	assert.Falsef(t, math.IsInf(p999, 1), "success p999 read as +Inf — the tail was clipped")
+	t.Logf("partition-tail confirm latency: confirmed=%d transient=%d; success p50=%.1fms p99=%.1fms p999=%.1fms; "+
+		"tail>%.2gs success=%d error=%d (errorCount=%d) — tail captured, no success +Inf clip",
+		gotSuccess, gotTransient, p50*1e3, p99*1e3, p999*1e3, tailThresholdSeconds, successTail, errorTail, errorCount)
 }
