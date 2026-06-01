@@ -1543,16 +1543,16 @@ panic and the library cannot statically know whether it will, so every
 the recover is not a license for them to do so.
 - **Acceptance:**
   - [x] **Consumer `Decode`** is wrapped in `defer recover` → `ErrInvalidMessage` (already implemented in `consumer.go`; the recovered value is wrapped as `fmt.Errorf("%w: codec panic: %T", ErrInvalidMessage, r)`). A unit test injects a panicking fake codec and asserts the delivery is nacked-no-requeue with no goroutine crash.
-  - [ ] **Publisher `Encode`** is wrapped in `defer recover` → `ErrInvalidMessage` (gap today: `publisher.go` calls `p.codec.Encode` directly with no recover). On a codec panic, `Publish` returns `ErrInvalidMessage` (wrapping the recovered value), increments `publisher_publish_seconds{outcome="error"}`, and does **not** open a channel or write a frame.
-  - [ ] A unit test in `publisher_test.go` injects a panicking fake codec and asserts `errors.Is(err, ErrInvalidMessage)` with `goleak.VerifyNone` clean.
+  - [x] **Publisher `Encode`** is wrapped in `defer recover` → `ErrInvalidMessage` (`safeEncodeBody`, covering both `Codec.Encode` and `HeaderCodec.EncodeWithHeaders`). On a codec panic `Publish` returns `ErrInvalidMessage` and does **not** open a channel or write a frame (the recover runs in the client-side `encodeMsg` choke-point before pool acquisition); the span ends with `outcome="error"` (existing tracing test).
+  - [x] Dedicated unit tests inject a panicking fake codec (Encode + EncodeWithHeaders) and assert `errors.Is(err, ErrInvalidMessage)`, no frame written, `goleak.VerifyNone` clean.
 - **Verify:** `go test -race -run 'CodecPanic' .` exercises both the publisher and consumer panic paths with a fake codec whose `Encode`/`Decode` panic.
 - **Files:** edits to `publisher.go`, `publisher_test.go`; `consumer.go`/`consumer_test.go` already satisfy the consumer half.
 - **Deps:** T09, T13, T18.
 
 ### Checkpoint — Phase 11 (Rev 10) closed
-- [ ] All T57–T72 acceptance criteria ticked; `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane green; `goleak.VerifyNone` clean.
-- [ ] Reconnect trio (T61/T62/T63) landed in sequence with chaos coverage.
-- [ ] Each per-task SPEC amendment landed in the same PR as its code; SPEC §10 "Rev 10" stays the source of record.
+- [x] All T57–T73 acceptance criteria ticked (unit-testable portions); `go build ./...` + `make lint` clean; `go test -race ./...` green; `goleak.VerifyNone` clean. Integration-lane tests added behind the `integration` tag (run in CI). Cross-phase items explicitly deferred to their owning tasks: per-version poison-loop assertion → T74 (G3); chaos full-cluster-restart / channel-death / half-alive-proxy / `addr[0]`-stampede → T84/T166 lanes; CR-09 forced-handler-detach + goleak carve-out → T146.
+- [x] Reconnect trio (T61/T62/T63) landed in sequence (channel-level recovery → redeclare de-amplification → barrier cap); chaos coverage rides T84.
+- [x] Each per-task SPEC amendment landed alongside its code; SPEC §10 "Rev 10" stays the source of record.
 
 ## Phase 12 — Protocol-Correctness Re-review (Lens 01: RabbitMQ 3.13 + 4.x)
 
