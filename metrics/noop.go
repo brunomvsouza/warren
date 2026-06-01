@@ -34,6 +34,9 @@ func (NoOpPublisherMetrics) RecordPublish(_, _, _, _ string, _ time.Duration) {}
 // RecordRetry discards the retry counter increment.
 func (NoOpPublisherMetrics) RecordRetry(_, _ string) {}
 
+// RecordChannelPoolWait discards the channel-pool acquire-wait observation.
+func (NoOpPublisherMetrics) RecordChannelPoolWait(_ string, _ time.Duration) {}
+
 // NoOpConsumerMetrics is a ConsumerMetrics that silently discards all observations.
 // Every method is a no-op and performs zero allocations.
 type NoOpConsumerMetrics struct{}
@@ -64,6 +67,12 @@ func (NoOpConsumerMetrics) RecordConsumerDropNoDLX(_ string) {}
 
 // RecordShutdownRequeued discards the shutdown-requeue counter increment.
 func (NoOpConsumerMetrics) RecordShutdownRequeued(_ string) {}
+
+// RecordRedelivered discards the redelivered counter increment.
+func (NoOpConsumerMetrics) RecordRedelivered(_ string) {}
+
+// ConsumerInFlightAdd discards the in-flight gauge adjustment.
+func (NoOpConsumerMetrics) ConsumerInFlightAdd(_ string, _ int64) {}
 
 // InFlightBytesAdd discards the in-flight-bytes gauge adjustment.
 func (NoOpConsumerMetrics) InFlightBytesAdd(_ string, _ int64) {}

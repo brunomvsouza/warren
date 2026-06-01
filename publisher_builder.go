@@ -275,6 +275,10 @@ func (b *PublisherBuilder[M]) Build() (*Publisher[M], error) {
 		pub.pools[i] = newPublisherConnPool(poolSize, func() (publisherEntry, error) {
 			return b.conn.PubConnAt(connIdx).openPublisherEntry(poolSize, pub.callOnReturn)
 		})
+		// Record channel-pool acquire-wait so saturation is observable (T71).
+		pub.pools[i].onAcquireWait = func(d time.Duration) {
+			pub.pm.RecordChannelPoolWait(pub.exchange, d)
+		}
 
 		// Register drain hook so stale channels are discarded after reconnect.
 		pool := pub.pools[i]

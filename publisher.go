@@ -63,6 +63,10 @@ type publisherConnPool struct {
 	free     chan publisherEntry
 	inflight atomic.Int64
 	openFn   func() (publisherEntry, error)
+	// onAcquireWait, if non-nil, is called with the time a caller waited for a
+	// channel slot when the pool was saturated (token not immediately available).
+	// It powers the publisher_channel_pool_wait_seconds saturation signal (T71).
+	onAcquireWait func(time.Duration)
 }
 
 func newPublisherConnPool(size int, openFn func() (publisherEntry, error)) *publisherConnPool {
@@ -80,10 +84,20 @@ func newPublisherConnPool(size int, openFn func() (publisherEntry, error)) *publ
 // acquire returns a pooled entry and a release func. Returns ErrChannelPoolExhausted
 // if ctx is cancelled before a semaphore slot is available.
 func (p *publisherConnPool) acquire(ctx context.Context) (publisherEntry, func(), error) {
+	// Fast path: a slot is immediately free (no saturation, no wait recorded).
 	select {
-	case <-ctx.Done():
-		return publisherEntry{}, nil, fmt.Errorf("%w: %w", ErrChannelPoolExhausted, ctx.Err())
 	case <-p.tokens:
+	default:
+		// Pool saturated: time how long we queue for a slot (T71 saturation signal).
+		start := time.Now()
+		select {
+		case <-ctx.Done():
+			return publisherEntry{}, nil, fmt.Errorf("%w: %w", ErrChannelPoolExhausted, ctx.Err())
+		case <-p.tokens:
+		}
+		if p.onAcquireWait != nil {
+			p.onAcquireWait(time.Since(start))
+		}
 	}
 
 	// Guard against panics in getOrOpen (which calls openFn): if openFn panics

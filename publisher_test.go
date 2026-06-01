@@ -192,6 +192,10 @@ type capturePublisherMetrics struct {
 	records     []struct{ exchange, routingKey, messageType, outcome string }
 	retries     []struct{ exchange, reason string }
 	rateLimited []string // exchange of each RecordRateLimited call
+	poolWaits   []struct {
+		exchange string
+		d        time.Duration
+	}
 }
 
 func (m *capturePublisherMetrics) InFlightAdd(exchange string, delta int64) {
@@ -218,6 +222,15 @@ func (m *capturePublisherMetrics) RecordRetry(exchange, reason string) {
 func (m *capturePublisherMetrics) RecordRateLimited(exchange string) {
 	m.mu.Lock()
 	m.rateLimited = append(m.rateLimited, exchange)
+	m.mu.Unlock()
+}
+
+func (m *capturePublisherMetrics) RecordChannelPoolWait(exchange string, d time.Duration) {
+	m.mu.Lock()
+	m.poolWaits = append(m.poolWaits, struct {
+		exchange string
+		d        time.Duration
+	}{exchange, d})
 	m.mu.Unlock()
 }
 

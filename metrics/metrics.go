@@ -75,6 +75,10 @@ type PublisherMetrics interface {
 	RecordPublish(exchange, routingKey, messageType, outcome string, d time.Duration)
 	// RecordRetry increments the retry counter for the given exchange and reason.
 	RecordRetry(exchange, reason string)
+	// RecordChannelPoolWait records how long a publish waited to acquire a channel
+	// from the per-connection pool (T71). A non-zero p99 is the leading channel-pool
+	// saturation signal — publishers are queueing for a channel slot.
+	RecordChannelPoolWait(exchange string, d time.Duration)
 }
 
 // ConsumerMetrics records consumer-level observations.
@@ -127,6 +131,15 @@ type ConsumerMetrics interface {
 	// rolling deploy is a low-grade incident; this makes the deploy-time duplicate
 	// rate boundable and observable (SRE-07).
 	RecordShutdownRequeued(queue string)
+	// RecordRedelivered increments consumer_redelivered_total when a delivery
+	// arrives with Redelivered()==true (T71 / DS-14). The redelivery ratio is the
+	// dominant duplicate-budget signal that publisher_retry_total does not cover,
+	// and a leading instability indicator (brewing poison storm / pool saturation).
+	RecordRedelivered(queue string)
+	// ConsumerInFlightAdd adjusts the consumer_in_flight gauge of active handlers
+	// by delta (+1 on dispatch, -1 on completion) (T71). A saturating in-flight
+	// count is a leading saturation signal.
+	ConsumerInFlightAdd(queue string, delta int64)
 	// InFlightBytesAdd adjusts the consumer_inflight_bytes gauge by delta (the
 	// in-flight memory guardrail, T50): +len(body) when a delivery is dispatched,
 	// -len(body) when its handler returns.

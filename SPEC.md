@@ -2489,6 +2489,19 @@ value.
   `replier_drop_no_dlx_total{queue}` (increments every time a
   `Replier` `OnError` fires for a request queue without a configured
   DLX — see §6.7),
+  `consumer_drop_no_dlx_total{queue}` (the consumer-side parity: a poison
+  message dropped after `MaxRedeliveries` with no known DLX — see §6.7, T65),
+  `consumer_shutdown_requeued_total{queue}` (prefetched-but-undispatched
+  deliveries `Nack(requeue=true)`'d at shutdown — see §6.1, T70),
+  `consumer_redelivered_total{queue}` (deliveries received with the
+  redelivered flag set — the dominant duplicate-budget signal that
+  `publisher_retry_total` does not cover, T71/DS-14),
+  `consumer_in_flight{queue}` (gauge of handlers currently executing, T71),
+  `publisher_channel_pool_wait_seconds{exchange}` (histogram of how long a
+  publish queued for a channel slot when the per-connection pool was
+  saturated — the leading channel-pool saturation signal, T71; the load
+  campaigns that observe this depend on it landing first, LT-08, and the
+  `WithLatencyBuckets` top-bucket override for the load tail is owned by T169),
   `queue_depth{queue}` and `dlq_depth{dlq}` (gauges of the broker-side
   message backlog of the consumer's source queue and its conventional
   `<queue>.dlq` dead-letter queue, sampled via `declare-passive` only
