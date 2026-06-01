@@ -285,6 +285,10 @@ type Consumer[M any] struct {
 	// maxRedeliveries == 0 means unbounded (feature disabled).
 	maxRedeliveries  int
 	counterBDisabled bool // true for quorum queues with broker-enforced DeliveryLimit
+	// knownHasDLX is true only when a wired Topology proves the source queue has a
+	// DLX. When false and a poison message is dropped (Nack(false) after
+	// MaxRedeliveries), consumer_drop_no_dlx_total increments (T65).
+	knownHasDLX bool
 	// counterState holds the per-channel in-process counter B map.
 	// Replaced atomically on every channel open so "channel close resets counter B".
 	counterState atomic.Pointer[redeliveryCounter]
@@ -456,6 +460,7 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 		depthSampleInterval: b.depthSampleInterval,
 		maxRedeliveries:     b.maxRedeliveries,
 		counterBDisabled:    b.counterBDisabled,
+		knownHasDLX:         b.knownHasDLX,
 		dedupeStore:         b.dedupeStore,
 		dedupeTTL:           b.dedupeTTL,
 		codec:               b.c,
@@ -480,6 +485,16 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 // label value so an enabled consumer_handler_seconds histogram carries it.
 func (c *Consumer[M]) recordHandler(outcome string, d time.Duration) {
 	c.cm.RecordHandler(c.queue, c.msgType, outcome, d)
+}
+
+// recordPoisonDropNoDLX increments consumer_drop_no_dlx_total when a poison
+// message is about to be Nack(false)'d (MaxRedeliveries exceeded) and no DLX is
+// known for the source queue — so the silent broker-side drop stays observable
+// (T65, parity with replier_drop_no_dlx_total).
+func (c *Consumer[M]) recordPoisonDropNoDLX() {
+	if !c.knownHasDLX {
+		c.cm.RecordConsumerDropNoDLX(c.queue)
+	}
 }
 
 // connIndexForTag returns a stable index in [0, n) for the given consumer tag (FNV-1a).
@@ -1394,6 +1409,7 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 	// no-ack client never sends, and the short-circuit itself would Nack.
 	if !c.brokerAutoAck && c.maxRedeliveries > 0 && d.DeathCount() >= c.maxRedeliveries {
 		c.cm.RecordMaxRedeliveries(c.queue, "x-death")
+		c.recordPoisonDropNoDLX()
 		c.mc.opts.logger.Warningf(
 			"warren: max redeliveries exceeded for queue %q (cause=x-death, death_count=%d, limit=%d)",
 			c.queue, d.DeathCount(), c.maxRedeliveries,
@@ -1603,6 +1619,7 @@ func (c *Consumer[M]) applyCounterB(cs *redeliveryCounter, counterBKey string, h
 	if exceeded {
 		// Rewrite verdict: Nack(false) instead of Nack(requeue=true).
 		c.cm.RecordMaxRedeliveries(c.queue, "in-process")
+		c.recordPoisonDropNoDLX()
 		c.mc.opts.logger.Warningf(
 			"warren: max redeliveries exceeded for queue %q (cause=in-process, count=%d, limit=%d)",
 			c.queue, currentCount+1, c.maxRedeliveries,

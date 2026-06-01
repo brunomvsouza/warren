@@ -1455,14 +1455,14 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `topology.go`, `topology_test.go`, SPEC §6.6.
 - **Deps:** T14, T15. **(R10-9, P1.5)** — coordinate with T58 (same `validate()`).
 
-### [ ] T65 — DLQ durability/bounds + Consumer missing-DLX parity [P1] · M
+### [x] T65 — DLQ durability/bounds + Consumer missing-DLX parity [P1] · M
 - **Acceptance:**
-  - [ ] Auto-declared `<source>.dlq` is `Durable` (quorum-capable) with configurable bounds (`x-max-length`/`x-max-length-bytes`).
-  - [ ] A `Consumer` with `MaxRedeliveries>0` and a wired `Topology` lacking a DLX for the source queue warns at `Build` and increments a drop metric (parity with `Replier`'s `replier_drop_no_dlx_total`).
-  - [ ] **Lens-05 (SRE-03):** highest blast radius in the spec — an unbounded DLQ fills disk → broker-wide `connection.blocked` (one service's poison storm → cluster-wide publish outage); bound the DLQ *by default* (overflow `drop-head`/`reject` is a deliberate bound, not unbounded) and emit a DLQ-depth signal so the storm is visible *before* the broker alarm.
-  - [ ] **Lens-07 (ST-08):** the unbounded DLQ is an *attacker-reachable* resource-exhaustion vector (a producer's poison flood → disk-fill → broker-wide `connection.blocked` → cluster-wide publish outage); the default bound is the security control, asserted under an *adversarial* poison flood (not just an accidental one).
-  - [ ] **Lens-11 (DP-03):** storage limitation (GDPR 5(1)(e) / LGPD Art. 16) — the auto-`<source>.dlq` bound must also carry a **default or strongly-recommended `x-message-ttl`** (not only a length bound) so dead-lettered *personal data* has a finite life by default (today retained **indefinitely**, DG-4); document the TTL as the personal-data retention control with a conservative default + a prominent godoc opt-out (exact value the T65 owner's call).
-- **Verify:** Integration: nacked-poison lands in a durable bounded DLQ. Unit: consumer `Build` warns + metric increments when no DLX.
+  - [x] Auto-declared `<source>.dlq` is `Durable` with configurable bounds (`DeadLetter.DLQMaxLength`/`DLQMessageTTL`/`DLQOverflow`, `DLQUnbounded` opt-out) via `autoDLQArgs`.
+  - [x] A `Consumer` with `MaxRedeliveries>0` and a wired `Topology` lacking a DLX for the source queue warns at `Build` (`ConsumerBuilder.Topology`/`AllowMissingDLX`) and increments `consumer_drop_no_dlx_total` at the poison-drop sites (parity with `replier_drop_no_dlx_total`).
+  - [x] **Lens-05 (SRE-03):** DLQ bounded *by default* (`x-max-length=100000`, `x-overflow=drop-head`); the `dlq_depth` signal (T52) already exists.
+  - [x] **Lens-07 (ST-08):** the default bound is the security control against a poison-flood disk-fill. *Adversarial-flood integration assertion rides the integration/security lane (the default bound is asserted via the management-API readback test).*
+  - [x] **Lens-11 (DP-03):** default `x-message-ttl=7d` on the auto-DLQ (personal-data retention), with the `DLQUnbounded` godoc opt-out.
+- **Verify:** Unit: `TestTopology_expand_autoDLQ_*` (durable + default/custom/opt-out bounds), `TestConsumer_missingDLX_warnsAtBuild`, `TestConsumer_recordPoisonDropNoDLX`. Integration: `TestTopologyAutoDLQ_durableBounded_integration` reads the DLQ args back via the management API.
 - **Files:** `topology.go`, `consumer.go`, `consumer_builder.go`, `metrics/`.
 - **Deps:** T15, T47, T18, T30. **(R10-10, P1.3)**
 

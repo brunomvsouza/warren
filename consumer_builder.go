@@ -47,6 +47,15 @@ type ConsumerBuilder[M any] struct {
 	maxRedeliveries  int
 	counterBDisabled bool // true when quorum queue with DeliveryLimit > 0
 
+	// topology, when wired via Topology(), lets Build validate that the source
+	// queue has a dead-letter exchange when MaxRedeliveries > 0 — parity with the
+	// Replier missing-DLX check (T65). allowMissingDLX opts out of the warning.
+	topology        *Topology
+	allowMissingDLX bool
+	// knownHasDLX is computed in Build: true only when a wired Topology proves a
+	// DLX exists for the source queue. Drives consumer_drop_no_dlx_total.
+	knownHasDLX bool
+
 	// dedupeStore + dedupeTTL back the WithDedupe middleware (T55). nil store
 	// (the default) disables it.
 	dedupeStore DedupeStore
@@ -340,6 +349,25 @@ func (b *ConsumerBuilder[M]) TopologyHint(q Queue) *ConsumerBuilder[M] {
 	return b
 }
 
+// Topology wires the declared Topology so Build can validate that the source
+// queue has a dead-letter exchange when MaxRedeliveries > 0. Without a DLX, a
+// poison message that exceeds MaxRedeliveries is Nack(false)'d and silently
+// dropped by the broker; Build warns (and consumer_drop_no_dlx_total counts the
+// drops) unless AllowMissingDLX is set — parity with the Replier check (T65).
+func (b *ConsumerBuilder[M]) Topology(t *Topology) *ConsumerBuilder[M] {
+	b.topology = t
+	return b
+}
+
+// AllowMissingDLX opts out of the Topology DLX-presence warning, acknowledging
+// that a poison drop on this queue (after MaxRedeliveries) is intentional and
+// silent (still surfaced via consumer_drop_no_dlx_total). Use it when the source
+// queue is intentionally declared without a dead-letter exchange.
+func (b *ConsumerBuilder[M]) AllowMissingDLX() *ConsumerBuilder[M] {
+	b.allowMissingDLX = true
+	return b
+}
+
 // Build constructs and returns a Consumer[M]. Returns an error if
 // the builder state is invalid.
 func (b *ConsumerBuilder[M]) Build() (*Consumer[M], error) {
@@ -366,6 +394,22 @@ func (b *ConsumerBuilder[M]) Build() (*Consumer[M], error) {
 		b.conn.opts.logger.Warningf(
 			"warren: consumer prefetch=%d is below concurrency=%d; handlers will stall waiting for deliveries",
 			cfg.prefetch, cfg.concurrency,
+		)
+	}
+
+	// Missing-DLX validation (T65): when redelivery bounding is active, a poison
+	// message that exceeds the cap is Nack(false)'d. Without a DLX the broker
+	// silently drops it. If a Topology is wired and has no DLX for the source
+	// queue, warn at Build (unless AllowMissingDLX). knownHasDLX is conservative:
+	// only true when a wired Topology proves a DLX exists; otherwise the drop
+	// metric counts every poison drop so the silent drop stays observable.
+	cfg.knownHasDLX = cfg.topology != nil && topologyHasDLX(cfg.topology, cfg.queue)
+	if cfg.maxRedeliveries > 0 && cfg.topology != nil && !cfg.knownHasDLX && !cfg.allowMissingDLX {
+		b.conn.opts.logger.Warningf(
+			"warren: consumer queue %q has MaxRedeliveries=%d but no DeadLetter entry in the wired Topology; "+
+				"poison messages will be Nack(false)'d and silently dropped by the broker "+
+				"(counted by consumer_drop_no_dlx_total). Add a DeadLetter or call AllowMissingDLX() to acknowledge.",
+			cfg.queue, cfg.maxRedeliveries,
 		)
 	}
 
