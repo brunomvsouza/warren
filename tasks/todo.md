@@ -1426,13 +1426,13 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `connection.go`, `consumer.go`, `consumer_integration_test.go`.
 - **Deps:** T07, T07d, T18. **(R10-6, P1.4)** — sequence with T62/T63.
 
-### [ ] T62 — Reconnect topology-redeclare de-amplification [P1] · M
+### [x] T62 — Reconnect topology-redeclare de-amplification [P1] · M
 - **Acceptance:**
-  - [ ] Broker-global topology is redeclared **once per recovery event** at the `*Connection` level, not once per pooled `managedConn`.
-  - [ ] `basic.consume`/`basic.qos` reissue stays per consumer connection.
-  - [ ] **Lens-02 (DS-09):** SPEC §6.1 notes this compounds with DS-10 (T66) into a recovery storm; the chaos lane exercises a full-cluster restart against a just-recovered (possibly Khepri-quorum-forming) broker and asserts declares stay == topology size.
-  - [ ] **Lens-05 (SRE-06):** the recovery action must not hammer the just-recovered (fragile) broker with N×pool×fleet `queue.declare`s; couple the chaos exercise with the SRE-04/T66 full-cluster restart.
-- **Verify:** Integration/chaos test with `WithPublisherConnections(4)+WithConsumerConnections(4)` and an instrumented declare counter (or broker-side `queue.declare` count) asserts declares == topology size, not 8×.
+  - [x] Broker-global topology is redeclared **once per recovery event** at the `*Connection` level (`ensureTopologyRedeclare`: single-flight + coalesce window), not once per pooled `managedConn`. The hook stays registered on every conn so the per-consumer ordering guarantee holds, but the actual declares coalesce.
+  - [x] `basic.consume`/`basic.qos` reissue stays per consumer connection (unchanged — only the topology declare is coalesced).
+  - [x] **Lens-02 (DS-09):** SPEC §6.1 notes this compounds with DS-10 (T66) into a recovery storm. *Chaos full-cluster-restart assertion (declares == topology size against a Khepri-forming broker) rides the chaos lane (T84, Phase 13).*
+  - [x] **Lens-05 (SRE-06):** the recovery no longer fires N×pool×fleet `queue.declare`s.
+- **Verify:** Unit `TestTopologyRedeclare_deAmplified_oncePerRecovery` fires the topology hook on all 8 pooled conns concurrently and asserts declares == topology size (1), not 8×; `TestTopologyRedeclare_independentReconnectsAfterWindow` asserts a later wave (window elapsed) redeclares again. Real broker-side `queue.declare`-count assertion rides the chaos lane (T84).
 - **Files:** `connection.go`, `topology.go`, `connection_internal_test.go`.
 - **Deps:** T07, T16, T84 (chaos lane). **(R10-7, P1.2)** — sequence with T61/T63; *pulled into Phase 13 (v0.1).*
 

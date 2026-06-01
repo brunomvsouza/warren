@@ -165,10 +165,56 @@ func (t *Topology) AttachTo(conn *Connection) error {
 	// access is safe without a lock.
 	for _, mc := range append(conn.pubConns, conn.conConns...) {
 		mc.registerHook(func(ctx context.Context) error {
-			return conn.runTopologyRedeclare(ctx, mc)
+			return conn.ensureTopologyRedeclare(ctx, mc)
 		})
 	}
 	return nil
+}
+
+// ensureTopologyRedeclare runs runTopologyRedeclare at most once per recovery
+// wave (T62 / DS-09 / SRE-06). The first barrier to enter owns the redeclare;
+// concurrent barriers wait for it and then skip (its success anchors the
+// coalesce window). A barrier entering within topoRedeclareCoalesceWindow of a
+// prior success also skips. Either way the caller's barrier does not return
+// until topology is ensured for this wave — so a consumer's subsequent
+// basic.consume still finds its queue declared, preserving the per-consumer
+// ordering guarantee while collapsing N×pool declares to one.
+func (c *Connection) ensureTopologyRedeclare(ctx context.Context, mc *managedConn) error {
+	for {
+		c.topoRedeclareMu.Lock()
+		// Coalesce: a recent success means another barrier in this wave already
+		// (re)declared the broker-global topology; skip.
+		if !c.topoLastDeclare.IsZero() && time.Since(c.topoLastDeclare) < topoRedeclareCoalesceWindow {
+			c.topoRedeclareMu.Unlock()
+			return nil
+		}
+		if wait := c.topoRedeclareWait; wait != nil {
+			// Another barrier is mid-redeclare; wait for it, then re-loop (it will
+			// have anchored the coalesce window, so we skip on the next pass).
+			c.topoRedeclareMu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		// We own this wave's redeclare.
+		wait := make(chan struct{})
+		c.topoRedeclareWait = wait
+		c.topoRedeclareMu.Unlock()
+
+		err := c.runTopologyRedeclare(ctx, mc)
+
+		c.topoRedeclareMu.Lock()
+		if err == nil {
+			c.topoLastDeclare = time.Now()
+		}
+		c.topoRedeclareWait = nil
+		close(wait)
+		c.topoRedeclareMu.Unlock()
+		return err
+	}
 }
 
 // runTopologyRedeclare iterates the registered topology snapshots in registration
