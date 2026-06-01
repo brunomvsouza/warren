@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strconv"
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
@@ -60,8 +61,16 @@ type Queue struct {
 	// An empty value means the broker default (classic).
 	Type QueueType
 	// DeliveryLimit is the broker-enforced redelivery cap for quorum queues
-	// (maps to x-delivery-limit). Zero means unbounded. Non-zero on a
-	// non-quorum queue is rejected by Topology.validate.
+	// (maps to x-delivery-limit). Non-zero on a non-quorum queue is rejected by
+	// Topology.validate.
+	//
+	// The meaning of zero is broker-version dependent and a poison-loop footgun
+	// either way, so set it explicitly: on RabbitMQ 4.x a zero DeliveryLimit
+	// takes the broker default of 20 (the message is silently dropped/dead-
+	// lettered at the 21st delivery), while on RabbitMQ 3.13 a zero
+	// DeliveryLimit is genuinely unbounded (an unhandled poison message loops
+	// forever). Topology.Declare emits a version-aware warning when a quorum
+	// queue is declared with DeliveryLimit==0.
 	DeliveryLimit int
 	// SingleActiveConsumer maps to x-single-active-consumer.
 	// Not allowed on stream queues.
@@ -218,6 +227,7 @@ func (t *Topology) Declare(ctx context.Context, conn *Connection) error {
 	expanded := t.expand()
 
 	warnDelayedExchanges(conn.opts.logger, expanded.Exchanges)
+	warnQuorumDeliveryLimit(conn.opts.logger, expanded.Queues, conn.brokerVersion())
 
 	ch, err := conn.openDeclareChannel(ctx)
 	if err != nil {
@@ -249,6 +259,61 @@ func warnDelayedExchanges(logger log.Logger, exchanges []Exchange) {
 			"prefer a durable queue with x-message-ttl + DLX (see Message.Delay, SPEC §6.5)",
 			e.Name)
 	}
+}
+
+// warnQuorumDeliveryLimit emits a version-aware poison-loop warning for each
+// quorum queue declared with DeliveryLimit==0 (T58 / R10-2 / RMQ-06). The
+// failure mode is broker-version dependent: RabbitMQ 4.x applies a default
+// limit of 20 (a silent drop at the 21st delivery), while RabbitMQ 3.13 treats
+// zero as unbounded (an infinite poison loop). brokerVersion is the value read
+// from the connection.start server-properties; an empty/unparsable version
+// emits a warning covering both modes. A nil logger is a no-op.
+func warnQuorumDeliveryLimit(logger log.Logger, queues []Queue, brokerVersion string) {
+	if logger == nil {
+		return
+	}
+	major, known := parseBrokerMajor(brokerVersion)
+	for _, q := range queues {
+		if q.Type != QueueTypeQuorum || q.DeliveryLimit != 0 {
+			continue
+		}
+		switch {
+		case known && major >= 4:
+			logger.Warningf("warren: quorum queue %q has DeliveryLimit==0; RabbitMQ %s "+
+				"applies a broker default of 20, so an unhandled poison message is silently "+
+				"dropped/dead-lettered at the 21st delivery — set DeliveryLimit explicitly",
+				q.Name, brokerVersion)
+		case known && major == 3:
+			logger.Warningf("warren: quorum queue %q has DeliveryLimit==0; on RabbitMQ %s "+
+				"this is unbounded — an unhandled poison message loops forever — "+
+				"set DeliveryLimit explicitly",
+				q.Name, brokerVersion)
+		default:
+			logger.Warningf("warren: quorum queue %q has DeliveryLimit==0; this is a poison-loop "+
+				"footgun whose mode depends on the broker version: RabbitMQ 4.x applies a default "+
+				"of 20 (silent drop at the 21st delivery) while RabbitMQ 3.13 is unbounded "+
+				"(infinite poison loop) — set DeliveryLimit explicitly",
+				q.Name)
+		}
+	}
+}
+
+// parseBrokerMajor extracts the leading major-version integer from a broker
+// version string such as "4.0.5" or "3.13.2". Returns ok=false when no leading
+// digit run is present.
+func parseBrokerMajor(version string) (int, bool) {
+	i := 0
+	for i < len(version) && version[i] >= '0' && version[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, false
+	}
+	major, err := strconv.Atoi(version[:i])
+	if err != nil {
+		return 0, false
+	}
+	return major, true
 }
 
 // expand returns a deep copy of t with all in-memory pre-pass mutations applied:

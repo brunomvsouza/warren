@@ -1360,17 +1360,28 @@ adds skew. Metrics still surface `ErrMaxRedeliveries` when the
 broker dead-letters; the consumer reads `x-death` to attribute the
 drop.
 
-**RabbitMQ 4.x default (load-bearing).** A quorum queue with
-`DeliveryLimit == 0` is **not** unbounded on RabbitMQ 4.x: the broker
-applies a default `x-delivery-limit` of **20**, dead-lettering (or
-dropping, if no DLX is configured) on the 21st delivery. So the
-combination "`DeliveryLimit:0` + `MaxRedeliveries(0)`", which reads as
-"unbounded on both sides", actually drops the message at 20
-broker-side — exactly the kind of silent drop §1 forbids. `Topology`
-declares emit a warning for `Type=QueueTypeQuorum && DeliveryLimit==0`
-(see §6.6). To genuinely disable the broker cap, set `DeliveryLimit`
-to a very large value explicitly; always pair a quorum queue with a
-DLX so the 21st-delivery message is preserved.
+**`DeliveryLimit == 0` is broker-version dependent (load-bearing,
+RMQ-06).** The zero value is a poison-loop footgun in **both** broker
+families, but with **opposite** failure modes:
+
+- **RabbitMQ 4.x:** a quorum queue with `DeliveryLimit == 0` is **not**
+  unbounded — the broker applies a default `x-delivery-limit` of **20**,
+  dead-lettering (or dropping, if no DLX is configured) on the 21st
+  delivery. So "`DeliveryLimit:0` + `MaxRedeliveries(0)`", which reads
+  as "unbounded on both sides", actually drops the message at 20
+  broker-side — exactly the kind of silent drop §1 forbids.
+- **RabbitMQ 3.13:** a quorum queue with `DeliveryLimit == 0` is
+  **genuinely unbounded** — an unhandled poison message loops forever,
+  the opposite failure mode.
+
+`Topology.Declare` reads the broker version from the `connection.start`
+server-properties and emits a **version-aware** warning for
+`Type=QueueTypeQuorum && DeliveryLimit==0` (see §6.6): the 4.x default-20
+silent-drop wording on 4.x, the unbounded-infinite-loop wording on 3.13,
+and a combined warning when the version is unknown. To genuinely disable
+the broker cap on 4.x set `DeliveryLimit` to a very large value
+explicitly; always pair a quorum queue with a DLX so the dropped message
+is preserved.
 
 #### Poison protection — fallback path: consumer-side counters
 
@@ -1783,15 +1794,18 @@ type Queue struct {
     // and supersedes the in-process counter B of MaxRedeliveries (see §6.3).
     // Classic queues do not honour this argument as of RabbitMQ 4.x and
     // require the consumer-side MaxRedeliveries mechanism instead.
-    // Zero leaves x-delivery-limit UNSET by this library. WARNING: on
-    // RabbitMQ 4.x a quorum queue with no explicit limit receives a
-    // broker-applied DEFAULT delivery-limit of 20 — it is NOT unbounded.
-    // The message dead-letters (or is dropped, if no DLX) on the 21st
-    // delivery. To truly disable the cap, set a very large value
+    // Zero leaves x-delivery-limit UNSET by this library, and its meaning
+    // is BROKER-VERSION DEPENDENT (RMQ-06): on RabbitMQ 4.x a quorum queue
+    // with no explicit limit receives a broker-applied DEFAULT delivery-limit
+    // of 20 (the message dead-letters, or is dropped if no DLX, on the 21st
+    // delivery — NOT unbounded); on RabbitMQ 3.13 the same zero value is
+    // GENUINELY UNBOUNDED (an infinite poison loop), the opposite failure
+    // mode. To truly disable the cap on 4.x, set a very large value
     // explicitly; to bound tighter, set DeliveryLimit > 0. Classic
     // queues ignore the argument entirely. See §6.3 poison-protection.
-    // Topology.validate() warns when Type=QueueTypeQuorum && DeliveryLimit==0
-    // so this default is never a surprise.
+    // Topology.Declare reads the broker version and warns (version-aware)
+    // when Type=QueueTypeQuorum && DeliveryLimit==0 so neither default is a
+    // surprise.
     DeliveryLimit        int
 
     // SingleActiveConsumer enables the x-single-active-consumer queue
