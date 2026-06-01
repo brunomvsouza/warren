@@ -118,6 +118,30 @@ func QuorumLeader(t *testing.T, queue string) QuorumQueueState {
 	return state
 }
 
+// ConnectionNodes queries the cluster-wide management API (WARREN_CLUSTER_MGMT)
+// for every live AMQP connection whose client-set connection_name starts with
+// namePrefix, returning one ConnNode per connection (duplicates included, so a
+// caller can detect a mid-reconnect transient). The WithAddrs rotation campaign
+// (T166e) uses it to SEE how warren's pooled sockets spread across the cluster —
+// the no-addr[0]-stampede assertion a single-node broker cannot make. A
+// short-timeout, keep-alive-disabled HTTP client is used so no pooled connection
+// goroutine survives into a goleak check.
+func ConnectionNodes(t *testing.T, namePrefix string) []ConnNode {
+	t.Helper()
+	mgmt := ClusterMgmt(t)
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	defer client.CloseIdleConnections()
+
+	nodes, err := fetchConnectionNodes(client, mgmt, namePrefix)
+	if err != nil {
+		t.Fatalf("read connections via management API (prefix %q): %v", namePrefix, err)
+	}
+	return nodes
+}
+
 // WaitClusterReady polls the management API (WARREN_CLUSTER_MGMT) until at least
 // `want` nodes report running, failing the test if the timeout elapses. It is the
 // readiness gate a campaign uses after an EARLIER test killed and restarted a node:

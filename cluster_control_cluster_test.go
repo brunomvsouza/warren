@@ -21,17 +21,19 @@ import (
 // management API reports a NEW leader — a behaviour a single-node broker cannot
 // produce, which is the whole point of the cluster lane.
 //
-// Leader placement is made deterministic by two cooperating facts: rabbitmq.conf
-// sets queue_leader_locator=client-local (the leader lands on the declaring
-// connection's node) and the WithAddrs list below is ordered rmq1-first, so every
-// pooled connection (each managedConn starts its dial cursor at addrs[0]) opens on
-// rmq1 and the quorum leader is created there. rmq1 is then KILLED (SIGKILL, a real
+// Leader placement is made deterministic by rabbitmq.conf setting
+// queue_leader_locator=client-local (the leader lands on the declaring
+// connection's node) plus a SINGLE-ADDRESS declare connection pinned to rmq1
+// (declareQuorumLeaderOnNode) — immune to the per-socket WithAddrs shuffle (T66),
+// which would otherwise scatter the declaring socket across nodes and could place
+// the leader on the management node rmq0. rmq1 is then KILLED (SIGKILL, a real
 // crash); rmq0 and rmq2 keep a majority and re-elect, and the management API —
 // served by the surviving rmq0 (WARREN_CLUSTER_MGMT) — surfaces the new leader.
 //
-// goleak: after the kill, warren's rmq1-pinned connections rotate (T33 cursor) to
-// rmq0/rmq2 (both alive, next in the WithAddrs list), so Close drains cleanly. The
-// killed node is restarted in t.Cleanup to restore the cluster for later tests.
+// goleak: the live conn below dials the full WithAddrs list; after the kill any of
+// its sockets that had landed on rmq1 rotate (shuffled cursor) to a surviving node,
+// so Close drains cleanly. The killed node is restarted in t.Cleanup to restore the
+// cluster for later tests.
 func TestClusterControl_quorumLeaderFailover_cluster(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -45,11 +47,15 @@ func TestClusterControl_quorumLeaderFailover_cluster(t *testing.T) {
 		originalLeader = "rabbit@rmq1"
 	)
 
-	// rmq1-first address list: every pooled connection dials addrs[0]=rmq1, so the
-	// client-local locator places the quorum leader there.
+	// Full WithAddrs list for the live connection; leader placement no longer
+	// depends on its dial order (the single-address declare below pins the leader).
 	addrs := []string{nodes[1], nodes[0], nodes[2]}
 
 	ctx := context.Background()
+
+	// All three members must be running before we pin the leader on rmq1: an earlier
+	// test may have just restarted it.
+	amqptest.WaitClusterReady(t, len(nodes), 90*time.Second)
 
 	// Clean slate: a prior run may have left the durable quorum queue behind with a
 	// stale leader. Delete it before declaring so the leader is freshly placed on rmq1.
@@ -58,6 +64,10 @@ func TestClusterControl_quorumLeaderFailover_cluster(t *testing.T) {
 	// Restore the killed node last-in/first-out: this runs before the delete above
 	// so the cluster is whole again when the durable queue is removed.
 	t.Cleanup(func() { amqptest.StartNode(t, killService) })
+
+	// Pin the quorum leader to rmq1 via a single-address declare connection —
+	// shuffle-immune (T66), so the leader is deterministically on the node we kill.
+	declareQuorumLeaderOnNode(ctx, t, nodes[1], queue)
 
 	dialCtx, dialCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer dialCancel()
@@ -69,6 +79,9 @@ func TestClusterControl_quorumLeaderFailover_cluster(t *testing.T) {
 		_ = conn.Close(closeCtx)
 	}()
 
+	// Idempotent redeclare on the live multi-addr connection (the queue already
+	// exists with its leader on rmq1; redeclaring with identical args does not move
+	// it) so AttachTo-style reconnect redeclare has a registered topology to use.
 	declCtx, declCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer declCancel()
 	topo := &warren.Topology{

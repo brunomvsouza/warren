@@ -550,22 +550,32 @@ func TestNextDialAddr_singleAddr_alwaysReturnsSame(t *testing.T) {
 	}
 }
 
-// Acceptance: WithAddrs tries addresses in order on initial connect.
-func TestNextDialAddr_multiAddr_initialConnectTriesInOrder(t *testing.T) {
-	mc := &managedConn{opts: &connOptions{addrs: []string{"amqp://a/", "amqp://b/", "amqp://c/"}}}
-	assert.Equal(t, "amqp://a/", mc.nextDialAddr())
-	assert.Equal(t, "amqp://b/", mc.nextDialAddr())
-	assert.Equal(t, "amqp://c/", mc.nextDialAddr())
+// Acceptance (T66): with WithAddrs each socket walks a per-connection *shuffled*
+// permutation of the list — not the raw input order. Over len(addrs) dials every
+// address is returned exactly once (a full cycle), in the order fixed by this
+// socket's shuffleSeed.
+func TestNextDialAddr_multiAddr_walksFullShuffledPermutation(t *testing.T) {
+	addrs := []string{"amqp://a/", "amqp://b/", "amqp://c/"}
+	mc := &managedConn{shuffleSeed: 42, opts: &connOptions{addrs: addrs}}
+
+	want := shuffledAddrs(addrs, 42)
+	got := []string{mc.nextDialAddr(), mc.nextDialAddr(), mc.nextDialAddr()}
+	assert.Equal(t, want, got, "walks the seeded permutation in order")
+	assert.ElementsMatch(t, addrs, got, "every address appears exactly once over one cycle")
 }
 
-// Acceptance: on reconnect, rotates to the next address (round-robin), wrapping
-// back to the head once the list is exhausted.
-func TestNextDialAddr_multiAddr_reconnectRotatesRoundRobin(t *testing.T) {
-	mc := &managedConn{opts: &connOptions{addrs: []string{"amqp://a/", "amqp://b/"}}}
-	assert.Equal(t, "amqp://a/", mc.nextDialAddr()) // initial → a (sticks while connected)
-	assert.Equal(t, "amqp://b/", mc.nextDialAddr()) // reconnect → b
-	assert.Equal(t, "amqp://a/", mc.nextDialAddr()) // reconnect → a (wraps)
-	assert.Equal(t, "amqp://b/", mc.nextDialAddr())
+// Acceptance (T66): on reconnect the cursor advances through the shuffled order
+// and wraps, so each reconnect rotates to a DIFFERENT address until the cycle
+// repeats.
+func TestNextDialAddr_multiAddr_reconnectRotatesAndWraps(t *testing.T) {
+	addrs := []string{"amqp://a/", "amqp://b/"}
+	mc := &managedConn{shuffleSeed: 7, opts: &connOptions{addrs: addrs}}
+
+	first := mc.nextDialAddr()
+	second := mc.nextDialAddr()
+	assert.NotEqual(t, first, second, "reconnect rotates to a different address")
+	assert.Equal(t, first, mc.nextDialAddr(), "wraps back to the head after one cycle")
+	assert.Equal(t, second, mc.nextDialAddr())
 }
 
 func TestNextDialAddr_emptyAddrs_fallsBackToAddr(t *testing.T) {
@@ -585,6 +595,91 @@ func TestNextDialAddr_cursorStaysBounded(t *testing.T) {
 		assert.GreaterOrEqual(t, mc.dialCursor, 0)
 		assert.Less(t, mc.dialCursor, len(addrs))
 	}
+}
+
+// — T66 per-connection address shuffle —————————————————————————————————————
+
+// shuffledAddrs is a deterministic permutation: the same seed always yields the
+// same order, the result contains exactly the input addresses, and the caller's
+// slice (the shared, read-only opts.addrs) is never mutated.
+func TestShuffledAddrs_deterministicPermutation(t *testing.T) {
+	addrs := []string{"amqp://a/", "amqp://b/", "amqp://c/", "amqp://d/"}
+	input := append([]string(nil), addrs...)
+
+	first := shuffledAddrs(input, 99)
+	second := shuffledAddrs(input, 99)
+	assert.Equal(t, first, second, "same seed → identical permutation")
+	assert.ElementsMatch(t, addrs, first, "result is a permutation of the input")
+	assert.Equal(t, addrs, input, "input slice must not be mutated")
+	assert.NotSame(t, &input[0], &first[0], "returns a copy, not the input backing array")
+}
+
+// A single or empty list has no permutation to make; shuffledAddrs returns it
+// (as a copy) unchanged.
+func TestShuffledAddrs_singleOrEmptyUnchanged(t *testing.T) {
+	assert.Equal(t, []string{"amqp://only/"}, shuffledAddrs([]string{"amqp://only/"}, 123))
+	assert.Empty(t, shuffledAddrs(nil, 123))
+}
+
+// Distinct seeds spread the first dialled address across the list — the
+// anti-stampede property: addrs[0] does not monopolise the lead. Deterministic
+// (PCG over fixed seeds 0..59), so this either passes or fails reproducibly.
+func TestShuffledAddrs_distinctSeedsSpreadFirstAddr(t *testing.T) {
+	addrs := []string{"amqp://a/", "amqp://b/", "amqp://c/"}
+	firsts := map[string]int{}
+	for seed := int64(0); seed < 60; seed++ {
+		firsts[shuffledAddrs(addrs, seed)[0]]++
+	}
+	assert.GreaterOrEqual(t, len(firsts), 2,
+		"distinct seeds must lead with ≥2 different addresses (no addrs[0] monopoly)")
+	assert.Less(t, firsts["amqp://a/"], 60, "addrs[0] must not lead for every seed")
+}
+
+// perConnSeed is deterministic and decorrelates sockets: publisher-0 and
+// consumer-0 — and socket 0 vs 1 — get distinct seeds, so they shuffle to
+// different orders even when they share the process-level base.
+func TestPerConnSeed_deterministicAndDistinct(t *testing.T) {
+	assert.Equal(t, perConnSeed(1000, "publisher", 0), perConnSeed(1000, "publisher", 0),
+		"same (base, role, idx) → same seed")
+
+	seeds := map[int64]struct{}{}
+	for _, role := range []string{"publisher", "consumer"} {
+		for idx := range 4 {
+			seeds[perConnSeed(1000, role, idx)] = struct{}{}
+		}
+	}
+	assert.Len(t, seeds, 8, "every (role, idx) pair must get a distinct seed")
+}
+
+// dialOrder builds the shuffled permutation once and caches it (stable across
+// calls), matching shuffledAddrs for the socket's seed.
+func TestDialOrder_cachedStablePermutation(t *testing.T) {
+	addrs := []string{"amqp://a/", "amqp://b/", "amqp://c/"}
+	mc := &managedConn{shuffleSeed: 55, opts: &connOptions{addrs: addrs}}
+
+	first := mc.dialOrder()
+	assert.Equal(t, shuffledAddrs(addrs, 55), first)
+	assert.Equal(t, first, mc.dialOrder(), "permutation is cached and stable")
+}
+
+// Headline T66 acceptance (mirrors openPool's per-socket seeding): N sockets
+// over a 3-node list start their dials spread across the nodes, not all on
+// addrs[0]. Deterministic given a fixed process-level base.
+func TestPerConnSeeding_distributesInitialDialNoAddr0Stampede(t *testing.T) {
+	addrs := []string{"amqp://a/", "amqp://b/", "amqp://c/"}
+	const base int64 = 0x1234_5678
+
+	firsts := map[string]int{}
+	for _, role := range []string{"publisher", "consumer"} {
+		for idx := range 3 { // 3 publisher + 3 consumer sockets
+			seed := perConnSeed(base, role, idx)
+			firsts[shuffledAddrs(addrs, seed)[0]]++
+		}
+	}
+	assert.GreaterOrEqual(t, len(firsts), 2,
+		"initial dials must spread across ≥2 nodes — no addr[0] stampede")
+	assert.Less(t, firsts["amqp://a/"], 6,
+		"addrs[0] must not capture every socket's initial dial")
 }
 
 // TestConnectOnce_ctxCancelled_returnsCtxErr covers the ctx-cancellation fork of

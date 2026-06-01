@@ -114,6 +114,89 @@ func TestFetchQuorumQueueState(t *testing.T) {
 	})
 }
 
+func TestParseConnectionNodes(t *testing.T) {
+	body := []byte(`[
+		{"name":"127.0.0.1:5001 -> 127.0.0.1:5680","node":"rabbit@rmq0","client_properties":{"connection_name":"camp-pub-0"}},
+		{"name":"127.0.0.1:5002 -> 127.0.0.1:5682","node":"rabbit@rmq2","client_properties":{"connection_name":"camp-con-0"}},
+		{"name":"127.0.0.1:5003 -> 127.0.0.1:5681","node":"rabbit@rmq1","client_properties":{"connection_name":"other-pub-0"}},
+		{"name":"127.0.0.1:5004 -> 127.0.0.1:5680","node":"rabbit@rmq0","client_properties":{}}
+	]`)
+
+	t.Run("filters by connection_name prefix and pairs node + broker name", func(t *testing.T) {
+		got, err := parseConnectionNodes(body, "camp")
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []ConnNode{
+			{Name: "camp-pub-0", Node: "rabbit@rmq0", BrokerName: "127.0.0.1:5001 -> 127.0.0.1:5680"},
+			{Name: "camp-con-0", Node: "rabbit@rmq2", BrokerName: "127.0.0.1:5002 -> 127.0.0.1:5682"},
+		}, got, "only the prefix-matching named connections, paired with their node and broker connection name")
+	})
+
+	t.Run("preserves duplicate names (a mid-reconnect transient)", func(t *testing.T) {
+		dup := []byte(`[
+			{"node":"rabbit@rmq0","client_properties":{"connection_name":"camp-pub-0"}},
+			{"node":"rabbit@rmq1","client_properties":{"connection_name":"camp-pub-0"}}
+		]`)
+		got, err := parseConnectionNodes(dup, "camp")
+		require.NoError(t, err)
+		assert.Len(t, got, 2, "both entries for the same name must survive so the caller sees the transient")
+	})
+
+	t.Run("empty prefix matches every named connection (the unnamed one is skipped)", func(t *testing.T) {
+		got, err := parseConnectionNodes(body, "")
+		require.NoError(t, err)
+		assert.Len(t, got, 3)
+	})
+
+	t.Run("malformed JSON returns an error", func(t *testing.T) {
+		_, err := parseConnectionNodes([]byte(`{not an array`), "camp")
+		require.Error(t, err)
+	})
+}
+
+func TestFetchConnectionNodes(t *testing.T) {
+	t.Run("issues an authenticated GET against /api/connections and filters by prefix", func(t *testing.T) {
+		var gotPath string
+		var gotAuthOK bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.EscapedPath()
+			_, _, gotAuthOK = r.BasicAuth()
+			// Credentials must arrive in the Authorization header, never the URL.
+			assert.NotContains(t, r.URL.String(), "guest")
+			_, _ = w.Write([]byte(`[
+				{"node":"rabbit@rmq0","client_properties":{"connection_name":"camp-pub-0"}},
+				{"node":"rabbit@rmq1","client_properties":{"connection_name":"camp-pub-1"}},
+				{"node":"rabbit@rmq2","client_properties":{"connection_name":"zzz-pub-0"}}
+			]`))
+		}))
+		defer srv.Close()
+
+		nodes, err := fetchConnectionNodes(srv.Client(), withUserinfo(t, srv.URL, "guest", "guest"), "camp")
+		require.NoError(t, err)
+		assert.Equal(t, "/api/connections", gotPath)
+		assert.True(t, gotAuthOK, "credentials must ride the Authorization header")
+		assert.ElementsMatch(t, []ConnNode{
+			{Name: "camp-pub-0", Node: "rabbit@rmq0"},
+			{Name: "camp-pub-1", Node: "rabbit@rmq1"},
+		}, nodes, "the non-prefix connection is filtered out")
+	})
+
+	t.Run("a non-200 status surfaces as an error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+
+		_, err := fetchConnectionNodes(srv.Client(), srv.URL, "camp")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "401")
+	})
+
+	t.Run("a URL with no host is rejected without an HTTP call", func(t *testing.T) {
+		_, err := fetchConnectionNodes(http.DefaultClient, "http://", "camp")
+		require.Error(t, err)
+	})
+}
+
 func TestParseRunningNodes(t *testing.T) {
 	t.Run("counts only nodes reporting running", func(t *testing.T) {
 		// A killed-but-still-listed member reports running=false; the readiness gate
