@@ -1124,10 +1124,28 @@ Deliveries without a `MessageID` cannot be deduped and pass straight
 to the handler. `store == nil` (the default) disables the middleware.
 Size `ttl` exactly as the manual cache window above (15 minutes suits
 most workloads). `DedupeStore` implementations must be safe for
-concurrent use. `Seen`/`Mark` run under the per-delivery handler
-context, so a configured `HandlerTimeout` bounds them too — keep store
-calls fast relative to that budget, since a near-expired `Mark` fails
-open (a possible future duplicate) rather than erroring.
+concurrent use.
+
+`Seen` runs *before* the handler under the per-delivery handler
+context, so a configured `HandlerTimeout` bounds it. `Mark` runs
+*after* a successful handler under a context **detached** from that
+deadline (the handler's trace/span values are preserved, but
+cancellation and the handler deadline are replaced with a fixed grace
+bound): a near-exhausted `HandlerTimeout`, or a shutdown that already
+cancelled the handler context, must not silently skip recording the
+id, since that would fail open to a future duplicate. The grace bound
+still caps `Mark` so a wedged store cannot block the dispatch goroutine
+(and thus consumer shutdown) indefinitely. Keep store calls fast
+regardless — a `Seen` slower than the handler budget, or a `Mark`
+slower than the grace bound, still fails open.
+
+**Operability.** Because fail-open intentionally hides a degraded store
+from message flow, the only signal of a store outage is the sampled
+fail-open warning (which carries a running `total:` count and the
+failing op, never the `MessageID` or payload). Operators relying on
+dedupe for side-effect suppression should **alert on the rate of that
+warning** as an early indicator that the store is down and the consumer
+has silently reverted to plain at-least-once.
 
 ### 6.3 Consumer
 
@@ -2171,8 +2189,10 @@ value.
     `codec_unknown_fields_total{type}` counter from `fn` so drift can be
     alerted on before a field becomes load-bearing. The observer fires
     only for struct targets, adds one extra `json.Unmarshal` pass per
-    `Decode` (and only when set; the per-type known-field set is memoized),
-    does not report nested-object drift, and `fn` must be concurrency-safe.
+    `Decode` (and only when set; the per-type known-field set is
+    memoized, but the extra pass scans the full payload, so its cost
+    scales with message size, not just schema size), does not report
+    nested-object drift, and `fn` must be concurrency-safe.
     The `path` is attacker-controllable wire data, so `fn` must NOT use it
     as an unbounded metric label — label on the bounded message `{type}`,
     as the canonical wiring does, never on the field name.

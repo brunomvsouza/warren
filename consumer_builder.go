@@ -164,10 +164,14 @@ func (b *ConsumerBuilder[M]) WithQueueDepthSampler(interval time.Duration) *Cons
 // ConsumeRaw handlers manage their own acks and are unaffected. store==nil (the
 // default) disables the middleware.
 //
-// Seen and Mark run under the per-delivery handler context, so a configured
-// HandlerTimeout bounds them too: a handler that consumes most of its budget can
-// leave Mark with a near-expired context, which (failing open) risks a future
-// duplicate rather than an error. Keep store calls fast relative to HandlerTimeout.
+// Seen runs before the handler under the per-delivery handler context, so a
+// configured HandlerTimeout bounds it. Mark runs after a successful handler under
+// a context DETACHED from that deadline (handler trace/span values are preserved,
+// but cancellation and the handler deadline are replaced with a fixed grace bound),
+// so a near-exhausted HandlerTimeout — or a shutdown that already cancelled the
+// handler context — cannot silently skip recording the id and fail open to a future
+// duplicate. The grace bound still caps Mark so a wedged store cannot block consumer
+// shutdown. Keep store calls fast regardless of which side of the handler they run on.
 func (b *ConsumerBuilder[M]) WithDedupe(store DedupeStore, ttl time.Duration) *ConsumerBuilder[M] {
 	b.dedupeStore = store
 	b.dedupeTTL = ttl

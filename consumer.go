@@ -827,6 +827,14 @@ func (c *Consumer[M]) Consume(ctx context.Context, h Handler[M]) error {
 	return c.runConsume(ctx, wrapped, true /* autoAck */)
 }
 
+// dedupeMarkGracePeriod bounds the detached context handed to DedupeStore.Mark in
+// wrapDedupe. Mark runs after a successful handler, so it must not inherit a
+// near-exhausted HandlerTimeout; but it still needs an upper bound so a wedged
+// store cannot block the delivery's dispatch goroutine (and thus consumer
+// shutdown) forever. The value is generous relative to a healthy store round-trip
+// and small relative to any sane shutdown budget.
+const dedupeMarkGracePeriod = 5 * time.Second
+
 // wrapDedupe layers the WithDedupe middleware (T55) over next on the Consume path:
 //
 //   - empty MessageID         → process normally (cannot dedupe without a key)
@@ -854,7 +862,16 @@ func (c *Consumer[M]) wrapDedupe(next RawHandler[M]) RawHandler[M] {
 		if err := next(ctx, d); err != nil {
 			return err // handler failed — nack and reprocess on redelivery; do not Mark
 		}
-		if err := c.dedupeStore.Mark(ctx, id, c.dedupeTTL); err != nil {
+		// Mark records the id only after the handler succeeded. Detach it from the
+		// handler context: a near-exhausted HandlerTimeout (or an already-cancelled
+		// shutdown ctx) must not turn a successful handler into a silently-skipped
+		// Mark, which would fail open to a future duplicate. Values (trace/span
+		// context) are preserved; only cancellation+deadline are replaced with a
+		// fixed grace bound so a wedged store still cannot block this dispatch
+		// goroutine — and thus consumer shutdown — indefinitely (SPEC §6.2.1).
+		markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dedupeMarkGracePeriod)
+		defer cancel()
+		if err := c.dedupeStore.Mark(markCtx, id, c.dedupeTTL); err != nil {
 			// The handler already succeeded; failing to record the id only risks a
 			// future duplicate, so still ack (return nil) and warn.
 			c.logDedupeFailOpen("Mark", err)
