@@ -109,10 +109,18 @@ func TestClusterReconnectStorm_ZeroLossNoStampede_cluster(t *testing.T) {
 		mu           sync.Mutex
 		publishedSet = make(map[string]struct{})
 		consumedSet  = make(map[string]struct{})
+		deliveries   int // total handler invocations, including redeliveries
+		redelivered  int // invocations the broker flagged as a redelivery
 		unexpected   []error
 	)
 
 	// — Consumer drains into consumedSet (deduped by MessageID) ————————————————
+	// Prefetch(64) keeps up to 64 delivered-but-unacked messages in flight per
+	// consumer socket; when a storm wave drops that socket the broker requeues every
+	// unacked one and redelivers it (Redelivered() == true) after the consumer
+	// re-subscribes. Counting deliveries vs redeliveries lets the campaign prove the
+	// prefetch↔redelivery interplay was actually exercised, and the zero-loss gate
+	// below proves the consumer deduped those redeliveries (at-least-once, TV-09).
 	consumer, err := warren.ConsumerFor[clusterFailoverMsg](conn).
 		Queue(queue).
 		Concurrency(4).
@@ -125,6 +133,10 @@ func TestClusterReconnectStorm_ZeroLossNoStampede_cluster(t *testing.T) {
 	go func() {
 		consumeErr <- consumer.ConsumeRaw(consumeCtx, func(_ context.Context, d *warren.Delivery[clusterFailoverMsg]) error {
 			mu.Lock()
+			deliveries++
+			if d.Redelivered() {
+				redelivered++
+			}
 			consumedSet[d.MessageID()] = struct{}{}
 			mu.Unlock()
 			return d.Ack()
@@ -262,6 +274,7 @@ func TestClusterReconnectStorm_ZeroLossNoStampede_cluster(t *testing.T) {
 	mu.Lock()
 	lost := lossByMessageID(publishedSet, consumedSet)
 	nPub, nCon := len(publishedSet), len(consumedSet)
+	gotDeliveries, gotRedelivered := deliveries, redelivered
 	surface := append([]error(nil), unexpected...)
 	mu.Unlock()
 
@@ -269,6 +282,16 @@ func TestClusterReconnectStorm_ZeroLossNoStampede_cluster(t *testing.T) {
 		"publishes failed with errors the reconnect storm does not explain: %v", surface)
 	require.Empty(t, lost,
 		"zero message loss across the reconnect storm: %d confirmed, %d consumed-distinct, lost=%v", nPub, nCon, lost)
-	t.Logf("reconnect-storm zero-loss: confirmed=%d consumed-distinct=%d (duplicates tolerated) across %d waves",
-		nPub, nCon, stormWave)
+	// Prefetch↔redelivery interplay: with 64 unacked in flight per socket, dropping
+	// every socket on each of the storm's waves must requeue and redeliver some of
+	// them — so at least one delivery carries the broker's redelivered flag. Zero
+	// redeliveries would mean prefetch never held an unacked message across a wave,
+	// leaving the dedup path (which the zero-loss gate above relies on) unexercised.
+	require.GreaterOrEqual(t, gotRedelivered, 1,
+		"prefetch must hold unacked messages that are redelivered across the storm "+
+			"(deliveries=%d redelivered=%d distinct=%d); zero redeliveries leaves the dedup path unexercised",
+		gotDeliveries, gotRedelivered, nCon)
+	t.Logf("reconnect-storm zero-loss: confirmed=%d consumed-distinct=%d deliveries=%d redelivered=%d "+
+		"(duplicates tolerated + deduped) across %d waves",
+		nPub, nCon, gotDeliveries, gotRedelivered, stormWave)
 }
