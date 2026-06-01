@@ -192,7 +192,16 @@ make build        # compile all packages
 make test         # unit tests (-race -cover)
 make lint         # golangci-lint
 make integration-up && make test-integration && make integration-down
+make cluster-up   && make test-cluster        && make cluster-down
 ```
+
+The **cluster lane** (`cluster` build tag) stands a 3-node quorum cluster +
+Toxiproxy and runs the reliability campaigns a single broker cannot prove —
+quorum-leader and SingleActiveConsumer failover, multi-node address rotation,
+partition handling, and rolling restart under load. It is **nightly /
+on-demand, never a per-PR gate**, and runs over a homogeneous RabbitMQ
+**3.13 + 4.x** matrix (`WARREN_RMQ_IMAGE`); `WARREN_RMQ2_IMAGE` swaps a single
+member for the mixed-version rolling-upgrade campaign. See SPEC §7.
 
 Pre-commit hook (opt-in): `make hooks` installs `lint` + `test` on commit.
 

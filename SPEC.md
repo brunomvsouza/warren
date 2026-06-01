@@ -2569,6 +2569,21 @@ confirmed live) and runs standalone; a genuine 3.13→4.x **major** rolling
 upgrade is an in-place, data-preserving image swap of an existing member,
 which needs persistent volumes the lane does not yet provision (LATER-88).
 
+**Version matrix.** The scheduled workflow (`.github/workflows/cluster.yml`
+— schedule + `workflow_dispatch`, standalone until T151's general nightly
+workflow consolidates it) runs the **whole** lane over a **homogeneous
+RabbitMQ version matrix**: every node is set to the same image via
+**`WARREN_RMQ_IMAGE`**, once on the **3.13 LTS** most estates run and once on
+the **4.x** line whose quorum/Khepri behaviour the campaigns assert. Matrix
+legs are independent (`fail-fast: false`) so a 3.13 regression cannot mask a
+4.x one. This is the cluster-lane analogue of T151/TV-05's single-node
+`integration` version matrix. Distinguish the two image knobs:
+`WARREN_RMQ_IMAGE` sets **all three** nodes (the homogeneous matrix axis;
+all campaigns), while `WARREN_RMQ2_IMAGE` overrides only **`rmq2`** (the
+opt-in mixed-version member the rolling-upgrade campaign asserts continuity
+across, feature-flag-compatible only). The campaigns are validated to pass
+on a homogeneous 4.x cluster before the axis is wired.
+
 **Fault injection — two distinct mechanisms, used honestly.** Toxiproxy
 fronts only the **AMQP client ports** (5672), so disabling a proxy severs
 **clients** but leaves inter-node Erlang distribution intact — it can
