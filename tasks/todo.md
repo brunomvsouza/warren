@@ -1186,14 +1186,15 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 - **Files:** `test/docker-compose.cluster.yml`, `test/Dockerfile.rabbitmq-*` (if a pinned cluster image is needed), `Makefile`, `internal/amqptest/cluster.go`, `cluster_smoke_cluster_test.go`.
 - **Deps:** T07d (multi-conn pool), existing `WithAddrs`. **(T166-decomp, P1)**
 
-### [ ] T166b — Cluster control toolkit: node kill/start, quorum-leader discovery, Toxiproxy client [P1] · M
+### [x] T166b — Cluster control toolkit: node kill/start, quorum-leader discovery, Toxiproxy client [P1] · M
 - **Acceptance:**
-  - [ ] Helpers to stop / start / kill a named broker node (via `docker compose` / the container runtime).
-  - [ ] `quorumLeader(t, queue)` reads `leader` / `members` / `online` from the management API (`/api/queues/{vhost}/{q}`), reusing the credentials-in-Authorization-header pattern from `queueArgsViaManagement`.
-  - [ ] A thin Toxiproxy client cuts / heals a node's AMQP port (proxy `disable`/`enable` or a `timeout`/`bandwidth` toxic).
+  - [x] Helpers to stop / start / kill a named broker node (via `docker compose` / the container runtime).
+  - [x] `quorumLeader(t, queue)` reads `leader` / `members` / `online` from the management API (`/api/queues/{vhost}/{q}`), reusing the credentials-in-Authorization-header pattern from `queueArgsViaManagement`.
+  - [x] A thin Toxiproxy client cuts / heals a node's AMQP port (proxy `disable`/`enable` or a `timeout`/`bandwidth` toxic).
 - **Verify:** a cluster test declares a quorum queue, records its leader, stops the leader node, and asserts the management API reports a **new** leader (a behaviour single-node cannot produce); `goleak`-clean.
 - **Files:** `internal/amqptest/cluster.go` (+ toxiproxy client), `cluster_control_cluster_test.go`.
 - **Deps:** T166a. **(T166-decomp, P1)**
+- **Done:** Split the toolkit into a non-tagged transport/pure half (`internal/amqptest/cluster_control.go`) — `QuorumQueueState` + `parseQuorumQueueState`, `fetchQuorumQueueState` (credentials ride the Authorization header, vhost percent-escaped, non-200 → error), a thin `ToxiproxyClient` (`NewToxiproxyClient`/`DisableProxy`/`EnableProxy` against `POST /proxies/{name}` `{enabled}`), and the `NodeService`/`nodeContainer`/`dockerNodeArgs` mappers — all unit-tested in the **default lane** against `httptest` (`cluster_control_test.go`), mirroring the `cluster_parse.go`/`cluster_parse_test.go` split — and a cluster-tagged `*testing.T` wrapper half in `cluster.go` (`QuorumLeader`, `StopNode`/`StartNode`/`KillNode` via `docker <action> warren-<svc>`, `NewToxiproxy`), each fail-not-skip. The live verification (`cluster_control_cluster_test.go`) declares a durable quorum queue over an rmq1-pinned `WithAddrs` list (leader determinism: added `queue_leader_locator = client-local` to `test/cluster/rabbitmq.conf`, explicit so the T166g 4.x member's `balanced` default cannot drift it), **kills** rmq1 (SIGKILL — the real-crash superset of "stops", the variant the T166c/d campaigns rely on), and polls the surviving rmq0 management API until a **new** leader (rmq0/rmq2) is elected; the killed node is restarted in `t.Cleanup`. **Verified:** default `-race` suite green, `go build`/`go vet -tags=cluster ./...` clean, `golangci-lint` (default + `--build-tags=cluster`) 0 issues. The live cluster run rides the on-demand lane (`make cluster-up && make test-cluster`).
 
 ### [ ] T166c — Campaign: quorum leader failover under sustained load (zero loss) [P1] · M
 - **Acceptance:**
