@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 )
 
 type jsonCodec struct {
@@ -24,6 +25,11 @@ type JSONOption func(*jsonCodec)
 // keep working (Postel's Law), and the observer makes the otherwise-silent drift
 // visible. The canonical wiring increments a codec_unknown_fields_total{type}
 // Prometheus counter from fn so an operator can alert on drift before it matters.
+//
+// Cardinality warning: the field name passed to fn is attacker-controllable wire
+// data. Do NOT use it as a metric label — a hostile producer sending random keys
+// would explode label cardinality. Label on the bounded message type (as the
+// canonical {type} wiring above does), not on the path.
 //
 // fn receives the wire field name (the JSON key). It fires only for struct targets
 // (a map or interface{} has no fixed schema, so nothing is "unknown") and only on
@@ -117,12 +123,32 @@ func (c *jsonCodec) reportUnknownFields(data []byte, v any) {
 	}
 }
 
+// knownFieldsCache memoizes knownJSONFields per reflect.Type (I1). The field set
+// is a pure function of the static type, so rebuilding it (reflection walk + map
+// allocation) on every Decode is wasted work when an observer leaves the drift
+// hook on in a consumer's hot path.
+var knownFieldsCache sync.Map // reflect.Type → map[string]struct{}
+
 // knownJSONFields returns the set of JSON field names (lowercased for the
 // case-insensitive match encoding/json performs) that rt accepts on decode,
 // following the same rules as the stdlib: an explicit `json:"name"` tag wins, a
 // `json:"-"` tag drops the field, unexported fields are ignored, and the fields of
 // an untagged embedded struct are promoted.
+//
+// The result is memoized per type and shared across callers, so it MUST be treated
+// as read-only — never mutate the returned map.
 func knownJSONFields(rt reflect.Type) map[string]struct{} {
+	if cached, ok := knownFieldsCache.Load(rt); ok {
+		return cached.(map[string]struct{})
+	}
+	out := computeKnownJSONFields(rt)
+	actual, _ := knownFieldsCache.LoadOrStore(rt, out)
+	return actual.(map[string]struct{})
+}
+
+// computeKnownJSONFields does the reflection work behind knownJSONFields; it is
+// split out so the result can be cached. See knownJSONFields for the rules.
+func computeKnownJSONFields(rt reflect.Type) map[string]struct{} {
 	out := make(map[string]struct{}, rt.NumField())
 	for i := range rt.NumField() {
 		f := rt.Field(i)

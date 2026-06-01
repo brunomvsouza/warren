@@ -1124,7 +1124,10 @@ Deliveries without a `MessageID` cannot be deduped and pass straight
 to the handler. `store == nil` (the default) disables the middleware.
 Size `ttl` exactly as the manual cache window above (15 minutes suits
 most workloads). `DedupeStore` implementations must be safe for
-concurrent use.
+concurrent use. `Seen`/`Mark` run under the per-delivery handler
+context, so a configured `HandlerTimeout` bounds them too — keep store
+calls fast relative to that budget, since a near-expired `Mark` fails
+open (a possible future duplicate) rather than erroring.
 
 ### 6.3 Consumer
 
@@ -2168,8 +2171,11 @@ value.
     `codec_unknown_fields_total{type}` counter from `fn` so drift can be
     alerted on before a field becomes load-bearing. The observer fires
     only for struct targets, adds one extra `json.Unmarshal` pass per
-    `Decode` (and only when set), does not report nested-object drift,
-    and `fn` must be concurrency-safe.
+    `Decode` (and only when set; the per-type known-field set is memoized),
+    does not report nested-object drift, and `fn` must be concurrency-safe.
+    The `path` is attacker-controllable wire data, so `fn` must NOT use it
+    as an unbounded metric label — label on the bounded message `{type}`,
+    as the canonical wiring does, never on the field name.
   - `codec.NewProtobuf()` — proto3 binary; `ContentType` =
     `application/x-protobuf`.
     The built-in CloudEvents codecs operate on the canonical

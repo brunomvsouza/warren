@@ -1746,6 +1746,14 @@ func (c *Consumer[M]) Resume(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Rotate counter-B state (a fresh subscription resets in-process redelivery
+	// counts), capturing the previous pointer to restore on rollback (S3). This is
+	// ordered AFTER resubscribeLocked started the pump but BEFORE the handoff send, so
+	// the main loop — which only adopts the sub once the send below completes — never
+	// dispatches against the stale counter, yet a rolled-back Resume leaves the counter
+	// untouched. The pump merely fans deliveries onto its buffered out; dispatch (the
+	// only counterState reader) happens in runConsume, not in the pump.
+	prevCounter := c.counterState.Swap(&redeliveryCounter{})
 	select {
 	case c.resubCh <- sub:
 		c.paused.Store(false)
@@ -1754,10 +1762,13 @@ func (c *Consumer[M]) Resume(ctx context.Context) error {
 		// The Resume ctx was cancelled after the basic.consume was issued but before
 		// the running loop adopted the new subscription. Roll back so we leave neither
 		// an orphaned broker subscription nor an inconsistent Health (Paused while
-		// actually subscribed): cancel the basic.consume just issued and stay paused,
-		// so a later Resume is a clean retry. The pump started by resubscribeLocked is
-		// bound to runCtx and exits when this local cancel closes its delivery stream
-		// (paused, no death signal → channelDone stays open, in-flight handlers unharmed).
+		// actually subscribed): restore the counter (the rolled-back sub was never
+		// adopted, so its rotation had no observable effect), cancel the basic.consume
+		// just issued, and stay paused so a later Resume is a clean retry. The pump
+		// started by resubscribeLocked is bound to runCtx and exits when this local
+		// cancel closes its delivery stream (paused, no death signal → channelDone
+		// stays open, in-flight handlers unharmed).
+		c.counterState.Store(prevCounter)
 		if c.live != nil {
 			_ = c.live.ch.Cancel(c.tag, false)
 		}
@@ -1770,19 +1781,29 @@ func (c *Consumer[M]) Resume(ctx context.Context) error {
 // physical channel (and its in-flight acks) is preserved. The pump is bound to
 // c.runCtx (the consumer lifecycle), not to the ctx passed to Resume, so a
 // request-scoped Resume ctx cannot tear it down. Caller holds pauseMu.
+//
+// Counter-B rotation is the caller's responsibility (Resume rotates only on a
+// committed handoff and restores on rollback — S3), so this function does not touch
+// counterState.
 func (c *Consumer[M]) resubscribeLocked() (deliverySub, error) {
 	live := c.live
 	if live == nil {
 		return deliverySub{}, fmt.Errorf("%w: no live subscription to resume", ErrReconnecting)
 	}
-	// Rotate counter B state, mirroring openDeliveryCh: a fresh subscription resets
-	// in-process redelivery counts.
-	c.counterState.Store(&redeliveryCounter{})
 	args := buildConsumeArgs(c.consumeArgs, c.prioritySet, c.priority)
 	deliveries, err := live.ch.Consume(c.queue, c.tag, c.brokerAutoAck, c.exclusive, false, false, args)
 	if err != nil {
 		return deliverySub{}, fmt.Errorf("warren: consumer resume: %w", wrapAMQPError(err))
 	}
+	// Shared-notify aliasing (S2): the new pump reuses live.closeCh/cancelCh/closeDone.
+	// Under a rapid Pause→Resume (before the prior pump has observed its delivery stream
+	// close), the old and new pumps are transiently both alive and select on the SAME
+	// closeCh/cancelCh. On a physical channel death the notification is delivered to only
+	// one of them; the other still closes channelDone via startPump's `!c.paused.Load()`
+	// fallback, and live.closeDone is sync.Once-guarded so the double close is safe. So
+	// channelDone is always closed exactly once on a real death regardless of which pump
+	// wins the notification — covered by TestStartPump_ChannelDeath_* and
+	// TestConsumer_Resume_RacesReconnect_NeverActiveAndPaused.
 	out := c.startPump(c.runCtx, deliveries, live.closeCh, live.cancelCh, live.closeDone)
 	return deliverySub{ch: out, done: live.done}, nil
 }
