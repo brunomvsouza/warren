@@ -2,6 +2,7 @@ package warren
 
 import (
 	"errors"
+	"sync/atomic"
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
@@ -24,6 +25,12 @@ type Delivery[M any] struct {
 	// BatchConsumer installs this to detect per-delivery acks and suppress the
 	// batch-level auto-verdict (idempotent guard). Nil in all other code paths.
 	ackNotify func()
+	// resolved is the single-CAS resolved-once guard (T60 / CR-04). It is set
+	// to true by the first Ack/Nack/AckIf/timeout-verdict; every later verdict
+	// loses the CAS and is a no-op returning ErrAlreadyResolved. This prevents a
+	// second wire frame (which channel-closes with PRECONDITION_FAILED and takes
+	// out every in-flight handler on that channel).
+	resolved atomic.Bool
 }
 
 // newDelivery constructs a Delivery[M] from a decoded body, the queue name,
@@ -75,8 +82,10 @@ func (d *Delivery[M]) DeathCountByReason(reason string) int {
 func (d *Delivery[M]) DeathReasons() []string { return d.death.Reasons }
 
 // Ack acknowledges the delivery to the broker.
-// Returns ErrAlreadyClosed if the owning consumer was shut down, ErrChannelClosed
-// if the underlying channel closed before the ack reached the broker.
+// Returns ErrAlreadyClosed if the owning consumer was shut down, ErrAlreadyResolved
+// if a verdict (Ack/Nack/AckIf or a HandlerTimeout verdict) was already emitted for
+// this delivery (a no-op — no second frame), ErrChannelClosed if the underlying
+// channel closed before the ack reached the broker.
 func (d *Delivery[M]) Ack() error {
 	if d.done != nil {
 		select {
@@ -84,6 +93,9 @@ func (d *Delivery[M]) Ack() error {
 			return ErrAlreadyClosed
 		default:
 		}
+	}
+	if !d.resolved.CompareAndSwap(false, true) {
+		return ErrAlreadyResolved
 	}
 	if err := d.raw.Ack(false); err != nil {
 		return mapAckErr(err)
@@ -96,8 +108,9 @@ func (d *Delivery[M]) Ack() error {
 
 // Nack negatively acknowledges the delivery. requeue=true re-queues the message;
 // requeue=false routes it to the DLX (or drops it).
-// Returns ErrAlreadyClosed if the owning consumer was shut down, ErrChannelClosed
-// if the underlying channel closed before the nack reached the broker.
+// Returns ErrAlreadyClosed if the owning consumer was shut down, ErrAlreadyResolved
+// if a verdict was already emitted for this delivery (a no-op — no second frame),
+// ErrChannelClosed if the underlying channel closed before the nack reached the broker.
 func (d *Delivery[M]) Nack(requeue bool) error {
 	if d.done != nil {
 		select {
@@ -106,6 +119,9 @@ func (d *Delivery[M]) Nack(requeue bool) error {
 		default:
 		}
 	}
+	if !d.resolved.CompareAndSwap(false, true) {
+		return ErrAlreadyResolved
+	}
 	if err := d.raw.Nack(false, requeue); err != nil {
 		return mapAckErr(err)
 	}
@@ -113,6 +129,20 @@ func (d *Delivery[M]) Nack(requeue bool) error {
 		d.ackNotify()
 	}
 	return nil
+}
+
+// nackOnTimeout emits the HandlerTimeout verdict (basic.nack) through the same
+// resolved-once CAS as the public Ack/Nack, so a timeout-verdict goroutine and a
+// late handler verdict (esp. via ConsumeRaw) can never both emit a frame (CR-04).
+// Unlike the public Nack it does not consult d.done — the timeout verdict must be
+// sent regardless of consumer-shutdown state — and it swallows the broker error
+// (the caller is the consumer loop, which has no error channel here). If a handler
+// verdict already won the CAS, this is a no-op.
+func (d *Delivery[M]) nackOnTimeout(requeue bool) {
+	if !d.resolved.CompareAndSwap(false, true) {
+		return
+	}
+	_ = d.raw.Nack(false, requeue)
 }
 
 // AckIf applies the standard handler error-mapping semantics:

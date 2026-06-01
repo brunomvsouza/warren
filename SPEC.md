@@ -1202,11 +1202,30 @@ non-breaking.
 - `ErrChannelClosed` — the delivery's channel was closed before the
   ack/nack reached the broker (rare under healthy operation).
 - `ErrAlreadyClosed` — the consumer was closed via `Close(ctx)`.
+- `ErrAlreadyResolved` — a verdict was **already** emitted for this
+  delivery (a no-op; see the double-verdict guard below).
 - `nil` — broker received the ack/nack. Note that AMQP `basic.ack` /
   `basic.nack` are not confirmed by the broker; success here means
   "the frame was written to the socket", not "the broker recorded it".
   Network partition between write and broker-side processing can
   cause the message to be redelivered (`Redelivered() == true`).
+
+**Double-verdict guard (resolved-once, single atomic CAS).** A
+`Delivery[M]` resolves **exactly once**. The first of any
+`Ack`/`Nack`/`AckIf`, or a `HandlerTimeout` verdict, wins a single
+atomic compare-and-swap and emits the one wire frame; every later
+verdict — including a late handler `Ack`/`Nack` after the timeout
+already nacked, or a double `Delivery.Ack` via `ConsumeRaw` — **loses
+the CAS and is a no-op returning `ErrAlreadyResolved`**, never a second
+frame. This is **not** a check-then-act: the guard is the same atomic
+CAS the `Batch[M]` verdict uses, so a timeout-verdict goroutine and a
+handler-`Ack` goroutine racing on the same delivery still produce
+exactly one frame. **Pre-fix** (before this guard) the second frame
+caused the broker to close the channel with `406 PRECONDITION_FAILED`,
+which took out **every** in-flight handler on that channel — collateral
+loss, not merely a duplicate ack. The timeout verdict is routed through
+the same guard (`nackOnTimeout`) so it cannot race the handler's own
+ack on the `ConsumeRaw` path.
 
 Handler error semantics:
 - `nil` → Ack.

@@ -3,6 +3,7 @@ package warren
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,27 +14,43 @@ import (
 
 // fakeAcker records Ack/Nack calls for delivery tests.
 type fakeAcker struct {
-	acked    bool
-	nacked   bool
-	requeue  bool
-	failWith error
+	mu        sync.Mutex
+	acked     bool
+	nacked    bool
+	requeue   bool
+	ackCount  int
+	nackCount int
+	failWith  error
 }
 
 func (f *fakeAcker) Ack(tag uint64, multiple bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.failWith != nil {
 		return f.failWith
 	}
 	f.acked = true
+	f.ackCount++
 	return nil
 }
 
 func (f *fakeAcker) Nack(tag uint64, multiple, requeue bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.failWith != nil {
 		return f.failWith
 	}
 	f.nacked = true
 	f.requeue = requeue
+	f.nackCount++
 	return nil
+}
+
+// frames returns the total number of ack+nack frames emitted.
+func (f *fakeAcker) frames() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ackCount + f.nackCount
 }
 
 func (f *fakeAcker) Reject(tag uint64, requeue bool) error { return nil }
