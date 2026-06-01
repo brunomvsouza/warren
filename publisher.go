@@ -669,8 +669,9 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 	return msg, body, nil
 }
 
-// safeEncodeBody calls encodeBody, recovering from a codec panic per the T09
-// panic-safety contract (mirrors safeDecodeConsumer on the consume path). The
+// safeEncodeBody calls encodeBody, recovering from a codec panic per the T09 /
+// T73 panic-safety contract (mirrors safeDecodeConsumer on the consume path),
+// covering both Codec.Encode and HeaderCodec.EncodeWithHeaders. The
 // recovered value is reported by type only — never by content — so a custom
 // codec cannot leak message bytes into an error string, log, or span. The
 // caller wraps the returned error in ErrInvalidMessage.
