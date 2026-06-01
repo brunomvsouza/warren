@@ -284,6 +284,37 @@ func RunningNodes(t *testing.T) (running, total int) {
 	return running, total
 }
 
+// TryWaitRunningNodes polls the management API until EXACTLY `want` nodes report
+// running, returning true, or false if the timeout elapses. Unlike WaitClusterReady it
+// does NOT fail the test and matches an exact count, so the partition campaign can use
+// it both to observe the minority drop to the majority count (want=2 of 3) and to
+// confirm full-membership recovery (want=3). Transient read errors/timeouts — expected
+// while a partition is undetected and rmq0's management API briefly hangs trying to
+// reach the unreachable member — are tolerated and retried; the caller decides whether
+// a false return is a failure (isolation never happened) or a cue to force a rejoin. A
+// short-timeout, keep-alive-disabled HTTP client is used so no pooled connection
+// goroutine survives into a goleak check.
+func TryWaitRunningNodes(t *testing.T, want int, timeout time.Duration) bool {
+	t.Helper()
+	mgmt := ClusterMgmt(t)
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	defer client.CloseIdleConnections()
+
+	deadline := time.Now().Add(timeout)
+	for {
+		if running, _, err := fetchRunningNodes(client, mgmt); err == nil && running == want {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(1 * time.Second)
+	}
+}
+
 // NodeVersions reads each cluster member's RabbitMQ version from the management API
 // (WARREN_CLUSTER_MGMT), returning node name → version. The rolling-upgrade campaign
 // uses it to report whether it ran against a homogeneous or a genuinely mixed-version

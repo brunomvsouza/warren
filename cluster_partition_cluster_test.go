@@ -36,10 +36,21 @@ package warren_test
 // stable leader through the partition and this campaign isolates the pause_minority +
 // zero-loss-via-majority property from leader re-election (that is T166c's campaign).
 //
+// Observability + recovery (measured against the live cluster, default net_ticktime):
+// while the partition is undetected (~tens of seconds) rmq0's management API HANGS
+// trying to reach the unreachable member, so the minority is observed via a TOLERANT
+// running-count poll (TryWaitRunningNodes) that retries through the hang rather than a
+// single per-quorum-queue stats read (which aggregates from the partitioned member and
+// times out). A pause_minority node also does NOT reliably auto-resume after a FULL
+// network cut — it returns with an inconsistent Mnesia view (running_partitioned_
+// network) — so the heal reconnects the network AND restarts the node, forcing a clean
+// rejoin that re-syncs from the majority (the standard operational recovery; it does
+// not weaken the during-partition isolation assertion).
+//
 // goleak: after the partition the sockets that had landed on rmq2 rotate (shuffled
 // cursor) to the surviving rmq0/rmq1 so Close drains cleanly; the partition is healed
-// in t.Cleanup (tolerant of an already-healed state) and the cluster waited whole
-// again before the durable queue is deleted.
+// in t.Cleanup (which force-rejoins only if the body left it isolated) and the cluster
+// waited whole again before the durable queue is deleted.
 
 import (
 	"context"
@@ -48,7 +59,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
@@ -56,25 +66,40 @@ import (
 	"github.com/brunomvsouza/warren/internal/amqptest"
 )
 
-// awaitQueueOnline polls the management API until the quorum queue reports exactly
-// `want` online members (and still spans all 3 as members), or the timeout elapses.
-// Partition detection is net-tick-bound (a few seconds to tens of seconds), and the
-// API may briefly report a stale set mid-transition, so a poll — not a single read —
-// is required. Returns the satisfying state for logging.
-func awaitQueueOnline(t *testing.T, queue string, want int, timeout time.Duration) amqptest.QuorumQueueState {
+// awaitQueueFullyOnline polls until the quorum queue has all three members online, the
+// readiness gate the partition precondition needs: a freshly declared quorum queue (or
+// one whose replica a prior run's heal just restarted) takes a moment for every
+// follower to come online, so a single read right after Declare can race and see only
+// the majority. The cluster is healthy here (no partition), so QuorumLeader is
+// responsive. Returns the satisfying state.
+func awaitQueueFullyOnline(t *testing.T, queue string, timeout time.Duration) amqptest.QuorumQueueState {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var last amqptest.QuorumQueueState
-	for time.Now().Before(deadline) {
+	for {
 		last = amqptest.QuorumLeader(t, queue)
-		if len(last.Members) == 3 && len(last.Online) == want {
+		if len(last.Members) == 3 && len(last.Online) == 3 {
 			return last
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("quorum queue %q not fully online within %s (members=%v online=%v)",
+				queue, timeout, last.Members, last.Online)
 		}
 		time.Sleep(1 * time.Second)
 	}
-	t.Fatalf("quorum queue %q did not reach online=%d (members=3) within %s (last members=%v online=%v)",
-		queue, want, timeout, last.Members, last.Online)
-	return last // unreachable
+}
+
+// healPartitionClean reconnects the isolated node and forces a clean rejoin. A
+// pause_minority node does not reliably auto-resume after a full docker-network cut (it
+// returns with an inconsistent Mnesia view), so reconnecting the network is not enough
+// — restarting the node makes it boot fresh and re-sync from the majority. Used in the
+// test body's recovery phase; the cleanup below force-rejoins only if the body left the
+// node isolated.
+func healPartitionClean(t *testing.T, service string, nodeCount int) {
+	t.Helper()
+	amqptest.HealPartition(t, service) // reconnect the node to the cluster network
+	amqptest.RestartNode(t, service)   // force a clean rejoin (re-sync from the majority)
+	amqptest.WaitClusterReady(t, nodeCount, 120*time.Second)
 }
 
 // TestClusterPartitionUnderLoad_PauseMinorityZeroLoss_cluster streams confirmed load
@@ -137,11 +162,11 @@ func TestClusterPartitionUnderLoad_PauseMinorityZeroLoss_cluster(t *testing.T) {
 	require.NoError(t, topo.Declare(ctx, conn))
 	require.NoError(t, topo.AttachTo(conn))
 
-	// Precondition: a quorum queue spanning all three members, leader on the survivor.
-	before := amqptest.QuorumLeader(t, queue)
+	// Precondition: a quorum queue spanning all three members (poll for full replication
+	// so a freshly declared queue, or one whose replica a prior run just restarted, is
+	// not read mid-join), leader on the survivor.
+	before := awaitQueueFullyOnline(t, queue, 60*time.Second)
 	require.Equal(t, "quorum", before.Type)
-	require.Len(t, before.Members, 3, "quorum queue must span all three cluster nodes")
-	require.Len(t, before.Online, 3, "all three members must be online before the partition")
 	require.NotEqual(t, "rabbit@"+victimService, before.Leader,
 		"leader must be pinned to a survivor, not the node we are about to partition")
 
@@ -228,25 +253,29 @@ func TestClusterPartitionUnderLoad_PauseMinorityZeroLoss_cluster(t *testing.T) {
 	prePartition := confirmedCount()
 
 	// — Inject the partition: isolate rmq2 from the cluster network mid-stream ————
-	// Register the heal FIRST (LIFO: runs before the queue-delete cleanup), so the
-	// cluster is whole again when the durable queue is removed. The heal is tolerant of
-	// an already-healed state, since the test body heals explicitly below.
+	// Register the safety-net heal FIRST (LIFO: runs before the queue-delete cleanup),
+	// so the cluster is whole again when the durable queue is removed. It force-rejoins
+	// ONLY if the body below left the node isolated (a failed assertion before the heal),
+	// so the happy path does not restart an already-healthy node a second time.
 	t.Cleanup(func() {
-		amqptest.HealPartition(t, victimService)
-		amqptest.WaitClusterReady(t, len(nodes), 120*time.Second)
+		amqptest.HealPartition(t, victimService) // reconnect network (no-op if already connected)
+		if amqptest.TryWaitRunningNodes(t, len(nodes), 20*time.Second) {
+			return // cluster already whole — the body healed it
+		}
+		healPartitionClean(t, victimService, len(nodes)) // force a clean rejoin
 	})
 	amqptest.PartitionNode(t, victimService)
 
-	// pause_minority: the isolated follower drops out of the quorum's online set while
-	// the majority {rmq0, rmq1} keeps quorum. This is the broker-side proof a single
-	// node cannot give.
-	isolated := awaitQueueOnline(t, queue, majorityCount, 120*time.Second)
-	assert.Len(t, isolated.Members, 3, "the partitioned member is still a member, just offline")
-	assert.NotContains(t, isolated.Online, "rabbit@"+victimService,
-		"the partitioned node must drop out of the quorum's online set")
+	// pause_minority: the isolated follower drops out of the cluster's running set
+	// (running falls to the majority count) while the majority {rmq0, rmq1} keeps
+	// quorum. Observed via a TOLERANT poll because rmq0's management API hangs until the
+	// partition is detected (~tens of seconds at the default net_ticktime); this is the
+	// broker-side proof a single node cannot give.
+	require.True(t, amqptest.TryWaitRunningNodes(t, majorityCount, 180*time.Second),
+		"pause_minority must isolate the minority: the running-node count must drop to the majority (%d of %d) during the partition",
+		majorityCount, len(nodes))
 	running, total := amqptest.RunningNodes(t)
-	t.Logf("partition active: queue online=%v (of members=%v); cluster running=%d/%d",
-		isolated.Online, isolated.Members, running, total)
+	t.Logf("partition active: cluster running=%d/%d (minority %s isolated)", running, total, victimService)
 
 	// No silent stall: the publisher must keep CONFIRMING through the partition (the
 	// majority stays available). A publisher wedged on the cut would never get here.
@@ -255,11 +284,12 @@ func TestClusterPartitionUnderLoad_PauseMinorityZeroLoss_cluster(t *testing.T) {
 		120*time.Second, 100*time.Millisecond,
 		"publisher must keep confirming during the partition (majority available, no silent stall)")
 
-	// — Heal: reconnect rmq2; it rejoins and the quorum returns to full membership ——
-	amqptest.HealPartition(t, victimService)
-	amqptest.WaitClusterReady(t, len(nodes), 120*time.Second)
-	healed := awaitQueueOnline(t, queue, 3, 120*time.Second)
-	t.Logf("partition healed: queue online=%v", healed.Online)
+	// — Heal: reconnect rmq2 and force a clean rejoin; the quorum returns to full
+	// membership (a pause_minority node does not auto-resume after a full network cut). —
+	healPartitionClean(t, victimService, len(nodes))
+	healed := amqptest.QuorumLeader(t, queue) // responsive again now the cluster is whole
+	require.Len(t, healed.Members, 3, "quorum queue must span all three members after heal")
+	t.Logf("partition healed: queue members=%v online=%v", healed.Members, healed.Online)
 
 	// Stop the load and join the publisher before the recovery gate + drain.
 	close(pubDone)
