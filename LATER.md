@@ -1270,3 +1270,17 @@ asserts the broker redelivers the whole requeued set to the Prefetch(1) standby 
 (verifyContiguous, deduped 0..N-1). sacOrderTracker.duplicates() makes the at-least-once
 requeue coverage observable. -->
 
+---
+
+### LATER-88 — Cluster lane cannot exercise a genuine 3.13→4.x MAJOR rolling upgrade (fresh-boot members can't cluster across feature-flag generations)
+
+**Context:** T166g's rolling-upgrade campaign (`cluster_rolling_upgrade_cluster_test.go`) asserts continuity under load across rolling node restarts, and the compose lane exposes `WARREN_RMQ2_IMAGE` to run one member at a different version. This forms a real mixed-version cluster for **feature-flag-compatible** pairs (validated live with 3.13.7 + 3.13.6), but a fresh **4.x** node refuses to join a 3.13 cluster via peer discovery — RabbitMQ rejects it with `incompatible_feature_flags` and the node runs **standalone** (confirmed live: `Feature flags: nodes rabbit@rmq2 and rabbit@rmq1 are incompatible`). A genuine 3.13→4.x upgrade is an **in-place, data-preserving** image swap of an existing member (which already has the required feature flags enabled and retains cluster membership), not a fresh boot — and the cluster compose intentionally uses ephemeral node storage (no persistent volumes), so it cannot perform an in-place swap.
+
+**Impact:** The MAJOR-version (3.13→4.x) half of the LT-05 "rolling broker upgrade under load" claim is asserted only for same-generation version skew, not across the 3.x→4.x feature-flag boundary that is the operationally risky one. No production behaviour is affected — this is a test-harness coverage gap, not a warren defect; the within-generation rolling-restart continuity IS covered.
+
+**Evidence:** T166g live validation (2026-06-01): the homogeneous and 3.13.7+3.13.6 mixed runs pass; the 3.13.7+4.0.9 run leaves rmq2 standalone (`incompatible_feature_flags`).
+
+**Suggested solution:** Add per-node named volumes for `/var/lib/rabbitmq` to `test/docker-compose.cluster.yml`, then drive a true in-place upgrade in the campaign: bring the cluster up homogeneous on 3.13.x, enable all stable feature flags, then for each node in turn `docker compose stop <node>` → recreate it on the 4.x image **reusing its volume** → wait for rejoin, all under sustained load, asserting zero loss + resubscribe across the version transition. Pin a 4.x LTS image. Verify Khepri/quorum-queue migration does not break the zero-loss accounting.
+
+**Prerequisites:** T166g (the rolling-upgrade campaign + the `WARREN_RMQ2_IMAGE` seam this builds on); a standing-cluster decision (related to LATER-49) since persistent volumes change the lane's teardown semantics.
+
