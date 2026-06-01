@@ -20,13 +20,15 @@ import (
 // cluster lane by cluster_control_cluster_test.go.
 
 func TestParseQuorumQueueState(t *testing.T) {
-	t.Run("quorum queue reports leader, members and online", func(t *testing.T) {
+	t.Run("quorum queue reports leader, members, online and message counts", func(t *testing.T) {
 		body := []byte(`{
 			"name": "orders",
 			"type": "quorum",
 			"leader": "rabbit@rmq1",
 			"members": ["rabbit@rmq0", "rabbit@rmq1", "rabbit@rmq2"],
-			"online": ["rabbit@rmq0", "rabbit@rmq1", "rabbit@rmq2"]
+			"online": ["rabbit@rmq0", "rabbit@rmq1", "rabbit@rmq2"],
+			"messages_ready": 3,
+			"messages_unacknowledged": 7
 		}`)
 
 		state, err := parseQuorumQueueState(body)
@@ -36,6 +38,8 @@ func TestParseQuorumQueueState(t *testing.T) {
 		assert.Equal(t, "rabbit@rmq1", state.Leader)
 		assert.Equal(t, []string{"rabbit@rmq0", "rabbit@rmq1", "rabbit@rmq2"}, state.Members)
 		assert.Equal(t, []string{"rabbit@rmq0", "rabbit@rmq1", "rabbit@rmq2"}, state.Online)
+		assert.Equal(t, 3, state.MessagesReady, "messages_ready must parse for the in-flight gate")
+		assert.Equal(t, 7, state.MessagesUnacknowledged, "messages_unacknowledged must parse for the in-flight gate")
 	})
 
 	t.Run("classic queue payload yields empty leader/members (no panic)", func(t *testing.T) {

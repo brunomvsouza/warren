@@ -21,16 +21,28 @@ import (
 
 // QuorumQueueState is the subset of the RabbitMQ management API's
 // /api/queues/{vhost}/{name} payload the cluster lane reads to observe Raft
-// leadership. For a quorum queue the API reports the current leader, the full
-// member set, and which members are online — the fields a leader-failover
-// assertion needs. A classic queue omits these, so Leader/Members are empty for
-// non-quorum queues rather than invented.
+// leadership and message accounting. For a quorum queue the API reports the
+// current leader, the full member set, and which members are online — the fields a
+// leader-failover assertion needs. A classic queue omits these, so Leader/Members
+// are empty for non-quorum queues rather than invented.
+//
+// MessagesReady / MessagesUnacknowledged are the queue's depth split: ready (not
+// yet delivered) vs unacknowledged (delivered to a consumer, not yet acked). The
+// SAC Prefetch(N>1) campaign (T166i) polls MessagesUnacknowledged to PROVE a
+// multi-message in-flight set is held by the active consumer before it is killed —
+// the broker-side fact that makes the multi-message requeue non-vacuous (a single
+// in-flight message could be requeued without these ever exceeding one).
 type QuorumQueueState struct {
 	Name    string   `json:"name"`
 	Type    string   `json:"type"`
 	Leader  string   `json:"leader"`
 	Members []string `json:"members"`
 	Online  []string `json:"online"`
+	// MessagesReady is messages ready for delivery (not yet checked out).
+	MessagesReady int `json:"messages_ready"`
+	// MessagesUnacknowledged is messages delivered to a consumer but not yet acked —
+	// the in-flight (checked-out) set the broker requeues if that consumer dies.
+	MessagesUnacknowledged int `json:"messages_unacknowledged"`
 }
 
 // parseQuorumQueueState decodes a management-API queue payload into a
