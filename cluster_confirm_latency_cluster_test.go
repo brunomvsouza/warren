@@ -39,7 +39,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -80,14 +79,10 @@ var confirmLatencyBucketsSeconds = []float64{
 	1, 2.5, 5, 10, 20, 30, 35,
 }
 
-// cumulativeBucket is one finite histogram bucket flattened out of the Prometheus
-// dto so the quantile math below is dto-free and unit-testable in isolation:
-// upperBound is the bucket's inclusive upper boundary (seconds), cumulative is the
-// number of observations ≤ that boundary.
-type cumulativeBucket struct {
-	upperBound float64
-	cumulative uint64
-}
+// The publish-latency histogram readback helpers — cumulativeBucket,
+// publishLatencyBuckets, quantileFromBuckets, samplesAbove — are pure math over
+// flattened Prometheus buckets and live in the un-tagged latency_buckets_test.go so
+// they are exercised on the fast lane (VG-6), not only behind the `cluster` tag.
 
 // TestClusterQuorumConfirmLatency_TailNotClipped_cluster streams confirmed publishes
 // to a quorum queue under concurrent load, then reads back the publish-latency
@@ -258,82 +253,4 @@ func TestClusterQuorumConfirmLatency_TailNotClipped_cluster(t *testing.T) {
 	t.Logf("quorum confirm latency (3-node Raft majority commit, n=%d confirmed, transient=%d): "+
 		"p50=%.3fms p99=%.3fms p999=%.3fms — tail captured, no +Inf clip",
 		sampleCount, gotTransient, p50*1e3, p99*1e3, p999*1e3)
-}
-
-// publishLatencyBuckets gathers the publisher_publish_seconds histogram for the
-// given outcome label and returns its finite buckets (ascending by upper bound)
-// plus the total sample count (which, per the Prometheus model, INCLUDES any
-// observation that fell into the implicit +Inf overflow). Comparing the largest
-// finite bucket's cumulative count against this total is how the caller detects a
-// +Inf clip. Returns (nil, 0) if the series is absent.
-func publishLatencyBuckets(t *testing.T, reg *prometheus.Registry, outcome string) ([]cumulativeBucket, uint64) {
-	t.Helper()
-	mfs, err := reg.Gather()
-	require.NoError(t, err)
-	var (
-		result      []cumulativeBucket
-		sampleCount uint64
-		matched     int
-	)
-	for _, mf := range mfs {
-		if mf.GetName() != "publisher_publish_seconds" {
-			continue
-		}
-		for _, m := range mf.GetMetric() {
-			var matches bool
-			for _, lp := range m.GetLabel() {
-				if lp.GetName() == "outcome" && lp.GetValue() == outcome {
-					matches = true
-					break
-				}
-			}
-			if !matches {
-				continue
-			}
-			matched++
-			h := m.GetHistogram()
-			out := make([]cumulativeBucket, 0, len(h.GetBucket()))
-			for _, b := range h.GetBucket() {
-				out = append(out, cumulativeBucket{upperBound: b.GetUpperBound(), cumulative: b.GetCumulativeCount()})
-			}
-			// Prometheus emits buckets ascending, but sort defensively so the quantile
-			// walk and the "largest finite bucket" read do not depend on emission order.
-			sort.Slice(out, func(i, j int) bool { return out[i].upperBound < out[j].upperBound })
-			result, sampleCount = out, h.GetSampleCount()
-		}
-	}
-	// Exactly one series is expected for a given outcome; more than one means an
-	// unanticipated label dimension was added and the readback would silently pick
-	// just one of them. Zero is allowed (callers handle the absent-series case).
-	require.LessOrEqualf(t, matched, 1,
-		"expected at most one publisher_publish_seconds series for outcome=%q, got %d (unexpected label dimensions?)",
-		outcome, matched)
-	return result, sampleCount
-}
-
-// quantileFromBuckets estimates the q-quantile (q in [0,1]) from cumulative
-// histogram buckets, using the same linear-interpolation-within-bucket rule as
-// PromQL's histogram_quantile. Returns +Inf when the quantile's rank falls beyond
-// the largest finite bucket (i.e. into the implicit +Inf overflow) — the signal a
-// clipped histogram cannot represent its tail. Returns 0 for an empty histogram.
-func quantileFromBuckets(buckets []cumulativeBucket, count uint64, q float64) float64 {
-	if count == 0 || len(buckets) == 0 {
-		return 0
-	}
-	rank := q * float64(count)
-	var prevUpper float64
-	var prevCum uint64
-	for _, b := range buckets {
-		if float64(b.cumulative) >= rank {
-			span := float64(b.cumulative - prevCum)
-			if span <= 0 {
-				return b.upperBound
-			}
-			frac := (rank - float64(prevCum)) / span
-			return prevUpper + frac*(b.upperBound-prevUpper)
-		}
-		prevUpper, prevCum = b.upperBound, b.cumulative
-	}
-	// Rank lies beyond the largest finite bucket → the tail is in +Inf.
-	return math.Inf(1)
 }
