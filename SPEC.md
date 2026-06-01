@@ -776,6 +776,17 @@ Sizing guidance:
 `amqp091-go` enforces the negotiated heartbeat; setting `0`
 disables heartbeats entirely, which is strongly discouraged.
 
+**Write-side half-open detection (T72 / SRE-09).** AMQP heartbeats
+detect a partition on the **read** side (~2 × heartbeat). A **write** to
+a half-open socket (e.g. a publish after the peer silently vanished) can
+block far longer, with `ConfirmTimeout` (30s) as the only backstop. The
+default dialer therefore enables **TCP keepalive** (an explicit
+`net.Dialer{Timeout: 30s, KeepAlive: 15s}`) so the OS probes a silent
+peer and fails the pending write promptly. For even tighter write-side
+bounds on Linux, supply a `WithDialer` whose `net.Dialer.Control` sets
+`TCP_USER_TIMEOUT` (which caps how long a write may stay unacknowledged
+before the socket errors) — see the `WithDialer` godoc for the recipe.
+
 #### Frame size and message size limits
 
 `WithFrameMax(131072)` is the AMQP-spec minimum (128 KiB) and the

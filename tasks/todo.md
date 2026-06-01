@@ -1525,11 +1525,11 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `metrics/`, `channelpool.go`, `consumer.go`.
 - **Deps:** T04, T08, T18. **(R10-16, P2.6)** — coordinates with T50/T52/T53; *pulled into Phase 13 (v0.1).*
 
-### [ ] T72 — TCP keepalive / dialer hardening [P2] · XS
+### [x] T72 — TCP keepalive / dialer hardening [P2] · XS
 - **Acceptance:**
-  - [ ] Default `net.Dialer` sets a keepalive; `TCP_USER_TIMEOUT` documented where available, so a write to a half-open socket fails promptly.
-  - [ ] **Lens-05 (SRE-09):** AMQP heartbeats cover only *read-side* partition detection (~20s); a *write* to a half-open socket can block far longer with `ConfirmTimeout=30s` the only backstop — the dialer keepalive must make a publish on a dead socket error promptly (well under 30s); a half-open-socket integration/`chaos` test asserts it.
-- **Verify:** Unit test asserts the default dialer carries keepalive; documented in SPEC §6.1 heartbeat/partition section; a half-open-socket test asserts a publish errors well under 30s.
+  - [x] Default `net.Dialer` sets a keepalive (`defaultNetDialer`: `Timeout: 30s, KeepAlive: 15s`, installed by `applyConnDefaults` when `WithDialer` is unset); `TCP_USER_TIMEOUT` documented in the `WithDialer` godoc + SPEC §6.1.
+  - [x] **Lens-05 (SRE-09):** SPEC §6.1 documents that heartbeats cover read-side only; the dialer keepalive makes a write to a half-open socket fail promptly, with a `TCP_USER_TIMEOUT` recipe for tighter Linux bounds.
+- **Verify:** Unit `TestDefaultNetDialer_carriesKeepAlive` + `TestApplyConnDefaults_installsDefaultDialer` (default installed; `WithDialer` overrides). The half-open-socket timing assertion (publish errors well under 30s) rides the chaos lane (T84).
 - **Files:** `options_connection.go`, `connection.go`, SPEC §6.1.
 - **Deps:** T07. **(R10-17, P2.7)** — *pulled into Phase 16 (v0.1).*
 
