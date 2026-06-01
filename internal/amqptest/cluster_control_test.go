@@ -334,6 +334,109 @@ func TestNodeContainer(t *testing.T) {
 func TestDockerNodeArgs(t *testing.T) {
 	assert.Equal(t, []string{"kill", "warren-rmq1"}, dockerNodeArgs("kill", "warren-rmq1"))
 	assert.Equal(t, []string{"start", "warren-rmq0"}, dockerNodeArgs("start", "warren-rmq0"))
+	// The rolling-upgrade campaign restarts a node in place (stop+start atomically).
+	assert.Equal(t, []string{"restart", "warren-rmq2"}, dockerNodeArgs("restart", "warren-rmq2"))
+}
+
+func TestPartitionNetwork(t *testing.T) {
+	// The compose project is pinned to name `warren-cluster`, so Compose's default
+	// network is `warren-cluster_default` — the network PartitionNode disconnects a
+	// node from to inject a REAL broker-to-broker partition. Toxiproxy fronts only the
+	// AMQP client ports (5672), so disabling a proxy cuts clients but leaves inter-node
+	// Erlang distribution intact and cannot trigger pause_minority; severing the node's
+	// network membership is what isolates it from its peers.
+	assert.Equal(t, "warren-cluster_default", partitionNetwork())
+}
+
+func TestDockerNetworkArgs(t *testing.T) {
+	t.Run("disconnect drops a node off the cluster network", func(t *testing.T) {
+		assert.Equal(t,
+			[]string{"network", "disconnect", "warren-cluster_default", "warren-rmq2"},
+			dockerNetworkArgs("disconnect", "warren-cluster_default", "warren-rmq2", "rmq2"))
+	})
+	t.Run("connect re-adds the node WITH its compose service alias", func(t *testing.T) {
+		// The heal must restore the compose service-name DNS alias (rmq2): a manual
+		// `docker network connect` adds the container name/ID as aliases but NOT the
+		// service alias, so without --alias peers and Toxiproxy could no longer resolve
+		// the rejoining node by its rmq2 hostname.
+		assert.Equal(t,
+			[]string{"network", "connect", "--alias", "rmq2", "warren-cluster_default", "warren-rmq2"},
+			dockerNetworkArgs("connect", "warren-cluster_default", "warren-rmq2", "rmq2"))
+	})
+}
+
+func TestParseNodeVersions(t *testing.T) {
+	t.Run("extracts each node's rabbit application version", func(t *testing.T) {
+		// /api/nodes lists every member's applications; the rabbit app's version is the
+		// RabbitMQ version. A genuinely mixed-version cluster reports distinct versions.
+		body := []byte(`[
+			{"name":"rabbit@rmq0","running":true,"applications":[{"name":"mnesia","version":"4.21"},{"name":"rabbit","version":"3.13.7"}]},
+			{"name":"rabbit@rmq2","running":true,"applications":[{"name":"rabbit","version":"4.0.5"}]}
+		]`)
+		got, err := parseNodeVersions(body)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"rabbit@rmq0": "3.13.7", "rabbit@rmq2": "4.0.5"}, got,
+			"a mixed-version cluster must report each member's distinct rabbit version")
+	})
+
+	t.Run("a node with no rabbit application yields an empty version (no panic)", func(t *testing.T) {
+		body := []byte(`[{"name":"rabbit@rmq1","running":false,"applications":[]}]`)
+		got, err := parseNodeVersions(body)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"rabbit@rmq1": ""}, got,
+			"a member whose rabbit app is absent (e.g. mid-restart) maps to empty, not dropped")
+	})
+
+	t.Run("malformed JSON returns an error", func(t *testing.T) {
+		_, err := parseNodeVersions([]byte(`{not an array`))
+		require.Error(t, err)
+	})
+}
+
+func TestFetchNodeVersions(t *testing.T) {
+	t.Run("issues an authenticated GET against /api/nodes and maps versions", func(t *testing.T) {
+		var gotPath, gotUser string
+		var gotAuthOK bool
+		// Distinct (non-"guest") credentials here so the management API's basic-auth
+		// handling is exercised with a real value AND so unparam does not flag
+		// withUserinfo's user/pass as constant across every call site (mirroring the
+		// namePrefix-varying note in the connection-nodes test).
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.EscapedPath()
+			gotUser, _, gotAuthOK = r.BasicAuth()
+			// Credentials must arrive in the Authorization header, never the URL.
+			assert.NotContains(t, r.URL.String(), "monitor")
+			assert.NotContains(t, r.URL.String(), "s3cr3t")
+			_, _ = w.Write([]byte(`[
+				{"name":"rabbit@rmq0","applications":[{"name":"rabbit","version":"3.13.7"}]},
+				{"name":"rabbit@rmq2","applications":[{"name":"rabbit","version":"4.0.5"}]}
+			]`))
+		}))
+		defer srv.Close()
+
+		versions, err := fetchNodeVersions(srv.Client(), withUserinfo(t, srv.URL, "monitor", "s3cr3t"))
+		require.NoError(t, err)
+		assert.Equal(t, "/api/nodes", gotPath)
+		assert.True(t, gotAuthOK, "credentials must ride the Authorization header")
+		assert.Equal(t, "monitor", gotUser)
+		assert.Equal(t, map[string]string{"rabbit@rmq0": "3.13.7", "rabbit@rmq2": "4.0.5"}, versions)
+	})
+
+	t.Run("a non-200 status surfaces as an error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+
+		_, err := fetchNodeVersions(srv.Client(), srv.URL)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "401")
+	})
+
+	t.Run("a URL with no host is rejected without an HTTP call", func(t *testing.T) {
+		_, err := fetchNodeVersions(http.DefaultClient, "http://")
+		require.Error(t, err)
+	})
 }
 
 // withUserinfo injects userinfo into a base URL (httptest.Server.URL carries none)
