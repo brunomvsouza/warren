@@ -1039,22 +1039,22 @@ LATER-34). Reverting any of those seven pulls flips Lens-05 to NO-GO.
 - **T73** `publisher.go` + `consumer.go`: wrap every `Codec.Encode`/`Codec.Decode` (and `HeaderCodec.EncodeWithHeaders`/`DecodeWithHeaders`) call in a `defer recover` that converts a recovered value into `ErrInvalidMessage` (T09 panic-safety contract, formalised as a trackable task). The consumer path already recovers its decode call (`safeDecodeConsumer`, which after T26 also routes `DecodeWithHeaders`); the publisher's `Encode`/`EncodeWithHeaders` call does **not** — close that gap so a panicking **user-supplied** codec cannot crash the publish goroutine. Built-in codecs (`NewJSON`/`NewJSONStrict`/`NewProtobuf`/`NewCloudEventsStructured`/`NewCloudEventsBinary`) must never panic by design; the recover is the net for third-party codecs, not a license for the built-ins. **(post-T24 review)**
 
 **Checkpoint Phase 11:**
-- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` and the integration lane pass; `goleak.VerifyNone` clean.
-- [ ] `Message.Delay`/`ExchangeKindDelayed` godoc carries the durability warning; SPEC §6.5/§6.6 reference a durable alternative (T57).
-- [ ] Declaring a `QueueTypeQuorum` with `DeliveryLimit==0` logs the RabbitMQ-4.x-default-20 warning (T58).
-- [ ] A regression test fails if the `basic.return` channel is buffered or the confirm/return demux is split across goroutines (T59).
-- [ ] Handler timeout followed by a late `Ack`, and a double `Delivery.Ack` via `ConsumeRaw`, issue **no** second frame and do not close the channel (T60).
-- [ ] Forcing a consumer-channel-only close (404/406, TCP still up) reopens + re-`basic.consume`s; `consumer_resubscribed_total` increments; consumer does not die silently (T61).
-- [ ] A broker restart with an N-connection pool issues topology declares **once per recovery**, not N×pool (asserted via declare instrumentation/broker counters) (T62).
-- [ ] Against an injected slow-`queue.declare` broker, a blocked `Publish` returns `ErrReconnecting` at the barrier cap instead of stalling past it (T63).
-- [ ] Quorum queue that is non-`Durable`/`Exclusive`/`AutoDelete`/`x-max-priority` returns `ErrInvalidOptions` at `Declare`; "MaxPriority" validation reference reconciled (T64).
-- [ ] Auto-declared DLQ is durable with bounds; a `Consumer` with `MaxRedeliveries>0` and no DLX in the wired `Topology` warns at `Build` and increments the drop metric (T65).
-- [ ] `WithAddrs` order is shuffled per connection and rotates on reconnect (T66); `Dial` partial-pool policy behaves per SPEC §6.1 (T67).
-- [ ] `x-alternate-exchange` (T68) and exchange-to-exchange bindings (T69) declare correctly (verified via `rabbitmqctl`/integration).
-- [ ] `Close` drains/nack-requeues prefetched-but-undispatched deliveries; `BatchConsumer` flushes a partial batch on `Close` (T70).
-- [ ] New observability metrics present and exercised (T71); default dialer sets keepalive (T72).
-- [ ] A panicking fake codec injected into both the publisher and consumer paths surfaces `ErrInvalidMessage` (not a crash); the publisher `Encode` call is wrapped in `defer recover` (T73).
-- [ ] SPEC §10 "Rev 10" decisions reflected; any per-task SPEC amendment landed in the same PR as its code.
+- [x] `go build ./...` + `make lint` clean; `go test -race ./...` and the integration lane pass; `goleak.VerifyNone` clean.
+- [x] `Message.Delay`/`ExchangeKindDelayed` godoc carries the durability warning; SPEC §6.5/§6.6 reference a durable alternative (T57).
+- [x] Declaring a `QueueTypeQuorum` with `DeliveryLimit==0` logs the RabbitMQ-4.x-default-20 warning (T58).
+- [x] A regression test fails if the `basic.return` channel is buffered or the confirm/return demux is split across goroutines (T59).
+- [x] Handler timeout followed by a late `Ack`, and a double `Delivery.Ack` via `ConsumeRaw`, issue **no** second frame and do not close the channel (T60).
+- [x] Forcing a consumer-channel-only close (404/406, TCP still up) reopens + re-`basic.consume`s; `consumer_resubscribed_total` increments; consumer does not die silently (T61).
+- [x] A broker restart with an N-connection pool issues topology declares **once per recovery**, not N×pool (asserted via declare instrumentation/broker counters) (T62).
+- [x] Against an injected slow-`queue.declare` broker, a blocked `Publish` returns `ErrReconnecting` at the barrier cap instead of stalling past it (T63).
+- [x] Quorum queue that is non-`Durable`/`Exclusive`/`AutoDelete`/`x-max-priority` returns `ErrInvalidOptions` at `Declare`; "MaxPriority" validation reference reconciled (T64).
+- [x] Auto-declared DLQ is durable with bounds; a `Consumer` with `MaxRedeliveries>0` and no DLX in the wired `Topology` warns at `Build` and increments the drop metric (T65).
+- [x] `WithAddrs` order is shuffled per connection and rotates on reconnect (T66); `Dial` partial-pool policy behaves per SPEC §6.1 (T67).
+- [x] `x-alternate-exchange` (T68) and exchange-to-exchange bindings (T69) declare correctly (verified via `rabbitmqctl`/integration).
+- [x] `Close` drains/nack-requeues prefetched-but-undispatched deliveries; `BatchConsumer` flushes a partial batch on `Close` (T70).
+- [x] New observability metrics present and exercised (T71); default dialer sets keepalive (T72).
+- [x] A panicking fake codec injected into both the publisher and consumer paths surfaces `ErrInvalidMessage` (not a crash); the publisher `Encode` call is wrapped in `defer recover` (T73).
+- [x] SPEC §10 "Rev 10" decisions reflected; any per-task SPEC amendment landed in the same PR as its code.
 
 ### Phase 12 — Protocol-Correctness Re-review (Lens 01: RabbitMQ 3.13 + 4.x)
 
