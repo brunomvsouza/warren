@@ -1,6 +1,7 @@
 package warren
 
 import (
+	"context"
 	"testing"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
@@ -66,6 +67,34 @@ func TestTopology_validate_exchangeBindings(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTopology_redeclare_reemitsExchangeBindings proves T69's declare-once /
+// deep-snapshot semantics actually fire on the reconnect REDECLARE path (not
+// only a direct declareOnChannel): an attached topology must re-emit its
+// exchange-to-exchange bindings when the supervisor barrier redeclares topology
+// after a reconnect (review T69 — closes the redeclare-coverage gap).
+func TestTopology_redeclare_reemitsExchangeBindings(t *testing.T) {
+	rec := &ebRecorder{}
+	mc := newBareManaged(t)
+	mc.chanFactory = func() (topologyChannel, error) { return rec, nil }
+	conn := &Connection{pubConns: []*managedConn{mc}}
+
+	topo := &Topology{
+		Exchanges: []Exchange{
+			{Name: "ingest", Kind: ExchangeFanout},
+			{Name: "orders", Kind: ExchangeTopic},
+		},
+		ExchangeBindings: []ExchangeBinding{
+			{Source: "ingest", Destination: "orders", RoutingKey: "order.#"},
+		},
+	}
+	require.NoError(t, topo.AttachTo(conn))
+
+	// Drive the redeclare path the reconnect barrier uses.
+	require.NoError(t, conn.runTopologyRedeclare(context.Background(), mc))
+	assert.Equal(t, []string{"ingest->orders:order.#"}, rec.binds,
+		"reconnect redeclare must re-emit exchange-to-exchange bindings")
 }
 
 // TestTopology_expand_exchangeBindingsDeepCopied confirms the declare-once /

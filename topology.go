@@ -381,14 +381,17 @@ func warnQuorumDeliveryLimit(logger log.Logger, queues []Queue, brokerVersion st
 		if q.Type != QueueTypeQuorum || q.DeliveryLimit != 0 {
 			continue
 		}
+		// brokerVersion is read verbatim from the connection.start server-
+		// properties (broker-controlled, untrusted). Log it with %q so embedded
+		// newlines/control bytes are escaped rather than forging log lines.
 		switch {
 		case known && major >= 4:
-			logger.Warningf("warren: quorum queue %q has DeliveryLimit==0; RabbitMQ %s "+
+			logger.Warningf("warren: quorum queue %q has DeliveryLimit==0; RabbitMQ %q "+
 				"applies a broker default of 20, so an unhandled poison message is silently "+
 				"dropped/dead-lettered at the 21st delivery — set DeliveryLimit explicitly",
 				q.Name, brokerVersion)
 		case known && major == 3:
-			logger.Warningf("warren: quorum queue %q has DeliveryLimit==0; on RabbitMQ %s "+
+			logger.Warningf("warren: quorum queue %q has DeliveryLimit==0; on RabbitMQ %q "+
 				"this is unbounded — an unhandled poison message loops forever — "+
 				"set DeliveryLimit explicitly",
 				q.Name, brokerVersion)
@@ -744,9 +747,13 @@ func (t *Topology) validate() error {
 		}
 		// The alternate-exchange arg is set by the library from the typed
 		// AlternateExchange field (T68); a raw Args value would be a second source
-		// of truth that bypasses the field.
-		if _, raw := e.Args["alternate-exchange"]; raw {
-			return fmt.Errorf("%w: Exchange %q: set the AlternateExchange field instead of Args[\"alternate-exchange\"]", ErrInvalidOptions, e.Name)
+		// of truth that bypasses the field. RabbitMQ honors both the canonical
+		// `alternate-exchange` key and the historical `x-alternate-exchange` alias,
+		// so reject both to keep the field the single source of truth.
+		for _, aeKey := range []string{"alternate-exchange", "x-alternate-exchange"} {
+			if _, raw := e.Args[aeKey]; raw {
+				return fmt.Errorf("%w: Exchange %q: set the AlternateExchange field instead of Args[%q]", ErrInvalidOptions, e.Name, aeKey)
+			}
 		}
 		if e.Kind == ExchangeDelayed {
 			v, ok := e.Args["x-delayed-type"]
@@ -877,6 +884,12 @@ func (t *Topology) validate() error {
 		}
 		if _, ok := validOverflow[dl.Overflow]; !ok {
 			return fmt.Errorf("%w: DeadLetter.Source %q: unknown Overflow policy %q", ErrInvalidOptions, dl.Source, dl.Overflow)
+		}
+		// DLQOverflow is written straight into the auto-DLQ's x-overflow by
+		// autoDLQArgs; an unknown value would otherwise surface only as a
+		// broker PRECONDITION_FAILED at declare time. Validate it up front too.
+		if _, ok := validOverflow[dl.DLQOverflow]; !ok {
+			return fmt.Errorf("%w: DeadLetter.Source %q: unknown DLQOverflow policy %q", ErrInvalidOptions, dl.Source, dl.DLQOverflow)
 		}
 	}
 

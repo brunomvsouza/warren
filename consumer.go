@@ -412,6 +412,11 @@ type Consumer[M any] struct {
 	// Resume into runConsume's loop. runConsume creates it (buffered, size 1) when
 	// nil; tests may pre-set it to drive Resume without a running loop.
 	resubCh chan deliverySub
+
+	// lastChannelReopen records when recoverDeliveryChannel last reopened the
+	// delivery channel. It is read/written only from the single consume goroutine
+	// (no lock needed) and powers the channel-flap churn guard (T61).
+	lastChannelReopen time.Time
 }
 
 // subChannel is the subset of *amqp091.Channel that the subscription lifecycle
@@ -1145,19 +1150,16 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 	}
 }
 
-// openDeliveryCh opens a subscription. Unit tests pre-set deliverySubOverride or
-// deliveryCh to inject deliveries without a live broker; production opens a real AMQP channel.
-//
-// On every call, a fresh redeliveryCounter (counter B state) is installed atomically
-// so that channel close automatically resets all in-process redelivery counts.
 // recoverAction is the outcome of recoverDeliveryChannel.
 type recoverAction int
 
 const (
 	// recoverResubscribed: a fresh subscription is ready (in the returned sub).
 	recoverResubscribed recoverAction = iota
+	// recoverCancelled: a broker basic.cancel arrived — the caller handles it
+	// via handleBrokerCancel.
+	recoverCancelled
 	// recoverStop: ctx was cancelled — the consumer should return nil.
-	recoverCancelled // broker basic.cancel arrived — caller handles via handleBrokerCancel.
 	recoverStop
 )
 
@@ -1182,6 +1184,23 @@ const (
 // silent channel death is the highest-severity invisible failure (SRE-01).
 func (c *Consumer[M]) recoverDeliveryChannel(ctx context.Context, wg *sync.WaitGroup, resubCh <-chan deliverySub) (deliverySub, string, recoverAction) {
 	backoff := channelRecoverInitialBackoff
+	// Channel-flap churn guard (T61): if the previous reopen was very recent, the
+	// channel is flapping — reopen succeeds then immediately dies (e.g. a broker
+	// that resubscribes then drops without basic.cancel). Without this, the loop
+	// below would re-attempt at broker-RTT cadence with no delay. Enforce a floor
+	// between reopens so a flap costs ~channelRecoverInitialBackoff, not <1ms.
+	if !c.lastChannelReopen.IsZero() && time.Since(c.lastChannelReopen) < channelRecoverMaxBackoff {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return deliverySub{}, "", recoverStop
+		case reason := <-c.cancelReasonCh:
+			return deliverySub{}, reason, recoverCancelled
+		case sub := <-resubCh:
+			return sub, "", recoverResubscribed
+		case <-time.After(backoff):
+		}
+	}
 	for {
 		// A hook-delivered replacement (TCP reconnect) or a terminal signal wins
 		// immediately if already pending.
@@ -1201,6 +1220,7 @@ func (c *Consumer[M]) recoverDeliveryChannel(ctx context.Context, wg *sync.WaitG
 		// reconnect is in flight, in which case the hook owns recovery.
 		sub, err := c.openDeliveryCh(ctx)
 		if err == nil {
+			c.lastChannelReopen = time.Now()
 			notifyResubscribed(c.mc, c.cm, c.queue)
 			return sub, "", recoverResubscribed
 		}
@@ -1223,6 +1243,13 @@ func (c *Consumer[M]) recoverDeliveryChannel(ctx context.Context, wg *sync.WaitG
 	}
 }
 
+// openDeliveryCh opens a subscription. Unit tests pre-set deliverySubOverride or
+// deliveryCh to inject deliveries without a live broker; production opens a real
+// AMQP channel.
+//
+// On every call, a fresh redeliveryCounter (counter B state) is installed
+// atomically so that channel close automatically resets all in-process
+// redelivery counts.
 func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 	// Rotate counter B state regardless of the channel source (real or injected).
 	// Installing a fresh redeliveryCounter atomically ensures "channel close resets

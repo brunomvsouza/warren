@@ -33,14 +33,20 @@ func TestTopology_expand_alternateExchange(t *testing.T) {
 }
 
 func TestTopology_validate_rejectsRawAlternateExchangeArg(t *testing.T) {
-	topo := &Topology{
-		Exchanges: []Exchange{
-			{Name: "ingest", Kind: ExchangeTopic, Args: map[string]any{"alternate-exchange": "unrouted"}},
-		},
+	// Both the canonical key and the historical x- alias must be rejected so the
+	// AlternateExchange field stays the single source of truth (review T68).
+	for _, key := range []string{"alternate-exchange", "x-alternate-exchange"} {
+		t.Run(key, func(t *testing.T) {
+			topo := &Topology{
+				Exchanges: []Exchange{
+					{Name: "ingest", Kind: ExchangeTopic, Args: map[string]any{key: "unrouted"}},
+				},
+			}
+			err := topo.validate()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrInvalidOptions)
+		})
 	}
-	err := topo.validate()
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrInvalidOptions)
 }
 
 // findExchange returns the named exchange from an expanded topology.
