@@ -69,10 +69,11 @@ func TestClusterReconnectStorm_ZeroLossNoStampede_cluster(t *testing.T) {
 	amqptest.WaitClusterReady(t, len(nodes), 90*time.Second)
 
 	const (
-		queue     = "test.cluster.reconnect.storm"
-		prefix    = "stormcamp"
-		wantConns = 6 // 3 publisher + 3 consumer sockets
-		stormWave = 3 // ForceReconnect cycles
+		queue               = "test.cluster.reconnect.storm"
+		prefix              = "stormcamp"
+		wantConns           = 6                // 3 publisher + 3 consumer sockets
+		stormWave           = 3                // ForceReconnect cycles
+		stormConfirmTimeout = 20 * time.Second // publish-confirm cap during the storm
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -135,7 +136,7 @@ func TestClusterReconnectStorm_ZeroLossNoStampede_cluster(t *testing.T) {
 	// — Publisher streams confirmed messages continuously until told to stop ————
 	pub, err := warren.PublisherFor[clusterFailoverMsg](conn).
 		RoutingKey(queue).
-		ConfirmTimeout(20 * time.Second).
+		ConfirmTimeout(stormConfirmTimeout).
 		PublishRetry(clusterPublishRetry).
 		Build()
 	require.NoError(t, err)
