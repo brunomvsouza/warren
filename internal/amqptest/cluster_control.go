@@ -108,12 +108,19 @@ func fetchQuorumQueueState(client *http.Client, mgmtBase, vhost, queue string) (
 }
 
 // clusterNodeState is the subset of a management-API /api/nodes entry the cluster
-// lane reads to gate on full-cluster readiness: each node's name and whether it is
-// currently running. After a kill/restart, `docker start` returns before RabbitMQ
-// has rebooted and rejoined, during which the node is listed but running=false.
+// lane reads to gate on full-cluster readiness: each node's name, whether it is
+// currently running, and its installed applications. After a kill/restart, `docker
+// start` returns before RabbitMQ has rebooted and rejoined, during which the node is
+// listed but running=false. Applications carries each member's installed OTP/RabbitMQ
+// apps; the rabbit app's version IS the RabbitMQ version the rolling-upgrade campaign
+// reads to tell a homogeneous cluster from a genuinely mixed-version one.
 type clusterNodeState struct {
-	Name    string `json:"name"`
-	Running bool   `json:"running"`
+	Name         string `json:"name"`
+	Running      bool   `json:"running"`
+	Applications []struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"applications"`
 }
 
 // parseRunningNodes decodes an /api/nodes payload and returns how many nodes report
@@ -133,25 +140,52 @@ func parseRunningNodes(body []byte) (running, total int, err error) {
 	return running, len(nodes), nil
 }
 
-// fetchRunningNodes reads /api/nodes from the management API at mgmtBase and
-// returns the running/total node counts. Credentials in the userinfo ride the
-// Authorization header — never the request URL — mirroring fetchQuorumQueueState.
-// A non-200 status is an error.
-func fetchRunningNodes(client *http.Client, mgmtBase string) (running, total int, err error) {
+// parseNodeVersions decodes an /api/nodes payload into a map of node name → its
+// RabbitMQ (rabbit application) version, so the rolling-upgrade campaign can SEE and
+// log whether it ran against a homogeneous or a genuinely mixed-version (3.13 + 4.x)
+// cluster — a homogeneous run is then reported as such rather than silently passing
+// as if it had exercised cross-version continuity. A node whose rabbit application is
+// absent (e.g. mid-restart) maps to "" rather than being dropped. Kept separate from
+// the HTTP round-trip so the extraction rule is unit-testable without a server.
+func parseNodeVersions(body []byte) (map[string]string, error) {
+	var nodes []clusterNodeState
+	if err := json.Unmarshal(body, &nodes); err != nil {
+		return nil, fmt.Errorf("decode nodes state: %w", err)
+	}
+	out := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		var version string
+		for _, app := range n.Applications {
+			if app.Name == "rabbit" {
+				version = app.Version
+				break
+			}
+		}
+		out[n.Name] = version
+	}
+	return out, nil
+}
+
+// fetchNodesBody issues an authenticated GET /api/nodes against the management API at
+// mgmtBase and returns the raw body. Credentials in the userinfo ride the
+// Authorization header — never the request URL — mirroring fetchQuorumQueueState. A
+// non-200 status is an error. Shared by the running-count readiness gate and the
+// version-map reader, the two /api/nodes consumers.
+func fetchNodesBody(client *http.Client, mgmtBase string) ([]byte, error) {
 	base, err := url.Parse(mgmtBase)
 	if err != nil {
 		// Don't wrap err: net/url echoes the raw input, which would leak any
 		// userinfo credential in a malformed management URL (SPEC §8).
-		return 0, 0, errors.New("parse management URL: malformed")
+		return nil, errors.New("parse management URL: malformed")
 	}
 	if base.Host == "" {
-		return 0, 0, fmt.Errorf("management URL has no host:port")
+		return nil, fmt.Errorf("management URL has no host:port")
 	}
 
 	apiURL := fmt.Sprintf("%s://%s/api/nodes", base.Scheme, base.Host)
 	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 	if base.User != nil {
 		pass, _ := base.User.Password()
@@ -160,18 +194,38 @@ func fetchRunningNodes(client *http.Client, mgmtBase string) (running, total int
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, 0, fmt.Errorf("management GET %s://%s/api/nodes: %w", base.Scheme, base.Host, err)
+		return nil, fmt.Errorf("management GET %s://%s/api/nodes: %w", base.Scheme, base.Host, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, fmt.Errorf("management GET %s returned %d: %s",
+		return nil, fmt.Errorf("management GET %s returned %d: %s",
 			apiURL, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	return body, nil
+}
+
+// fetchRunningNodes reads /api/nodes from the management API at mgmtBase and returns
+// the running/total node counts.
+func fetchRunningNodes(client *http.Client, mgmtBase string) (running, total int, err error) {
+	body, err := fetchNodesBody(client, mgmtBase)
+	if err != nil {
+		return 0, 0, err
+	}
 	return parseRunningNodes(body)
+}
+
+// fetchNodeVersions reads /api/nodes from the management API at mgmtBase and returns
+// the node name → rabbit-version map.
+func fetchNodeVersions(client *http.Client, mgmtBase string) (map[string]string, error) {
+	body, err := fetchNodesBody(client, mgmtBase)
+	if err != nil {
+		return nil, err
+	}
+	return parseNodeVersions(body)
 }
 
 // connectionEntry is the subset of a management-API /api/connections entry the
@@ -348,8 +402,37 @@ func NodeService(node string) string {
 }
 
 // dockerNodeArgs builds the argv for a `docker <action> <container>` invocation
-// (stop/start/kill a node container). Pure, so the command shape is unit-testable
-// without a container runtime.
+// (stop/start/kill/restart a node container). Pure, so the command shape is
+// unit-testable without a container runtime.
 func dockerNodeArgs(action, container string) []string {
 	return []string{action, container}
+}
+
+// clusterNetwork is the Docker network the compose cluster runs on: the project name
+// (warren-cluster, pinned in docker-compose.cluster.yml) plus Compose's default
+// "_default" suffix. PartitionNode disconnects a node from THIS network to inject a
+// real broker-to-broker partition. Toxiproxy fronts only the AMQP client ports
+// (5672), so disabling a proxy cuts CLIENTS but leaves inter-node Erlang distribution
+// intact — it cannot trigger pause_minority. Severing the node's network membership
+// is what isolates it from its peers so the minority side pauses.
+const clusterNetwork = "warren-cluster_default"
+
+// partitionNetwork returns the Docker network the partition campaign disconnects a
+// node from. A function (not a bare const at the call site) so the value has one
+// unit-tested source of truth, mirroring nodeContainer.
+func partitionNetwork() string { return clusterNetwork }
+
+// dockerNetworkArgs builds the argv for a `docker network <action> ...` invocation
+// the partition campaign uses:
+//   - disconnect: `network disconnect <network> <container>` — drops the node off the
+//     cluster network, isolating it from BOTH clients and its peers (a real partition).
+//   - connect:    `network connect --alias <alias> <network> <container>` — re-adds the
+//     node, restoring the compose service-name DNS alias (e.g. rmq2) that a manual
+//     reconnect would otherwise drop, so peers and Toxiproxy can resolve it by hostname
+//     again. Pure, so the command shape is unit-testable without a container runtime.
+func dockerNetworkArgs(action, network, container, alias string) []string {
+	if action == "connect" {
+		return []string{"network", "connect", "--alias", alias, network, container}
+	}
+	return []string{"network", action, network, container}
 }
