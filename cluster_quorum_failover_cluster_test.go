@@ -73,14 +73,19 @@ var clusterPublishRetry = warren.RetryPolicy{
 
 // isTolerableFailoverErr reports whether a publish error is an expected
 // consequence of killing the leader mid-stream — the reconnect barrier swallowing
-// a retried publish, the channel closing under it, or a confirm timing out while
-// no leader is yet elected — as opposed to a defect (pool exhaustion, unroutable,
-// nack, a validation bug) the zero-loss test must surface rather than silently drop
-// as merely "fewer publishes".
+// a retried publish, the channel closing under it (ErrChannelClosed, or a 504
+// channel-error on a channel that went not-open mid-publish), or a confirm timing
+// out while no leader is yet elected — as opposed to a defect (pool exhaustion,
+// unroutable, nack, a validation bug) the zero-loss test must surface rather than
+// silently drop as merely "fewer publishes". ErrChannelError (504) is transient
+// and retried by PublishRetry, so it only surfaces when a publish exhausts its
+// retry budget while the channel stays not-open across the re-election — never
+// recorded as confirmed, so never asserted durable.
 func isTolerableFailoverErr(err error) bool {
 	return errors.Is(err, warren.ErrReconnecting) ||
 		errors.Is(err, warren.ErrConfirmTimeout) ||
-		errors.Is(err, warren.ErrChannelClosed)
+		errors.Is(err, warren.ErrChannelClosed) ||
+		errors.Is(err, warren.ErrChannelError)
 }
 
 // filterClusterCanceled drops the benign context.Canceled a consumer returns when
