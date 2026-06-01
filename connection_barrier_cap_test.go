@@ -157,7 +157,7 @@ func TestSupervisor_cappedBarrierNilRaw_redialsNotExit(t *testing.T) {
 	mc.opts.metrics = spy
 	// Fail-fast dial so the re-dial attempt completes quickly and the supervisor
 	// then exits cleanly (connected=false → reconnecting cleared → return).
-	mc.opts.reconnectBackoff = RetryPolicy{Min: time.Millisecond, Max: time.Millisecond, Retries: 1, WithoutJitter: true}
+	mc.opts.reconnectBackoff = RetryPolicy{Min: time.Millisecond, Max: time.Millisecond, Retries: 1, Jitter: JitterNone}
 
 	var dials atomic.Int64
 	mc.dialFactory = func(_ context.Context) (*amqp091.Connection, error) {

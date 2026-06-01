@@ -1253,42 +1253,6 @@ dependency for the doc reconciliation itself.
 
 **Prerequisites:** A future configurable-DLQ-name task (does not yet exist). No code dependency today.
 
-### LATER-87 — Per-message Prometheus `WithLabelValues` lookups on the consumer hot path
-
-**Context:** T71 added `ConsumerInFlightAdd(queue, ±1)` around every dispatch (`consumer.go`) and `RecordRedelivered(queue)` on every redelivered receipt. The Prometheus impl resolves these via `m.inFlight.WithLabelValues(queue)` / `m.redelivered.WithLabelValues(queue)` on each call (`metrics/prometheus.go`), each a label-hash + map lookup. Together with the pre-existing `InFlightBytesAdd` pair, the per-message vec-lookup count roughly doubled. The `{queue}` label is fixed for the life of a `Consumer[M]`.
-
-**Impact:** Extra hash+map lookups per delivery — negligible at typical loads, but measurable approaching the documented ~50k msg/s single-connection ceiling. Not a correctness issue; the `NoOp` default (users without Prometheus) allocates nothing and is unaffected.
-
-**Evidence:** Phase 11 review (security-auditor / performance lens, 2026-06-01) — Suggestion.
-
-**Suggested solution:** Resolve the per-`{queue}` concrete `prometheus.Gauge`/`prometheus.Counter` handles once when the consumer is built (or memoize them in the Prometheus impl keyed by queue) and call `.Add`/`.Inc` directly on the cached handle, eliminating the per-message `WithLabelValues`. This needs either a small `metrics`-package API to expose handle resolution, or internal memoization in the Prometheus collectors — hence deferred rather than done inline.
-
-**Prerequisites:** None hard; coordinate with any future `metrics` interface revision (e.g. T125 embeddable-NoOp) so the handle-caching shape lands once.
-
-### LATER-88 — Channel-flap churn guard does not escalate on a sustained fast-flap
-
-**Context:** `recoverDeliveryChannel` (`consumer.go`) imposes a single fixed `channelRecoverInitialBackoff` (50ms) floor before a recent reopen (the T61 churn guard). The exponential backoff in the main recovery loop only escalates on channel *open failure* — it does not engage when the open succeeds and the channel then dies immediately. So a broker that accepts the subscription then drops it without `basic.cancel` reopens-succeeds-then-dies at a steady ~16 Hz (50ms floor + broker RTT) indefinitely, with no ramp.
-
-**Impact:** Bounded, low-severity churn: a pathological flapping channel costs ~16 reopen cycles/sec rather than the pre-fix <1ms busy-loop (a ~50× improvement). Each reopen re-issues `basic.consume` and re-runs `notifyResubscribed`, so sustained flap means steady broker chatter and log/metric noise — but no correctness impact and no goroutine growth. Matches the current code comment's stated intent (“a flap costs ~`channelRecoverInitialBackoff`”), so it is not a blocker.
-
-**Evidence:** Phase 11 review of the correction commits (`/agent-skills:review`, 2026-06-01) — Suggestion.
-
-**Suggested solution:** Track consecutive sub-threshold reopens (reopen within `channelRecoverMaxBackoff` of the prior one) and ramp the imposed floor toward `channelRecoverMaxBackoff` on each successive fast-flap, resetting the counter once a channel survives past the recent-horizon. This bounds a pathological flap to the same 2s ceiling the open-failure path already uses, without penalizing the common single-reconnect case.
-
-**Prerequisites:** None.
-
-### LATER-89 — `Connection.Health` pins to `pubConns[0]`, so a boot-degraded first socket reports unhealthy while the role can serve
-
-**Context:** `Connection.Health` (`connection.go:351-361`) probes a single fixed publisher socket — `pubConns[0]` — rather than asking whether the publisher *role* can serve. Before the T67 partial-pool-connect policy this was benign: every pooled socket was live at boot or `Dial` failed. T67 changed that: a pool now boots with `connected >= 1` per role, and the failed socket is marked `bootDegraded` / `reconnecting` and brought up under supervision. If the boot-degraded socket happens to be index 0, `Health` returns `ErrReconnecting`/`ErrNotConnected` even though `pubConns[1..]` are live and the connection can publish. The partial-pool integration test sidesteps this by waiting (`require.Eventually`) until the *whole* pool is live, so the gap is currently unobserved by tests.
-
-**Impact:** A health/readiness probe wired to `Connection.Health` can report the connection unhealthy during the boot-degraded window (and on any later reconnect of socket 0) while the role is fully able to serve — a false-negative that could gate traffic, fail a readiness check, or trigger an unnecessary restart of an otherwise-serving process. No correctness impact on publish/consume; the misreport is confined to the health signal. A reviewer flagged the underlying design as "seems wrong" during the Phase 11 `/ship`.
-
-**Evidence:** Phase 11 `/ship` fan-out (`code-reviewer`, connection slice, 2026-06-01) — Suggestion; user concurred the pinning is wrong and asked to defer.
-
-**Suggested solution:** Redefine `Health` in role terms: report OK for a role if **any** socket in that role's pool is live (not degraded, not reconnecting), and surface a distinct degraded-but-serving signal (or reduced-capacity warning) instead of a hard error when some-but-not-all sockets are down. Alternatively, document explicitly that `Health` reflects `conn[0]` specifically so operators do not wire it as a role-readiness gate. Cross-check against SPEC §6.1's degraded-state contract so the role-level semantics and the existing `ErrTopologyRedeclareFailed` degraded path stay consistent. Add a unit test driving a pool whose `pubConns[0]` is boot-degraded while `pubConns[1]` is live, asserting `Health` passes.
-
-**Prerequisites:** None (T67 already shipped, which is what made this reachable).
-
 <!-- LATER-86 resolved: managedConn.health now routes the probe channel open through
 openChannel (the chanFactory seam) and classifies both the open and close errors via
 wrapAMQPError("warren: health: %w", …), so Consumer.Health / Connection.Health errors are
@@ -1319,4 +1283,40 @@ requeue coverage observable. -->
 **Suggested solution:** Add per-node named volumes for `/var/lib/rabbitmq` to `test/docker-compose.cluster.yml`, then drive a true in-place upgrade in the campaign: bring the cluster up homogeneous on 3.13.x, enable all stable feature flags, then for each node in turn `docker compose stop <node>` → recreate it on the 4.x image **reusing its volume** → wait for rejoin, all under sustained load, asserting zero loss + resubscribe across the version transition. Pin a 4.x LTS image. Verify Khepri/quorum-queue migration does not break the zero-loss accounting.
 
 **Prerequisites:** T166g (the rolling-upgrade campaign + the `WARREN_RMQ2_IMAGE` seam this builds on); a standing-cluster decision (related to LATER-49) since persistent volumes change the lane's teardown semantics.
+
+### LATER-89 — Per-message Prometheus `WithLabelValues` lookups on the consumer hot path
+
+**Context:** T71 added `ConsumerInFlightAdd(queue, ±1)` around every dispatch (`consumer.go`) and `RecordRedelivered(queue)` on every redelivered receipt. The Prometheus impl resolves these via `m.inFlight.WithLabelValues(queue)` / `m.redelivered.WithLabelValues(queue)` on each call (`metrics/prometheus.go`), each a label-hash + map lookup. Together with the pre-existing `InFlightBytesAdd` pair, the per-message vec-lookup count roughly doubled. The `{queue}` label is fixed for the life of a `Consumer[M]`.
+
+**Impact:** Extra hash+map lookups per delivery — negligible at typical loads, but measurable approaching the documented ~50k msg/s single-connection ceiling. Not a correctness issue; the `NoOp` default (users without Prometheus) allocates nothing and is unaffected.
+
+**Evidence:** Phase 11 review (security-auditor / performance lens, 2026-06-01) — Suggestion.
+
+**Suggested solution:** Resolve the per-`{queue}` concrete `prometheus.Gauge`/`prometheus.Counter` handles once when the consumer is built (or memoize them in the Prometheus impl keyed by queue) and call `.Add`/`.Inc` directly on the cached handle, eliminating the per-message `WithLabelValues`. This needs either a small `metrics`-package API to expose handle resolution, or internal memoization in the Prometheus collectors — hence deferred rather than done inline.
+
+**Prerequisites:** None hard; coordinate with any future `metrics` interface revision (e.g. T125 embeddable-NoOp) so the handle-caching shape lands once.
+
+### LATER-90 — Channel-flap churn guard does not escalate on a sustained fast-flap
+
+**Context:** `recoverDeliveryChannel` (`consumer.go`) imposes a single fixed `channelRecoverInitialBackoff` (50ms) floor before a recent reopen (the T61 churn guard). The exponential backoff in the main recovery loop only escalates on channel *open failure* — it does not engage when the open succeeds and the channel then dies immediately. So a broker that accepts the subscription then drops it without `basic.cancel` reopens-succeeds-then-dies at a steady ~16 Hz (50ms floor + broker RTT) indefinitely, with no ramp.
+
+**Impact:** Bounded, low-severity churn: a pathological flapping channel costs ~16 reopen cycles/sec rather than the pre-fix <1ms busy-loop (a ~50× improvement). Each reopen re-issues `basic.consume` and re-runs `notifyResubscribed`, so sustained flap means steady broker chatter and log/metric noise — but no correctness impact and no goroutine growth. Matches the current code comment's stated intent (“a flap costs ~`channelRecoverInitialBackoff`”), so it is not a blocker.
+
+**Evidence:** Phase 11 review of the correction commits (`/agent-skills:review`, 2026-06-01) — Suggestion.
+
+**Suggested solution:** Track consecutive sub-threshold reopens (reopen within `channelRecoverMaxBackoff` of the prior one) and ramp the imposed floor toward `channelRecoverMaxBackoff` on each successive fast-flap, resetting the counter once a channel survives past the recent-horizon. This bounds a pathological flap to the same 2s ceiling the open-failure path already uses, without penalizing the common single-reconnect case.
+
+**Prerequisites:** None.
+
+### LATER-91 — `Connection.Health` pins to `pubConns[0]`, so a boot-degraded first socket reports unhealthy while the role can serve
+
+**Context:** `Connection.Health` (`connection.go:351-361`) probes a single fixed publisher socket — `pubConns[0]` — rather than asking whether the publisher *role* can serve. Before the T67 partial-pool-connect policy this was benign: every pooled socket was live at boot or `Dial` failed. T67 changed that: a pool now boots with `connected >= 1` per role, and the failed socket is marked `bootDegraded` / `reconnecting` and brought up under supervision. If the boot-degraded socket happens to be index 0, `Health` returns `ErrReconnecting`/`ErrNotConnected` even though `pubConns[1..]` are live and the connection can publish. The partial-pool integration test sidesteps this by waiting (`require.Eventually`) until the *whole* pool is live, so the gap is currently unobserved by tests.
+
+**Impact:** A health/readiness probe wired to `Connection.Health` can report the connection unhealthy during the boot-degraded window (and on any later reconnect of socket 0) while the role is fully able to serve — a false-negative that could gate traffic, fail a readiness check, or trigger an unnecessary restart of an otherwise-serving process. No correctness impact on publish/consume; the misreport is confined to the health signal. A reviewer flagged the underlying design as "seems wrong" during the Phase 11 `/ship`.
+
+**Evidence:** Phase 11 `/ship` fan-out (`code-reviewer`, connection slice, 2026-06-01) — Suggestion; user concurred the pinning is wrong and asked to defer.
+
+**Suggested solution:** Redefine `Health` in role terms: report OK for a role if **any** socket in that role's pool is live (not degraded, not reconnecting), and surface a distinct degraded-but-serving signal (or reduced-capacity warning) instead of a hard error when some-but-not-all sockets are down. Alternatively, document explicitly that `Health` reflects `conn[0]` specifically so operators do not wire it as a role-readiness gate. Cross-check against SPEC §6.1's degraded-state contract so the role-level semantics and the existing `ErrTopologyRedeclareFailed` degraded path stay consistent. Add a unit test driving a pool whose `pubConns[0]` is boot-degraded while `pubConns[1]` is live, asserting `Health` passes.
+
+**Prerequisites:** None (T67 already shipped, which is what made this reachable).
 
