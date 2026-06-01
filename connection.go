@@ -490,6 +490,17 @@ func (mc *managedConn) openChannel() (topologyChannel, error) {
 	return raw.Channel()
 }
 
+// isReconnecting reports whether this socket is mid-reconnect (the supervisor set
+// the barrier and has not yet finished re-open + redeclare + re-subscribe). It is
+// a non-blocking snapshot — unlike waitBarrier, it never blocks on the barrier.
+// Consumer channel-level self-heal (T61) consults it to avoid racing the reconnect
+// hook with a duplicate basic.consume on the same consumer tag.
+func (mc *managedConn) isReconnecting() bool {
+	mc.barrierMu.Lock()
+	defer mc.barrierMu.Unlock()
+	return mc.reconnecting
+}
+
 // openDeclareChannel opens a temporary AMQP channel on the first publisher
 // connection for use by Topology.Declare. The caller is responsible for
 // closing the returned channel.

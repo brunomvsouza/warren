@@ -508,6 +508,22 @@ func (c *Consumer[M]) requeueUndispatched(ch <-chan amqp091.Delivery) {
 	requeueUndispatched(ch, c.brokerAutoAck, c.cm, c.queue)
 }
 
+// cancelLiveSubscription issues a best-effort basic.cancel on the consumer's
+// current live channel so the broker stops redelivering during a graceful
+// shutdown (the ctx-cancel path). It is the prerequisite for requeueUndispatched
+// to return prefetched deliveries to the queue: without it the nack-requeued
+// messages bounce back to this still-subscribed (but dead) consumer. Already
+// cancelled (e.g. paused) or no live channel → the error is ignored, since the
+// broker requeues any remaining unacked deliveries when the channel closes.
+func (c *Consumer[M]) cancelLiveSubscription() {
+	c.pauseMu.Lock()
+	live := c.live
+	c.pauseMu.Unlock()
+	if live != nil {
+		_ = live.ch.Cancel(c.tag, false)
+	}
+}
+
 // requeueUndispatched drains the prefetched-but-undispatched deliveries buffered
 // in ch at consumer shutdown and Nack(requeue=true)'s each, incrementing
 // consumer_shutdown_requeued_total (T70 / DS-03 / SRE-07). This makes the
@@ -1040,7 +1056,17 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 			return hookCtx.Err()
 		case <-time.After(jitter):
 		}
-		sub, err := c.openDeliveryCh(hookCtx)
+		// Open the re-subscription under the consumer-lifecycle ctx, NOT hookCtx.
+		// openDeliveryCh binds the new subscription's delivery pump to the ctx it is
+		// given (startPump), and that pump must outlive THIS reconnect barrier. The
+		// barrier cancels hookCtx on completion (T63: `defer hookCancel()`), so a pump
+		// bound to hookCtx would die the instant the barrier finishes — closing the
+		// fresh delivery channel, which (once the hook has cleared the pause) cascades
+		// into a duplicate-basic.consume self-heal the broker rejects, stalling
+		// delivery. Binding to the consume ctx matches Resume's resubscribeLocked
+		// (which uses c.runCtx for exactly this reason). hookCtx still scopes the
+		// jitter-wait above and the resubCh send below, where the cap CAN interrupt.
+		sub, err := c.openDeliveryCh(ctx)
 		if err != nil {
 			return err
 		}
@@ -1065,6 +1091,14 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 		select {
 		case <-ctx.Done():
 			wg.Wait()
+			// Cancel the broker subscription BEFORE requeuing. A nack-requeue while
+			// the subscription is still active bounces each delivery straight back to
+			// this dying consumer's channel — held unacked, never "ready" again —
+			// until the connection finally closes, defeating the graceful-drain
+			// contract (T70 / DS-03 / SRE-07). basic.cancel stops the broker
+			// redelivering, so the nacks below actually release the buffered prefetch
+			// back to the queue for the next consumer.
+			c.cancelLiveSubscription()
 			c.requeueUndispatched(cur.ch)
 			return nil
 
@@ -1183,6 +1217,30 @@ const (
 // (via notifyResubscribed) so a rate()==0 while traffic is expected is alertable —
 // silent channel death is the highest-severity invisible failure (SRE-01).
 func (c *Consumer[M]) recoverDeliveryChannel(ctx context.Context, wg *sync.WaitGroup, resubCh <-chan deliverySub) (deliverySub, string, recoverAction) {
+	// A deliberate Pause closes ONLY the delivery stream: startPump suppresses
+	// closeChannelDone (death=false, paused=true), but its deferred close(out)
+	// still surfaces here as a delivery-channel close. This is NOT a failure to
+	// self-heal from — reopening the channel would re-issue basic.consume and
+	// clearPause(), defeating Pause entirely (Health would flip back to Active and
+	// messages would resume flowing). So when paused, park exactly as the pre-T61
+	// loop did: wait for a Resume / hook re-subscribe (resubCh), a broker
+	// basic.cancel, or ctx cancel — and do NOT attempt a direct reopen. The
+	// channel-level self-heal below is strictly for an UNEXPECTED channel death
+	// while actively consuming (SRE-01). A ForceReconnect while paused still
+	// delivers a hook replacement on resubCh, which clears the stale pause (the
+	// reconnect-during-pause contract, T53).
+	if c.paused.Load() {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return deliverySub{}, "", recoverStop
+		case reason := <-c.cancelReasonCh:
+			return deliverySub{}, reason, recoverCancelled
+		case sub := <-resubCh:
+			return sub, "", recoverResubscribed
+		}
+	}
+
 	backoff := channelRecoverInitialBackoff
 	// Channel-flap churn guard (T61): if the previous reopen was very recent, the
 	// channel is flapping — reopen succeeds then immediately dies (e.g. a broker
@@ -1221,18 +1279,33 @@ func (c *Consumer[M]) recoverDeliveryChannel(ctx context.Context, wg *sync.WaitG
 		default:
 		}
 
-		// Channel-level self-heal: reopen the channel directly. Succeeds when the
-		// TCP socket is up (channel-only death); ErrNotConnected when a TCP
-		// reconnect is in flight, in which case the hook owns recovery.
-		sub, err := c.openDeliveryCh(ctx)
-		if err == nil {
-			c.lastChannelReopen = time.Now()
-			notifyResubscribed(c.mc, c.cm, c.queue)
-			return sub, "", recoverResubscribed
+		// Channel-level self-heal applies ONLY to a channel-only death with the TCP
+		// socket up and stable. Skip the direct reopen when the socket is
+		// mid-reconnect or the consumer (re)entered a pause:
+		//
+		//   - isReconnecting: a TCP reconnect (incl. ForceReconnect, which may be
+		//     clearing a stale pause concurrently) is owned by the reconnect hook,
+		//     which re-subscribes on resubCh. openChannel only nils-checks raw, so
+		//     once the socket re-dials mid-barrier a direct reopen would SUCCEED and
+		//     issue a SECOND basic.consume on the same consumer tag — the broker
+		//     rejects the duplicate and kills the channel, stalling delivery.
+		//   - paused: a Pause raced in after the top-of-function guard; reopening
+		//     would re-subscribe and clearPause(), defeating the pause.
+		//
+		// In both cases fall through to wait for the hook / Resume below.
+		if !c.mc.isReconnecting() && !c.paused.Load() {
+			// Reopen the channel directly. Succeeds when the TCP socket is up
+			// (channel-only death); ErrNotConnected when the raw socket is nil.
+			sub, err := c.openDeliveryCh(ctx)
+			if err == nil {
+				c.lastChannelReopen = time.Now()
+				notifyResubscribed(c.mc, c.cm, c.queue)
+				return sub, "", recoverResubscribed
+			}
 		}
 
-		// Socket down / reconnecting: wait for the hook (or a terminal signal),
-		// bounded so we re-attempt the direct reopen if no hook fires.
+		// Socket down / reconnecting / paused-raced: wait for the hook (or a
+		// terminal signal), bounded so we re-attempt the direct reopen if none fire.
 		select {
 		case <-ctx.Done():
 			wg.Wait()

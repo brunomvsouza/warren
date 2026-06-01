@@ -183,3 +183,86 @@ func TestRecoverDeliveryChannel_socketDown_yieldsToHook(t *testing.T) {
 	// self-healed one.
 	assert.Equal(t, hookCh, sub.ch, "the returned subscription must be the hook-delivered one")
 }
+
+// TestRecoverDeliveryChannel_paused_parksWithoutSelfHeal proves a deliberate Pause
+// suppresses channel-level self-heal. Pause issues a local basic.cancel that closes
+// only the delivery stream; runConsume's !ok branch then enters recoverDeliveryChannel
+// with c.paused==true. If it self-healed (reopened the channel) it would re-issue
+// basic.consume and clearPause — silently defeating Pause and letting messages flow
+// again. The recover MUST instead park on resubCh until Resume / a reconnect hook
+// delivers a replacement, never calling the reopen factory. Regression guard for the
+// integration PauseResume contract at unit speed.
+func TestRecoverDeliveryChannel_paused_parksWithoutSelfHeal(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
+	require.NoError(t, err)
+
+	// Any self-heal would call the factory (reopen + clearPause). It records calls
+	// so the test can prove it is never invoked while paused.
+	var openCount atomic.Int64
+	consumer.deliverySubFactory = func(_ context.Context) (deliverySub, error) {
+		openCount.Add(1)
+		return deliverySub{ch: make(chan amqp091.Delivery), done: make(chan struct{})}, nil
+	}
+	consumer.paused.Store(true)
+
+	hookCh := make(chan amqp091.Delivery)
+	resubCh := make(chan deliverySub)
+	// Resume / the reconnect hook delivers a replacement after a beat; until then a
+	// paused recover must park (never reopen).
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		assert.Equal(t, int64(0), openCount.Load(), "a paused consumer must not self-heal while parked")
+		resubCh <- deliverySub{ch: hookCh, done: make(chan struct{})}
+	}()
+
+	var wg sync.WaitGroup
+	sub, _, action := consumer.recoverDeliveryChannel(context.Background(), &wg, resubCh)
+
+	require.Equal(t, recoverResubscribed, action)
+	assert.Equal(t, hookCh, sub.ch, "the resubscription must be the Resume/hook-delivered one, not a self-heal")
+	assert.Equal(t, int64(0), openCount.Load(), "the reopen factory must never be called while paused")
+}
+
+// TestRecoverDeliveryChannel_reconnecting_yieldsToHookNoSelfHeal proves the
+// channel-level self-heal stands down while the socket is mid-TCP-reconnect: the
+// reconnect supervisor's hook owns recovery and re-subscribes on resubCh. openChannel
+// only nil-checks raw, so once the socket re-dials mid-barrier a direct reopen would
+// SUCCEED and issue a SECOND basic.consume on the same consumer tag — the broker
+// rejects the duplicate and kills the channel, stalling delivery. recoverDeliveryChannel
+// must therefore NOT call the reopen factory while isReconnecting() is true.
+func TestRecoverDeliveryChannel_reconnecting_yieldsToHookNoSelfHeal(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
+	require.NoError(t, err)
+
+	var openCount atomic.Int64
+	consumer.deliverySubFactory = func(_ context.Context) (deliverySub, error) {
+		openCount.Add(1)
+		return deliverySub{ch: make(chan amqp091.Delivery), done: make(chan struct{})}, nil
+	}
+
+	// Socket mid-reconnect: the hook owns recovery, not a direct reopen.
+	consumer.mc.barrierMu.Lock()
+	consumer.mc.reconnecting = true
+	consumer.mc.barrierMu.Unlock()
+
+	hookCh := make(chan amqp091.Delivery)
+	resubCh := make(chan deliverySub)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		assert.Equal(t, int64(0), openCount.Load(), "a reconnecting socket must not self-heal; the hook owns recovery")
+		resubCh <- deliverySub{ch: hookCh, done: make(chan struct{})}
+	}()
+
+	var wg sync.WaitGroup
+	sub, _, action := consumer.recoverDeliveryChannel(context.Background(), &wg, resubCh)
+
+	require.Equal(t, recoverResubscribed, action)
+	assert.Equal(t, hookCh, sub.ch, "the resubscription must be the hook-delivered one")
+	assert.Equal(t, int64(0), openCount.Load(), "no duplicate basic.consume self-heal while reconnecting")
+}
