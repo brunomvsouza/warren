@@ -193,19 +193,43 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 		returnTagMap: new(sync.Map),
 	}
 
-	confirmCh := ch.NotifyPublish(make(chan amqp091.Confirmation, buf))
-	// returnCh is intentionally unbuffered. amqp091's per-connection reader goroutine
-	// delivers basic.return frames via a blocking channel send, so the reader stalls
-	// until this goroutine receives. That serialises the sequence:
-	//   basic.return received → MarkReturned called → reader continues → basic.ack dispatched
-	// guaranteeing that MarkReturned always precedes Ack/Nack in the select loop below.
-	// The stall is O(1) (map lookup + write) and only occurs on the error path (mandatory
-	// unroutable messages). A buffered channel would let the reader dispatch the ack before
-	// this goroutine processes the return; with a flat two-case select the scheduler could
-	// then pick confirmCh first, silently losing ErrUnroutable ~50 % of the time.
-	returnCh := ch.NotifyReturn(make(chan amqp091.Return))
+	_ = startConfirmDemux(ch, tracker, entry.returnTagMap, onReturn, buf)
 
+	return entry, nil
+}
+
+// startConfirmDemux wires the return/ack correlation goroutine for a publisher
+// channel. It is the single load-bearing place that establishes two invariants
+// the ErrUnroutable contract depends on (T59 / R10-3 / RMQ-16):
+//
+//  1. The basic.return notify channel is UNBUFFERED. amqp091-go's single
+//     per-connection synchronous reader goroutine delivers basic.return via a
+//     blocking channel send, so the reader stalls until this goroutine
+//     receives. That serialises:
+//     basic.return received → MarkReturned → reader continues → basic.ack
+//     dispatched, guaranteeing MarkReturned precedes Ack/Nack below. A buffered
+//     return channel would let the reader dispatch the ack before this
+//     goroutine processed the return; with a flat two-case select the scheduler
+//     could then pick confirmCh first, silently losing ErrUnroutable ~50 % of
+//     the time under load.
+//  2. Both frame types are demultiplexed by a SINGLE goroutine. Splitting
+//     return and ack across two goroutines would reintroduce the race the
+//     unbuffered channel exists to prevent.
+//
+// The invariant depends on amqp091-go shipping a single synchronous reader
+// goroutine (pinned in go.mod); a buffered or worker-pool dispatcher upstream
+// would silently break it. The dedicated test TestConfirmDemux_* locks both
+// invariants (cap(returnCh)==0 and the behavioural ordering under load).
+// startConfirmDemux returns a channel closed when the demux goroutine exits
+// (after the confirm channel closes); production ignores it, tests wait on it
+// for goleak-clean shutdown.
+func startConfirmDemux(ch pubChannel, tracker *confirms.Tracker, returnTagMap *sync.Map, onReturn func(amqp091.Return), buf int) <-chan struct{} {
+	confirmCh := ch.NotifyPublish(make(chan amqp091.Confirmation, buf))
+	returnCh := ch.NotifyReturn(make(chan amqp091.Return)) // unbuffered — see invariant (1)
+
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
 			select {
 			case ret, ok := <-returnCh:
@@ -221,7 +245,7 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 				// the subsequent ack resolves with nil (success) rather than ErrUnroutable.
 				// In practice RabbitMQ always echoes message properties in basic.return.
 				if ret.MessageId != "" {
-					if v, loaded := entry.returnTagMap.LoadAndDelete(ret.MessageId); loaded { //nolint:gocritic // always non-nil
+					if v, loaded := returnTagMap.LoadAndDelete(ret.MessageId); loaded { //nolint:gocritic // always non-nil
 						tag := v.(uint64) //nolint:forcetypeassert // only uint64 is stored
 						if onReturn != nil {
 							onReturn(ret)
@@ -244,8 +268,7 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 			}
 		}
 	}()
-
-	return entry, nil
+	return done
 }
 
 // defaultConfirmTimeout is the internal default when no ConfirmTimeout builder

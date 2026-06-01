@@ -240,53 +240,14 @@ func wireFakePool(fake *fakePubChannel, onReturn ...func(amqp091.Return)) (*publ
 	}
 
 	tracker := confirms.New()
-	confirmCh := make(chan amqp091.Confirmation, 16)
-	// returnCh is intentionally unbuffered: PublishWithContext sends to it
-	// synchronously (blocking until this goroutine reads), which guarantees that
-	// tracker.MarkReturned is always called before the subsequent basic.ack is
-	// processed — mirroring the RabbitMQ wire ordering guarantee.
-	returnCh := make(chan amqp091.Return)
-
 	rtm := new(sync.Map)
 
-	fake.mu.Lock()
-	fake.confirmCh = confirmCh
-	fake.returnCh = returnCh
-	fake.mu.Unlock()
-
-	goroutineDone := make(chan struct{})
-	go func() {
-		defer close(goroutineDone)
-		for {
-			select {
-			case ret, ok := <-returnCh:
-				if !ok {
-					returnCh = nil
-					continue
-				}
-				// Correlate the return to its delivery tag via MessageID.
-				if ret.MessageId != "" {
-					if v, loaded := rtm.LoadAndDelete(ret.MessageId); loaded {
-						tag := v.(uint64) //nolint:forcetypeassert // only uint64 stored
-						if returnCallback != nil {
-							returnCallback(ret)
-						}
-						tracker.MarkReturned(tag, ret.ReplyCode)
-					}
-				}
-			case c, ok := <-confirmCh:
-				if !ok {
-					tracker.CloseAll()
-					return
-				}
-				if c.Ack {
-					tracker.Ack(c.DeliveryTag, false)
-				} else {
-					tracker.Nack(c.DeliveryTag, false)
-				}
-			}
-		}
-	}()
+	// Drive the PRODUCTION return/ack demux (startConfirmDemux) rather than a
+	// duplicated copy, so every unroutable test exercises the real invariant
+	// (unbuffered returnCh + single goroutine). startConfirmDemux calls
+	// fake.NotifyPublish / fake.NotifyReturn, which set fake.confirmCh /
+	// fake.returnCh that PublishWithContext sends on.
+	demuxDone := startConfirmDemux(fake, tracker, rtm, returnCallback, 16)
 
 	pool := newPublisherConnPool(1, func() (publisherEntry, error) {
 		return publisherEntry{ch: fake, tracker: tracker, closeCh: fake.closedCh, returnTagMap: rtm}, nil
@@ -294,7 +255,7 @@ func wireFakePool(fake *fakePubChannel, onReturn ...func(amqp091.Return)) (*publ
 
 	stop := func() {
 		_ = fake.Close() // closes confirmCh → goroutine exits
-		<-goroutineDone  // wait for full exit
+		<-demuxDone      // wait for full exit (goleak-clean)
 	}
 	return pool, stop
 }
