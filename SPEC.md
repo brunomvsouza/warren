@@ -1890,8 +1890,10 @@ type Exchange struct {
     // no `x-` prefix; the earlier "x-alternate-exchange" wording was a misnomer).
     // Additive: the zero value preserves today's behaviour, and no existing
     // field is renamed/removed (GA-05). Set the field, not Args["alternate-exchange"]
-    // (validate() rejects the raw arg). Declare the named AE (and a catch-all
-    // queue bound to it) in the same Topology.
+    // — validate() rejects both the raw `alternate-exchange` arg and the historical
+    // `x-alternate-exchange` alias (RabbitMQ honors both) so the field stays the
+    // single source of truth. Declare the named AE (and a catch-all queue bound to
+    // it) in the same Topology.
     AlternateExchange string
     Args              Headers
 }
@@ -1981,7 +1983,7 @@ type DeadLetter struct {
     // x-message-ttl=7d. No effect when <Source>.dlq is declared explicitly.
     DLQMaxLength   int             // x-max-length on the auto-DLQ; 0 → default 100000
     DLQMessageTTL  time.Duration   // x-message-ttl on the auto-DLQ; 0 → default 7d
-    DLQOverflow    OverflowPolicy  // x-overflow on the auto-DLQ; empty → drop-head
+    DLQOverflow    OverflowPolicy  // x-overflow on the auto-DLQ; empty → drop-head; validate() rejects an unknown policy up front
     DLQUnbounded   bool            // opt OUT of all auto-DLQ bounds (use an external retention policy)
 }
 
