@@ -14,6 +14,7 @@ import (
 	"errors"
 	"math/big"
 	"net"
+	"net/url"
 	"runtime"
 	"sync"
 	"testing"
@@ -680,6 +681,73 @@ func TestPerConnSeeding_distributesInitialDialNoAddr0Stampede(t *testing.T) {
 		"initial dials must spread across ≥2 nodes — no addr[0] stampede")
 	assert.Less(t, firsts["amqp://a/"], 6,
 		"addrs[0] must not capture every socket's initial dial")
+}
+
+// TestOpenPool_publisherSocketWalksItsSeededPermutation guards the seed WIRING at
+// the openPool call site (shuffleSeed: perConnSeed(opts.addrShuffleSeed, role, i)).
+// The tests above prove shuffledAddrs/perConnSeed in isolation; this proves openPool
+// actually plugs a socket's per-(role, idx) seed into the order it dials — on the
+// DEFAULT lane, with no broker. A stub dialer that refuses every address lets the
+// single publisher socket walk its full shuffled order before Dial gives up; we
+// record that order and assert it is exactly the host:ports of
+// shuffledAddrs(addrs, perConnSeed(base, "publisher", 0)).
+//
+// Without this, a regression in that one wiring line would surface only on the
+// integration/cluster lanes (openPool needs a live dial to succeed). It is
+// deterministic: the pinned base fixes the permutation, JitterNone + finite Retries
+// fix the walk, and WithPublisherConnections(1) makes the publisher pool fail first
+// so Dial returns before the consumer pool opens — the recorded order is the one
+// publisher socket's, dialed serially in the calling goroutine.
+func TestOpenPool_publisherSocketWalksItsSeededPermutation(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	const base int64 = 0x0BADF00D
+	addrs := []string{
+		"amqp://guest:guest@127.0.0.1:5001/",
+		"amqp://guest:guest@127.0.0.1:5002/",
+		"amqp://guest:guest@127.0.0.1:5003/",
+	}
+
+	var mu sync.Mutex
+	var order []string
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := Dial(ctx,
+		WithAddrs(addrs),
+		// Pin the process-level base inline. The cluster lane uses the exported
+		// WithAddrShuffleSeedForTest seam; in-package we set the field directly so the
+		// seam need not leave the cluster tag.
+		func(o *connOptions) { o.addrShuffleSeed = base },
+		WithPublisherConnections(1),
+		WithConsumerConnections(1),
+		WithReconnectBackoff(RetryPolicy{
+			Min: time.Millisecond, Max: time.Millisecond, Retries: 9, Jitter: JitterNone,
+		}),
+		WithDialer(func(_, addr string) (net.Conn, error) {
+			mu.Lock()
+			order = append(order, addr)
+			mu.Unlock()
+			return nil, errors.New("connection refused")
+		}),
+	)
+	require.Error(t, err, "every address refuses, so Dial must fail")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.GreaterOrEqual(t, len(order), len(addrs),
+		"the publisher socket must walk at least one full cycle of its dial order")
+
+	want := shuffledAddrs(addrs, perConnSeed(base, "publisher", 0))
+	wantHostPorts := make([]string, len(want))
+	for i, u := range want {
+		pu, perr := url.Parse(u)
+		require.NoError(t, perr)
+		wantHostPorts[i] = pu.Host
+	}
+	assert.Equal(t, wantHostPorts, order[:len(addrs)],
+		"openPool must seed the publisher socket so it dials shuffledAddrs(addrs, perConnSeed(base, \"publisher\", 0))")
 }
 
 // TestConnectOnce_ctxCancelled_returnsCtxErr covers the ctx-cancellation fork of

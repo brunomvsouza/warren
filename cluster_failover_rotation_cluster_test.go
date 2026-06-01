@@ -32,6 +32,13 @@ import (
 // distribution is DETERMINISTIC — the same spread on every run, no probabilistic
 // "≥2 of 3 nodes" flake. Any non-zero seed whose six per-socket permutations do not
 // all start on the same node works; this one is verified to spread the pool.
+//
+// The spread is implicitly coupled to perConnSeed's mixing, the "publisher"/
+// "consumer" role strings, the 3+3 pool size, and the node↔address mapping. If a
+// change to any of those funnels this seed's six permutations onto one node (the
+// ≥2-node assertions below start failing), the seed is stale, not the shuffle:
+// re-pick any non-zero value that spreads the pool. The value is arbitrary; only
+// its spreading property matters.
 const rotationShuffleSeed int64 = 0x5A6B7C8D
 
 // TestClusterFailoverRotation_SpreadAndRestart_cluster dials a pool of six sockets

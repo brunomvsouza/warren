@@ -481,10 +481,16 @@ func (opts *connOptions) dialAddrs() []string {
 	return []string{opts.addr}
 }
 
-// addrShuffleStream is the PCG stream selector for the address shuffle and the
-// avalanche multiplier in perConnSeed (the 64-bit golden-ratio constant — good
-// bit diffusion so adjacent socket indices map to distant seeds).
+// addrShuffleStream selects the PCG stream that shuffledAddrs draws its
+// permutation from. Set to the 64-bit golden-ratio constant for good bit
+// diffusion.
 const addrShuffleStream uint64 = 0x9E3779B97F4A7C15
+
+// seedMixMultiplier is the multiplier perConnSeed folds the socket index through
+// so adjacent indices map to distant seeds. Numerically the same golden-ratio
+// constant as addrShuffleStream, but named separately because the use is
+// unrelated: here it is an avalanche multiplier, there a PCG stream selector.
+const seedMixMultiplier uint64 = 0x9E3779B97F4A7C15
 
 // FNV-1a 64-bit basis/prime, used to fold a socket's role string into its seed.
 const (
@@ -517,7 +523,7 @@ func perConnSeed(base int64, role string, idx int) int64 {
 	for i := range len(role) {
 		h = (h ^ uint64(role[i])) * fnvPrime
 	}
-	return base ^ int64(h^(uint64(idx)*addrShuffleStream)) //nolint:gosec // seed mix, not cryptographic
+	return base ^ int64(h^(uint64(idx)*seedMixMultiplier)) //nolint:gosec // seed mix, not cryptographic
 }
 
 // dialOrder returns this socket's shuffled permutation of dialAddrs(), built
