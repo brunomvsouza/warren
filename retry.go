@@ -43,7 +43,7 @@ type RetryPolicy struct {
 	// Max is the maximum backoff duration. Defaults to 30s when zero.
 	Max time.Duration
 	// Factor is the exponential multiplier applied per failed attempt.
-	// Defaults to 2.0 when zero or negative.
+	// Defaults to 2.0 when not a positive number (zero, negative, or NaN).
 	Factor float64
 	// Retries is the maximum number of consecutive failed attempts before the
 	// reconnect loop gives up. Zero means unlimited retries.
@@ -56,24 +56,35 @@ type RetryPolicy struct {
 
 // NextBackoff returns the backoff duration for attempt n (1-indexed). The pure
 // exponential delay is Min*Factor^(n-1) capped at Max; the configured Jitter
-// strategy then perturbs it, and the result is always clamped to [Min, Max] so
-// every strategy honours the same bound.
+// strategy then perturbs it, and the result is always clamped to the effective
+// [Min, Max]. Min is the floor and wins when Max < Min: a degenerate config
+// returns Min rather than a value below it. The result is always finite and
+// non-negative for any input — a non-positive or NaN Factor falls back to the
+// 2.0 default, and an out-of-range attempt n saturates to Min (n <= 0) or Max
+// (very large n) rather than under- or overflowing.
 func (p RetryPolicy) NextBackoff(n int) time.Duration {
-	min := p.Min
-	if min <= 0 {
-		min = time.Second
+	lo := p.Min
+	if lo <= 0 {
+		lo = time.Second
 	}
-	max := p.Max
-	if max <= 0 {
-		max = 30 * time.Second
+	hi := p.Max
+	if hi <= 0 {
+		hi = 30 * time.Second
+	}
+	// Min is the floor: collapse a degenerate Max<Min window to [lo, lo] so the
+	// clamp below is well-formed and the result can never drop below Min.
+	if hi < lo {
+		hi = lo
 	}
 	factor := p.Factor
-	if factor <= 0 {
+	if !(factor > 0) { // also catches NaN, which compares false to everything
 		factor = 2.0
 	}
 
-	exp := float64(min) * math.Pow(factor, float64(n-1))
-	exp = math.Min(exp, float64(max))
+	// float64(n)-1 (not float64(n-1)) so an extreme n cannot wrap the int
+	// subtraction; math.Pow then saturates to ±Inf and the cap below tames it.
+	exp := float64(lo) * math.Pow(factor, float64(n)-1)
+	exp = math.Min(exp, float64(hi))
 
 	var d float64
 	switch p.Jitter {
@@ -85,9 +96,9 @@ func (p RetryPolicy) NextBackoff(n int) time.Duration {
 		d = rand.Float64() * exp //nolint:gosec // jitter spread, not cryptographic
 	}
 
-	// Honour the [Min, Max] contract regardless of strategy: full jitter can land
-	// below Min, so clamp up; exp is already capped at Max, so clamp down guards
+	// Honour the [lo, hi] contract regardless of strategy: full jitter can land
+	// below lo, so clamp up; exp is already capped at hi, so clamp down guards
 	// only against rounding.
-	d = math.Max(float64(min), math.Min(d, float64(max)))
+	d = math.Max(float64(lo), math.Min(d, float64(hi)))
 	return time.Duration(d)
 }
