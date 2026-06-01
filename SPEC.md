@@ -2161,6 +2161,15 @@ value.
     `json.Decoder.DisallowUnknownFields()` for the rare pipelines where
     consumer-side schema drift MUST be a hard error (regulated/compliance
     workloads).
+    `codec.NewJSON(codec.WithUnknownFieldObserver(fn))` keeps the lax
+    decode but calls `fn(path)` once per unknown top-level field, making
+    the otherwise-silent drift observable without failing the message
+    (T56). The canonical wiring increments a
+    `codec_unknown_fields_total{type}` counter from `fn` so drift can be
+    alerted on before a field becomes load-bearing. The observer fires
+    only for struct targets, adds one extra `json.Unmarshal` pass per
+    `Decode` (and only when set), does not report nested-object drift,
+    and `fn` must be concurrency-safe.
   - `codec.NewProtobuf()` — proto3 binary; `ContentType` =
     `application/x-protobuf`.
     The built-in CloudEvents codecs operate on the canonical
