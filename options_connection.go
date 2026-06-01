@@ -78,6 +78,14 @@ type connOptions struct {
 	// reconnect attempts. Zero values use RetryPolicy defaults (1 s / 30 s / ×2).
 	reconnectBackoff RetryPolicy
 
+	// reconnectBarrierTimeout caps how long a publisher blocks on the synchronous
+	// reconnect barrier before it returns ErrReconnecting, and how long the
+	// barrier's redeclare hooks may run before the socket is force-reconnected.
+	// It is a distinct mechanism from ConfirmTimeout (which does not cover the
+	// barrier — the publish frame is still unwritten). Defaults to
+	// defaultReconnectBarrierTimeout. See WithReconnectBarrierTimeout, SPEC §6.1.
+	reconnectBarrierTimeout time.Duration
+
 	// channelPoolSize is the number of pre-opened channels in the per-connection
 	// pool used by publishers. Validated against the requested channel-max
 	// (fail-fast) and the broker-negotiated channel-max (post-handshake) in Dial.
@@ -232,6 +240,29 @@ func WithConnectDelay(d time.Duration) Option {
 // Factor=2.0, unlimited retries).
 func WithReconnectBackoff(p RetryPolicy) Option {
 	return func(o *connOptions) { o.reconnectBackoff = p }
+}
+
+// defaultReconnectBarrierTimeout bounds the synchronous reconnect barrier
+// (T63 / R10-8). It is the maximum time a publisher blocks on the barrier before
+// receiving ErrReconnecting, and the maximum time the barrier's redeclare hooks
+// run before the half-alive socket is force-reconnected. It is well under the
+// default ConfirmTimeout (30 s) so a capped stall surfaces as a transient
+// ErrReconnecting rather than the silent indefinite stall ConfirmTimeout exists
+// to prevent. SRE-11/T113 must set the default histogram top bucket ≥ this value
+// so a capped stall is visible in publisher_publish_seconds, not collapsed to +Inf.
+const defaultReconnectBarrierTimeout = 15 * time.Second
+
+// WithReconnectBarrierTimeout caps the synchronous reconnect barrier. With the
+// default PublishTimeout=0 and a context.Background(), a publisher would
+// otherwise block indefinitely behind a "half-alive" broker that accepts the
+// socket but stalls on queue.declare (e.g. Khepri Raft-quorum recovery, RMQ-17).
+// On cap, blocked Publish calls return ErrReconnecting (transient, retryable),
+// and the barrier force-reconnects the socket — with WithAddrs the rotation
+// re-dials a different node. ConfirmTimeout does NOT cover the barrier (the frame
+// is still unwritten), so this is a distinct, necessary mechanism (DS-02).
+// A non-positive d resets to the default. See SPEC §6.1.
+func WithReconnectBarrierTimeout(d time.Duration) Option {
+	return func(o *connOptions) { o.reconnectBarrierTimeout = d }
 }
 
 // WithChannelPoolSize sets the number of pre-opened channels per publisher

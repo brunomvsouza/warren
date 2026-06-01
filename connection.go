@@ -729,12 +729,60 @@ func (mc *managedConn) runBarrier(ctx context.Context) {
 	copy(hooks, mc.hooks)
 	mc.hooksMu.Unlock()
 
-	var hookErr error
-	for _, fn := range hooks {
-		if err := fn(ctx); err != nil {
-			hookErr = err
-			break
+	// Run the redeclare/resubscribe hooks under the barrier cap (T63 / R10-8 /
+	// DS-02). A half-alive broker (accepts the socket, stalls on queue.declare —
+	// e.g. Khepri Raft-quorum recovery, RMQ-17) would otherwise hang the barrier
+	// indefinitely, and ConfirmTimeout does NOT cover the barrier (the frame is
+	// still unwritten). On cap we force-reconnect: close the socket (its rotated
+	// re-dial with WithAddrs hits a different node) and let the supervisor re-run
+	// the barrier. The orphaned hook goroutine unblocks when the socket closes;
+	// mc.wg tracks it so Close drains it.
+	hookErrCh := make(chan error, 1)
+	mc.wg.Add(1)
+	go func() {
+		defer mc.wg.Done()
+		var hookErr error
+		for _, fn := range hooks {
+			if err := fn(ctx); err != nil {
+				hookErr = err
+				break
+			}
 		}
+		hookErrCh <- hookErr
+	}()
+
+	capTimer := time.NewTimer(mc.opts.reconnectBarrierTimeout)
+	var hookErr error
+	select {
+	case hookErr = <-hookErrCh:
+		capTimer.Stop()
+	case <-ctx.Done():
+		capTimer.Stop()
+		// Shutdown: the orphaned hook goroutine exits when Close tears down the
+		// socket (drained by mc.wg). Clear the barrier so no publisher hangs.
+		mc.barrierMu.Lock()
+		mc.reconnecting = false
+		mc.barrierCond.Broadcast()
+		mc.barrierMu.Unlock()
+		return
+	case <-capTimer.C:
+		// Barrier exceeded its cap. Force-reconnect the half-alive socket; the
+		// supervisor loop observes the close and re-dials. reconnecting stays true
+		// (a fresh reconnect is imminent), and blocked publishers already return
+		// ErrReconnecting via the wait-side cap.
+		mc.opts.metrics.RecordReconnect(mc.role)
+		mc.opts.logger.Errorf("warren: %s connection[%d] reconnect barrier exceeded %s cap; forcing reconnect",
+			mc.role, mc.idx, mc.opts.reconnectBarrierTimeout)
+		mc.mu.RLock()
+		raw := mc.raw
+		mc.mu.RUnlock()
+		if raw != nil {
+			_ = raw.Close()
+		}
+		mc.barrierMu.Lock()
+		mc.barrierCond.Broadcast()
+		mc.barrierMu.Unlock()
+		return
 	}
 
 	elapsed := time.Since(start)
@@ -799,24 +847,51 @@ func (mc *managedConn) runBarrier(ctx context.Context) {
 // Returns ErrTopologyRedeclareFailed when the connection is in the degraded
 // state (topology redeclare failed on last reconnect).
 func (mc *managedConn) waitBarrier(ctx context.Context) error {
+	// Bound the reconnect-barrier wait (T63 / R10-8 / DS-02): with no ctx
+	// deadline (PublishTimeout=0 + context.Background()), a publisher would
+	// otherwise stall forever behind a half-alive broker whose redeclare never
+	// clears. The cap applies only to the reconnecting state, not to broker
+	// flow-control (blocked) backpressure, which is legitimate and unbounded.
+	// capDeadline is fixed lazily on the first reconnecting wait (and only then
+	// is mc.opts read, so a bare managedConn that is merely degraded never
+	// dereferences opts).
+	var capDeadline time.Time
 	mc.barrierMu.Lock()
 	defer mc.barrierMu.Unlock()
 	for mc.reconnecting || mc.blocked {
 		done := make(chan struct{})
+		var timer *time.Timer
+		var timerC <-chan time.Time
+		if mc.reconnecting {
+			if capDeadline.IsZero() {
+				capDeadline = time.Now().Add(mc.opts.reconnectBarrierTimeout)
+			}
+			timer = time.NewTimer(time.Until(capDeadline))
+			timerC = timer.C
+		}
 		go func() {
 			select {
 			case <-ctx.Done():
+				mc.barrierCond.Broadcast()
+			case <-timerC:
 				mc.barrierCond.Broadcast()
 			case <-done:
 			}
 		}()
 		mc.barrierCond.Wait()
 		close(done)
+		if timer != nil {
+			timer.Stop()
+		}
 		if ctx.Err() != nil {
 			if mc.reconnecting {
 				return fmt.Errorf("%w: %w", ErrReconnecting, ctx.Err())
 			}
 			return fmt.Errorf("%w: %w", ErrConnectionBlocked, ctx.Err())
+		}
+		// Barrier cap exceeded: surface ErrReconnecting rather than stall past it.
+		if mc.reconnecting && !time.Now().Before(capDeadline) {
+			return fmt.Errorf("%w: reconnect barrier exceeded %s cap", ErrReconnecting, mc.opts.reconnectBarrierTimeout)
 		}
 	}
 	// Release barrierMu before acquiring mu to avoid AB/BA deadlock:
@@ -888,6 +963,9 @@ func applyConnDefaults(opts *connOptions) {
 	}
 	if opts.tracer == nil {
 		opts.tracer = otel.NoOpTracer{}
+	}
+	if opts.reconnectBarrierTimeout <= 0 {
+		opts.reconnectBarrierTimeout = defaultReconnectBarrierTimeout
 	}
 	// Populate username/password from URL userinfo when WithAuth was not called,
 	// so AuthenticatedUser() reflects credentials embedded in WithAddr and

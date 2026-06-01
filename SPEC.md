@@ -603,6 +603,27 @@ internally via `Concurrency(n)`.
   return `ErrReconnecting` (wraps `ctx.Err()`, classified
   `IsTransient`). The `topology_redeclare_seconds{role}` histogram
   records the duration of step 2 per reconnect cycle.
+- **Reconnect barrier max-duration cap (`WithReconnectBarrierTimeout`,
+  default 15 s).** The barrier is bounded so a "half-alive" broker that
+  accepts the socket but stalls on `queue.declare` (e.g. Khepri
+  Raft-quorum recovery during a partition, RMQ-17) cannot hang
+  publishers indefinitely. This is a **distinct mechanism from
+  `ConfirmTimeout`**: `ConfirmTimeout` covers a written-but-unconfirmed
+  publish, whereas at the barrier the publish frame is **still
+  unwritten**, so `ConfirmTimeout` does not apply (DS-02). Two effects on
+  cap: (a) a publisher blocked on the barrier returns `ErrReconnecting`
+  (transient, retryable) rather than stalling past the cap — this holds
+  even with the default `PublishTimeout=0` and a `context.Background()`;
+  (b) the **post-cap connection state is force-reconnect** — the
+  supervisor closes the half-alive socket and re-dials (with `WithAddrs`
+  the rotation lands on a different node), then re-runs the barrier. It
+  is deliberately **not** the degraded state: degraded means a
+  *conflicting* topology the broker rejected (permanent until fixed),
+  whereas a capped barrier is a *slow/half-alive* broker that a fresh
+  connection escapes. The default (15 s) is well under `ConfirmTimeout`
+  (30 s); SRE-11/T113 must set the default histogram top bucket ≥ this
+  cap so a capped stall is visible in `publisher_publish_seconds` rather
+  than collapsed into `+Inf`.
 - **Degraded mode on persistent redeclare failure.** If the
   topology redeclare in step 2 fails (e.g., broker has a
   conflicting definition for a queue that cannot be reconciled),
