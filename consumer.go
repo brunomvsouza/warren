@@ -303,6 +303,12 @@ type Consumer[M any] struct {
 	// returns it directly, including the done channel for channel-close detection tests.
 	deliverySubOverride *deliverySub
 
+	// healthCheckOverride is a test-injection hook for Health's connection-liveness
+	// gate: when non-nil, Health calls it instead of c.mc.health. The real gate opens
+	// a broker channel, so the happy path (gate passes -> return the snapshot) is
+	// otherwise reachable only on the integration lane. nil in production (T53).
+	healthCheckOverride func(context.Context) error
+
 	// testHookBeforeTimeoutDrain, when non-nil, is invoked inside dispatch's hCtx.Done()
 	// branch immediately before draining handlerDone. It is a test-only synchronization
 	// seam (nil in production, a no-op) that lets a test confirm dispatch has committed to
@@ -1562,7 +1568,11 @@ func (c *Consumer[M]) snapshot() ConsumerHealth {
 // (nil, err): the connection liveness check is the gate, and a zeroed snapshot
 // alongside an error would be misleading (T53).
 func (c *Consumer[M]) Health(ctx context.Context) (*ConsumerHealth, error) {
-	if err := c.mc.health(ctx); err != nil {
+	check := c.mc.health
+	if c.healthCheckOverride != nil {
+		check = c.healthCheckOverride
+	}
+	if err := check(ctx); err != nil {
 		return nil, err
 	}
 	snap := c.snapshot()

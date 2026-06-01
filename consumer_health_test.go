@@ -26,6 +26,35 @@ func TestConsumer_Health_NilSnapshot_OnUnhealthyConn(t *testing.T) {
 	assert.Nil(t, h, "snapshot must be nil when the connection check fails")
 }
 
+func TestConsumer_Health_HealthyConn_ReturnsSnapshot(t *testing.T) {
+	// When the connection-liveness gate passes, Health returns (&snapshot, nil) — the
+	// public success path. The real gate opens a broker channel, so this is otherwise
+	// covered only on the integration lane; the healthCheckOverride hook exercises the
+	// gate-passes -> return-snapshot passthrough as a unit test, and we assert the
+	// returned struct round-trips the consumer's runtime state, not a zero value (T53).
+	conn := newFakeConsumerConn(t)
+	c, err := ConsumerFor[string](conn).Queue("q").Build()
+	require.NoError(t, err)
+
+	c.healthCheckOverride = func(context.Context) error { return nil }
+
+	// Seed observable runtime state so a zeroed/misreceived snapshot would fail below.
+	c.started.Store(true)
+	c.lastDeliveryNanos.Store(time.Now().UnixNano())
+	c.inFlight.Store(2)
+
+	h, err := c.Health(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, h, "a healthy gate must return a non-nil snapshot")
+
+	want := c.snapshot()
+	assert.Equal(t, want, *h, "Health must return exactly the consumer snapshot")
+	assert.True(t, h.Active, "started, not stopped/closed/paused -> Active")
+	assert.False(t, h.Paused)
+	assert.Equal(t, 2, h.InFlightHandlers)
+	assert.False(t, h.LastDeliveryAt.IsZero(), "LastDeliveryAt must carry the seeded delivery time")
+}
+
 func TestConsumer_Snapshot_ReportsInFlightAndLastDelivery(t *testing.T) {
 	// snapshot() reflects a live, in-flight handler: InFlightHandlers counts the
 	// executing handler, LastDeliveryAt stamps when the delivery was received, and
