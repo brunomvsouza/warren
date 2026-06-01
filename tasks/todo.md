@@ -1475,11 +1475,11 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `connection.go`, `options_connection.go`, `connection_internal_test.go`.
 - **Deps:** T07, T07d. **(R10-11, P2.1)** — *already pulled into Phase 12.*
 
-### [ ] T67 — `Dial` partial-pool-connect policy [P2] · S
+### [x] T67 — `Dial` partial-pool-connect policy [P2] · S
 - **Acceptance:**
-  - [ ] Policy recorded in SPEC §6.1 and implemented: `Dial` succeeds if ≥1 connection per role connects (supervisor reconnects the rest) — or fail-fast, per the decision.
-  - [ ] **Lens-05 (SRE-08):** resolve to **succeed-if-≥1-per-role** with supervised reconnect of the rest **and** a metric/log for booting at reduced capacity — an undefined policy means fail-fast blocks *every* deploy on one flaky node, or succeed-degraded is *silent* capacity loss; an integration test boots a 2+2 pool with one consumer connection unreachable, asserts `Dial` succeeds, the missing socket reconnects under supervision, and the degraded-capacity signal fired.
-- **Verify:** Integration test where a subset of pooled connections cannot connect asserts the chosen behaviour deterministically + the degraded-capacity signal.
+  - [x] Policy recorded in SPEC §6.1 + Dial godoc and implemented: `Dial` succeeds if ≥1 connection per role connects; boot-degraded sockets reconnect under supervision (supervisor `goto reconnect` from a nil-raw boot entry). Fail-fast only when an entire role has 0 connections or ctx is cancelled.
+  - [x] **Lens-05 (SRE-08):** succeed-if-≥1-per-role + supervised reconnect + a degraded-capacity signal (`connection_degraded_total{reason="boot_reduced_capacity"}` + warning log). Supervisors start only after the pool is known to boot, so a fail-fast path spawns no background reconnect goroutines.
+- **Verify:** Unit `TestDial_multiConn_dialCalledPubPlusConTimes` (fully-failed role fails after exactly pubN attempts, no background dials). Integration `TestDial_partialPool_succeedsAndRecovers_integration` (one socket unreachable at boot via a failing dialer → Dial succeeds, degraded signal fires, the socket recovers under supervision).
 - **Files:** `connection.go`, SPEC §6.1, `metrics/`, `connection_integration_test.go`.
 - **Deps:** T07, T07d. **(R10-12, P2.2)** — *pulled into Phase 16 (v0.1).*
 
