@@ -1194,7 +1194,7 @@ func (c *Consumer[M]) recoverDeliveryChannel(ctx context.Context, wg *sync.WaitG
 	// considered-recent HORIZON — a reopen within it of the prior one is treated
 	// as a flap — while channelRecoverInitialBackoff is the FLOOR actually slept.
 	// A single fixed floor (no escalation) is intentional for T61's scope; see
-	// LATER-88 for ramping a sustained fast-flap toward the horizon.
+	// LATER-90 for ramping a sustained fast-flap toward the horizon.
 	if !c.lastChannelReopen.IsZero() && time.Since(c.lastChannelReopen) < channelRecoverMaxBackoff {
 		select {
 		case <-ctx.Done():
