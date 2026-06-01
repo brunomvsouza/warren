@@ -1533,7 +1533,7 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `options_connection.go`, `connection.go`, SPEC §6.1.
 - **Deps:** T07. **(R10-17, P2.7)** — *pulled into Phase 16 (v0.1).*
 
-### [ ] T73 — Codec-call panic safety: `defer recover` → `ErrInvalidMessage` · S
+### [x] T73 — Codec-call panic safety: `defer recover` → `ErrInvalidMessage` · S
 Formalises the T09 panic-safety contract (todo.md T09 / SPEC §6 "Panic
 safety contract") as a standalone, trackable task. The recover wrapper
 is the safety net for **user-supplied** codecs — a third-party codec may
