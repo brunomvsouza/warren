@@ -1253,39 +1253,3 @@ dependency for the doc reconciliation itself.
 
 **Prerequisites:** A future configurable-DLQ-name task (does not yet exist). No code dependency today.
 
-### LATER-83 — `startPump` cancel-channel death-during-pause arm is not unit-tested
-
-**Context:** `startPump` (`consumer.go`) drains BOTH `closeCh` and `cancelCh` when its delivery stream closes (`!ok`) so it can distinguish a genuine channel death from a local Pause `basic.cancel`. Two unit tests cover the path — graceful local cancel (no signals) and death via `closeCh` (`consumer_pause_test.go` `TestStartPump_ChannelDeath_*`) — but the symmetric death-via-`cancelCh` arm while `paused == true` (the broker firing a `basic.cancel` that races a Pause) is not directly exercised; `startPump` sits at ~61.5% with that arm uncovered, along with `forwardCancelReason` inside that drain.
-
-**Impact:** A regression that dropped the `cancelCh` drain (e.g. checking only `closeCh`) would pass the current suite yet leak in-flight handler contexts on a real broker `basic.cancel` racing a Pause. Test-coverage gap only — current behavior is correct.
-
-**Evidence:** Phase 10 `/ship` test-engineer (T53, 2026-05-31) — Gap 3, Medium / nice-to-have.
-
-**Suggested solution:** Add `TestStartPump_CancelChDeath_ClosesChannelDone_EvenWhenPaused` — paused consumer, send a tag on `cancelCh` then `close(deliveries)`, assert `channelDone` closes AND `forwardCancelReason` delivered the tag to `cancelReasonCh`.
-
-**Prerequisites:** None — uses the existing `startPump` unit harness in `consumer_pause_test.go`.
-
-### LATER-84 — Resume racing a concurrent reconnect on the size-1 `resubCh` has no direct unit test
-
-**Context:** `resubCh` (buffered size 1) is shared by two producers — the reconnect hook and `Resume` — and one consumer (the `runConsume` loop). The concurrency tests (`consumer_pause_test.go` `TestConsumer_Snapshot_ConcurrentWithPauseResume`, `TestConsumer_Pause_Resume_Close_Race`) run with a background drainer that empties `resubCh`, so the *contended size-1 buffer with two producers and the real loop consumer* is exercised only indirectly. The integration `ForceReconnect` test Resumes *after* the reconnect window, not during it. The `openDeliveryCh` invariant — the `(paused, live)` pair is published atomically under `pauseMu` so a racing Resume either re-subscribes the current channel or no-ops — has no direct unit test.
-
-**Impact:** A future change to the reconnect/Resume handoff ordering could introduce a double-subscribe or a "paused alongside a half-replaced channel" state without failing any unit test. Current behavior is correct (verified by `-race` + the integration lane); this is a missing regression guard.
-
-**Evidence:** Phase 10 `/ship` test-engineer (T53, 2026-05-31) — Gap 4, Medium / nice-to-have.
-
-**Suggested solution:** Add `TestConsumer_Resume_RacesReconnect_NoDuplicateSubscribe` — drive `clearPause`/`openDeliveryCh` (override path) concurrently with `Resume` under `-race`, asserting no panic and that the consumer never ends both paused and with a half-replaced channel.
-
-**Prerequisites:** None — uses the existing override-injection harness.
-
-### LATER-85 — No single test pins the Pause-while-handler-in-flight draining contract
-
-**Context:** `InFlightHandlers` counting is covered (`consumer_health_test.go` `TestConsumer_Snapshot_ReportsInFlightAndLastDelivery`) and the `startPump` graceful-cancel test proves `channelDone` stays open across a Pause so handler contexts survive. But no single test combines them into the user-facing draining contract: *Pause issued while a handler is mid-flight, then assert the in-flight handler runs to completion (its context is NOT cancelled) and `InFlightHandlers` drains to 0 before Resume.*
-
-**Impact:** The graceful-drain guarantee (the whole point of Pause for a preStop hook) is only covered piecewise. A regression that cancelled in-flight handler contexts on Pause would not fail any current unit test. Behavior is correct today.
-
-**Evidence:** Phase 10 `/ship` test-engineer (T53, 2026-05-31) — Gap 8, Medium / nice-to-have.
-
-**Suggested solution:** Add `TestConsumer_Pause_LeavesInFlightHandlerToFinish` — block a handler, Pause, close the delivery stream (simulating broker cancel completion), assert the handler's ctx is NOT cancelled and it completes, and `InFlightHandlers` → 0.
-
-**Prerequisites:** None — uses the existing `deliverySubOverride` harness.
-

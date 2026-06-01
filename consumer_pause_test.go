@@ -443,3 +443,193 @@ func TestStartPump_ChannelDeath_ClosesChannelDone_EvenWhenPaused(t *testing.T) {
 	assert.False(t, ok)
 	assert.True(t, doneClosed.Load(), "a genuine channel death must close channelDone even while paused")
 }
+
+// TestStartPump_CancelChDeath_ClosesChannelDone_EvenWhenPaused covers the symmetric
+// cancelCh arm of the pump's !ok drain (LATER-83): when the delivery stream closes
+// while paused AND a broker basic.cancel is buffered on cancelCh, the pump must treat
+// it as a genuine death — forward the cancel reason to cancelReasonCh and close
+// channelDone — not mistake it for a graceful local Pause. A regression that dropped
+// the cancelCh drain (checking only closeCh) would pass the other startPump tests yet
+// leak in-flight handler contexts on a real basic.cancel racing a Pause (T53).
+func TestStartPump_CancelChDeath_ClosesChannelDone_EvenWhenPaused(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	c, err := ConsumerFor[string](conn).Queue("q").Build()
+	require.NoError(t, err)
+	c.paused.Store(true) // paused, but a real basic.cancel races in
+	c.cancelReasonCh = make(chan string, 1)
+
+	deliveries := make(chan amqp091.Delivery)
+	closeCh := make(chan *amqp091.Error, 1)
+	cancelCh := make(chan string, 1)
+	var doneClosed atomic.Bool
+	out := c.startPump(context.Background(), deliveries, closeCh, cancelCh, func() { doneClosed.Store(true) })
+
+	// A broker basic.cancel is buffered, then the delivery stream closes: whichever arm
+	// the pump wins (the main cancelCh case or the !ok drain), the outcome must be the
+	// same — the reason is forwarded and channelDone closes.
+	cancelCh <- "ctag-x"
+	close(deliveries)
+
+	_, ok := <-out
+	assert.False(t, ok, "pump closes out when the delivery stream ends")
+	assert.True(t, doneClosed.Load(), "a broker basic.cancel racing a Pause must close channelDone")
+	select {
+	case reason := <-c.cancelReasonCh:
+		assert.Equal(t, "ctag-x", reason, "the cancel reason must be forwarded to runConsume")
+	default:
+		t.Fatal("the broker cancel reason was not forwarded to cancelReasonCh")
+	}
+}
+
+// TestConsumer_Resume_RacesReconnect_NoDuplicateSubscribe drives a reconnect
+// re-subscribe (openDeliveryCh's override path, which clears the pause under pauseMu —
+// the same critical section that publishes the fresh c.live) concurrently with
+// Pause/Resume and a snapshot reader, under -race (LATER-84). It guards that the
+// (paused, live) handoff on the size-1 resubCh never panics and never lands in the
+// forbidden "paused alongside a half-replaced channel" state — snapshot must never
+// report Active && Paused both true (T53).
+func TestConsumer_Resume_RacesReconnect_NoDuplicateSubscribe(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	fake := &fakeSubChannel{deliveries: make(chan amqp091.Delivery)}
+	c := pausableConsumer(t, fake)
+	// Override path stands in for a reconnect re-subscribe: it clears the pause under
+	// pauseMu without a broker, racing the Resume handoff on the size-1 resubCh.
+	c.deliverySubOverride = &deliverySub{ch: make(chan amqp091.Delivery), done: nil}
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	c.runCtx = runCtx
+	defer cancelRun() // drains any pump Resume spawns before goleak
+
+	// Drain resubCh so a storm of Resume calls never blocks on the size-1 handoff.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for {
+			select {
+			case <-c.resubCh:
+			case <-runCtx.Done():
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			_ = c.Pause(context.Background())
+			_ = c.Resume(context.Background())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			_, _ = c.openDeliveryCh(context.Background()) // reconnect re-subscribe path
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 400; i++ {
+			snap := c.snapshot()
+			assert.False(t, snap.Active && snap.Paused,
+				"Active and Paused must never both be true under a Resume/reconnect race")
+		}
+	}()
+	wg.Wait()
+
+	cancelRun()
+	<-drainDone
+}
+
+// TestConsumer_Pause_LeavesInFlightHandlerToFinish pins the user-facing draining
+// contract end-to-end (LATER-85): a Pause issued while a handler is mid-flight must let
+// that handler run to completion — its context is NOT cancelled — and InFlightHandlers
+// must drain to 0. It wires the REAL pump into the consume loop so a graceful local
+// cancel (Pause closes the delivery stream with no death signal) drives channelDone
+// exactly as in production; a regression that cancelled in-flight handler contexts on
+// Pause would fail here (T53).
+func TestConsumer_Pause_LeavesInFlightHandlerToFinish(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	// HandlerTimeout > 0 selects the goroutine dispatch path, where an erroneous
+	// channelDone close would cancel the handler ctx via the <-chanDone arm.
+	c, err := ConsumerFor[string](conn).Queue("q").Tag("ctag-x").
+		HandlerTimeout(time.Minute).Build()
+	require.NoError(t, err)
+
+	// Build the same plumbing openDeliveryCh would, and feed the pump's output into the
+	// consume loop via the override so channelDone is driven by the real startPump.
+	deliveries := make(chan amqp091.Delivery)
+	closeCh := make(chan *amqp091.Error, 1)
+	cancelCh := make(chan string, 1)
+	channelDone := make(chan struct{})
+	var once sync.Once
+	closeChannelDone := func() { once.Do(func() { close(channelDone) }) }
+	out := c.startPump(context.Background(), deliveries, closeCh, cancelCh, closeChannelDone)
+	c.deliverySubOverride = &deliverySub{ch: out, done: channelDone}
+
+	// Pause needs a live channel to issue the local basic.cancel.
+	fake := &fakeSubChannel{}
+	c.pauseMu.Lock()
+	c.live = &liveSub{ch: fake, closeCh: closeCh, cancelCh: cancelCh, done: channelDone, closeDone: closeChannelDone}
+	c.pauseMu.Unlock()
+
+	// Deterministic proof the loop observed the closed stream (avoids a timing sleep).
+	chClosed := make(chan struct{}, 1)
+	c.testHookChannelClosed = func() {
+		select {
+		case chClosed <- struct{}{}:
+		default:
+		}
+	}
+
+	handlerCtxCh := make(chan context.Context, 1)
+	releaseHandler := make(chan struct{})
+	var handlerCompleted atomic.Bool
+
+	consumeCtx, cancelConsume := context.WithCancel(context.Background())
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = c.Consume(consumeCtx, func(hctx context.Context, _ string) error {
+			handlerCtxCh <- hctx
+			<-releaseHandler
+			handlerCompleted.Store(true)
+			return nil
+		})
+	}()
+
+	// Deliver one message; the handler enters and blocks.
+	deliveries <- amqp091.Delivery{Body: []byte(`"x"`)}
+	hctx := <-handlerCtxCh
+	require.Equal(t, 1, c.snapshot().InFlightHandlers, "the blocked handler is in flight")
+
+	// Pause while the handler is mid-flight; the broker then completes the local
+	// basic.cancel by closing the delivery stream.
+	require.NoError(t, c.Pause(context.Background()))
+	close(deliveries)
+	<-chClosed // the loop has observed the closed stream (graceful path, no death)
+
+	// The in-flight handler must be untouched: its ctx is alive and it has not returned.
+	require.NoError(t, hctx.Err(), "a graceful Pause must NOT cancel an in-flight handler's context")
+	assert.False(t, handlerCompleted.Load(), "the handler must still be running across the Pause")
+	assert.Equal(t, 1, c.snapshot().InFlightHandlers, "the handler stays in flight until it returns")
+
+	// Release the handler; it runs to completion and InFlightHandlers drains to 0.
+	close(releaseHandler)
+	require.Eventually(t, func() bool { return c.snapshot().InFlightHandlers == 0 },
+		2*time.Second, 5*time.Millisecond, "InFlightHandlers must drain to 0 after the handler finishes")
+	assert.True(t, handlerCompleted.Load(), "the in-flight handler ran to completion across the Pause")
+
+	cancelConsume()
+	select {
+	case <-consumeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer did not stop after ctx cancel")
+	}
+}
