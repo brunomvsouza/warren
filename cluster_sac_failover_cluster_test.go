@@ -105,6 +105,12 @@ const (
 // wins the race. Any OTHER error means the failover path misbehaved and must
 // surface. The standby consumer instead stops via a plain context cancel, so it
 // reuses filterClusterCanceled (defined in cluster_quorum_failover_cluster_test.go).
+//
+// ErrConsumerCancelled is deliberately NOT in the tolerated set: a SIGKILLed node
+// cannot send a broker-side basic.cancel, so a consumer-cancel arriving here would
+// mean the broker cancelled our consumer for some OTHER reason (e.g. the queue was
+// deleted out from under us) — a real defect this campaign must surface, not the
+// expected local cancel+close of the dead-node connection.
 func filterSACActiveErr(err error) error {
 	if err == nil ||
 		errors.Is(err, context.Canceled) ||
@@ -184,7 +190,16 @@ func TestClusterSACFailover_OrderedAcrossNodeKill_cluster(t *testing.T) {
 	tracker := newSACOrderTracker(sacNumEvents)
 	allDone := make(chan struct{})
 	var allDoneOnce sync.Once
+	// handoffReached fires once, when the active consumer accepts seq==sacHandoffAt.
+	// Buffered (size 1) with a non-blocking select-default send so the handler never
+	// parks even though only the test goroutine reads it, and a (defensive) repeat
+	// signal is dropped rather than blocking a worker.
 	handoffReached := make(chan struct{}, 1)
+	// probeReady carries the name of whichever consumer handled a readiness probe.
+	// Buffered (size 2) so an active-probe signal not yet drained by awaitSACProbe
+	// cannot block the standby's later probe send (the handler sends non-blocking) —
+	// two is the most distinct probes ever in flight across the single handoff
+	// (one to confirm "active", one to confirm "standby").
 	probeReady := make(chan string, 2)
 	var (
 		violMu     sync.Mutex
@@ -418,6 +433,7 @@ type sacOrderTracker struct {
 	nextWant  int
 	order     []int
 	handledBy map[string]int
+	dupCount  int // at-least-once redeliveries (a seq seen twice across the handoff)
 }
 
 func newSACOrderTracker(n int) *sacOrderTracker {
@@ -431,6 +447,7 @@ func (t *sacOrderTracker) accept(seq int, name string) (sacAcceptResult, int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, ok := t.seen[seq]; ok {
+		t.dupCount++
 		return sacAcceptDuplicate, t.nextWant
 	}
 	if seq != t.nextWant {
@@ -459,6 +476,16 @@ func (t *sacOrderTracker) handledByCount(name string) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.handledBy[name]
+}
+
+// duplicates returns how many deliveries were already-seen sequence numbers — the
+// at-least-once redeliveries the handoff produces (a single in-flight message in
+// T166d, a multi-message in-flight set in the Prefetch(N>1) campaign). Observable
+// across runs so the requeue path's coverage is not silently zero.
+func (t *sacOrderTracker) duplicates() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.dupCount
 }
 
 func (t *sacOrderTracker) verifyContiguous() error {

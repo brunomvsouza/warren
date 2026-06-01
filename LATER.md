@@ -1261,15 +1261,12 @@ TestHealth_channelOpenError/CloseError_wrappedAsReplyCodeSentinel + TestHealth_s
 
 ---
 
-### LATER-87 — Cluster SAC failover campaign only exercises a single in-flight message at the handoff (`Prefetch(1)`)
-
-**Context:** `cluster_sac_failover_cluster_test.go` (T166d) pins both the active and standby consumers to `Concurrency(1)`/`Prefetch(1)`, so at the moment the active consumer's node is SIGKILLed at most **one** message (the seq the handoff is gated on) can be unacked and requeued to the promoted standby. The `sacAcceptDuplicate` branch (`:212`) is therefore exercised for at most one sequence number, and the test never observes the broker requeueing **several** in-flight messages at once.
-
-**Impact:** The production failure mode the headline "publish-order == handler-order" claim most needs to defend — a consumer running `Prefetch(N>1)` that has multiple unacked messages requeued out of their original order at SAC promotion — is not covered. T166d proves the mechanism but only at the narrowest prefetch. A reordering bug that only manifests with a multi-message in-flight set at failover would pass T166d.
-
-**Evidence:** `/ship` test-engineer (T166d, 2026-06-01) — GAP-X1, Medium. Cross-checked by `/ship` code-reviewer (same change) which independently confirmed the single-in-flight scope.
-
-**Suggested solution:** Add a sibling cluster campaign (or a parameterized variant of T166d) with `Prefetch(N>1)`: publish faster than the active consumer acks so several messages sit unacked, SIGKILL mid-batch, and assert `verifyContiguous` still holds across the multi-message requeue (deduped accepted stream still exactly `0..N-1`, ordering preserved). Reuse the existing `sacOrderTracker` and readiness-probe pattern. Optionally record a `duplicates` counter so the requeue path's coverage is observable across runs.
-
-**Prerequisites:** T166b (cluster control toolkit) and T166d (the base SAC campaign) — both exist. Fits the Phase 9.5 cluster reliability lane; can be tackled any time after T166d.
+<!-- LATER-87 resolved by T166i: cluster_sac_failover_multi_cluster_test.go runs the
+active consumer at Prefetch(N>1) — a gated handler acks the prefix in order then parks,
+leaving seq holdAt..prefix-1 unacked; the test polls the management API
+(messages_unacknowledged, newly exposed on QuorumQueueState) until >= a floor, an
+observed broker-side fact proving a multi-message in-flight set before the SIGKILL, then
+asserts the broker redelivers the whole requeued set to the Prefetch(1) standby in order
+(verifyContiguous, deduped 0..N-1). sacOrderTracker.duplicates() makes the at-least-once
+requeue coverage observable. -->
 
