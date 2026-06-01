@@ -3,6 +3,7 @@ package amqptest
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,7 +65,9 @@ func parseQuorumQueueState(body []byte) (QuorumQueueState, error) {
 func fetchQuorumQueueState(client *http.Client, mgmtBase, vhost, queue string) (QuorumQueueState, error) {
 	base, err := url.Parse(mgmtBase)
 	if err != nil {
-		return QuorumQueueState{}, fmt.Errorf("parse management URL: %w", err)
+		// Don't wrap err: net/url echoes the raw input, which would leak any
+		// userinfo credential in a malformed management URL (SPEC §8).
+		return QuorumQueueState{}, errors.New("parse management URL: malformed")
 	}
 	if base.Host == "" {
 		return QuorumQueueState{}, fmt.Errorf("management URL has no host:port")
@@ -137,7 +140,9 @@ func parseRunningNodes(body []byte) (running, total int, err error) {
 func fetchRunningNodes(client *http.Client, mgmtBase string) (running, total int, err error) {
 	base, err := url.Parse(mgmtBase)
 	if err != nil {
-		return 0, 0, fmt.Errorf("parse management URL: %w", err)
+		// Don't wrap err: net/url echoes the raw input, which would leak any
+		// userinfo credential in a malformed management URL (SPEC §8).
+		return 0, 0, errors.New("parse management URL: malformed")
 	}
 	if base.Host == "" {
 		return 0, 0, fmt.Errorf("management URL has no host:port")
@@ -228,7 +233,9 @@ func parseConnectionNodes(body []byte, namePrefix string) ([]ConnNode, error) {
 func fetchConnectionNodes(client *http.Client, mgmtBase, namePrefix string) ([]ConnNode, error) {
 	base, err := url.Parse(mgmtBase)
 	if err != nil {
-		return nil, fmt.Errorf("parse management URL: %w", err)
+		// Don't wrap err: net/url echoes the raw input, which would leak any
+		// userinfo credential in a malformed management URL (SPEC §8).
+		return nil, errors.New("parse management URL: malformed")
 	}
 	if base.Host == "" {
 		return nil, fmt.Errorf("management URL has no host:port")
