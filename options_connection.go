@@ -58,8 +58,9 @@ type connOptions struct {
 	// between 1 and 4095 with ErrInvalidOptions.
 	frameMax uint32
 
-	// dialer is an optional custom net.Conn factory. If nil, the amqp091-go
-	// default (net.DialTimeout with 30 s) is used.
+	// dialer is an optional custom net.Conn factory. If nil, warren installs a
+	// default net.Dialer with an explicit connect timeout and TCP keepalive (T72)
+	// — see defaultNetDialer.
 	dialer func(network, addr string) (net.Conn, error)
 
 	// clientProperties is the AMQP client-properties table sent to the broker
@@ -206,8 +207,21 @@ func WithFrameMax(n uint32) Option {
 	return func(o *connOptions) { o.frameMax = n }
 }
 
-// WithDialer sets a custom net.Conn factory used instead of net.DialTimeout.
-// Useful for testing, proxies, or Unix-socket transports.
+// WithDialer sets a custom net.Conn factory used instead of warren's default
+// keepalive dialer. Useful for testing, proxies, or Unix-socket transports.
+//
+// Half-open-socket hardening (T72 / SRE-09): the default dialer enables TCP
+// keepalive so a write to a dead peer fails promptly rather than blocking up to
+// ConfirmTimeout. For even faster write-side failure on Linux, supply a dialer
+// that sets TCP_USER_TIMEOUT via net.Dialer.Control, e.g.:
+//
+//	WithDialer((&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 15 * time.Second,
+//		Control: func(_, _ string, c syscall.RawConn) error {
+//			return c.Control(func(fd uintptr) {
+//				// TCP_USER_TIMEOUT (Linux): cap how long a write may stay unacked.
+//				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT, 15000)
+//			})
+//		}}).Dial)
 func WithDialer(fn func(network, addr string) (net.Conn, error)) Option {
 	return func(o *connOptions) { o.dialer = fn }
 }

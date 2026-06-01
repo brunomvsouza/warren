@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1046,6 +1047,9 @@ func applyConnDefaults(opts *connOptions) {
 	if opts.reconnectBarrierTimeout <= 0 {
 		opts.reconnectBarrierTimeout = defaultReconnectBarrierTimeout
 	}
+	if opts.dialer == nil {
+		opts.dialer = defaultDialer()
+	}
 	// Populate username/password from URL userinfo when WithAuth was not called,
 	// so AuthenticatedUser() reflects credentials embedded in WithAddr and
 	// dialAMQP does not send PlainAuth with an empty password.
@@ -1058,6 +1062,36 @@ func applyConnDefaults(opts *connOptions) {
 			opts.username = u.User.Username()
 			opts.password, _ = u.User.Password()
 		}
+	}
+}
+
+// Default dialer timing (T72 / R10-17 / SRE-09). AMQP heartbeats cover only
+// read-side partition detection (~2×heartbeat); a WRITE to a half-open socket
+// can block far longer with ConfirmTimeout (30s) as the only backstop. The
+// default dialer enables TCP keepalive so the OS probes a silent peer and fails
+// a pending write promptly. For even faster write-side failure on Linux, set
+// TCP_USER_TIMEOUT via WithDialer + net.Dialer.Control (see WithDialer godoc).
+const (
+	defaultDialTimeout   = 30 * time.Second
+	defaultDialKeepAlive = 15 * time.Second
+)
+
+// defaultNetDialer returns the net.Dialer used when WithDialer is not set. It
+// carries an explicit connect timeout and TCP keepalive (T72).
+func defaultNetDialer() *net.Dialer {
+	return &net.Dialer{
+		Timeout:   defaultDialTimeout,
+		KeepAlive: defaultDialKeepAlive,
+	}
+}
+
+// defaultDialer adapts defaultNetDialer to the amqp091 Config.Dial signature.
+// amqp091 layers TLS over the returned raw connection for amqps:// URLs, so the
+// same keepalive dialer serves plaintext and TLS connections.
+func defaultDialer() func(network, addr string) (net.Conn, error) {
+	d := defaultNetDialer()
+	return func(network, addr string) (net.Conn, error) {
+		return d.Dial(network, addr)
 	}
 }
 
