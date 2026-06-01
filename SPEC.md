@@ -1112,7 +1112,7 @@ func (c *Consumer[M]) Close(ctx context.Context) error  // drains in-flight
 
 // ConsumerHealth is a point-in-time runtime snapshot for liveness/readiness probes.
 type ConsumerHealth struct {
-	Active           bool      // started, not closed, not paused
+	Active           bool      // started, loop not exited, not closed, not paused
 	Paused           bool      // between Pause and Resume
 	LastDeliveryAt   time.Time // receipt time of the most recent delivery (zero if none)
 	InFlightHandlers int       // handler invocations currently executing
@@ -1435,6 +1435,10 @@ passed to `Pause`/`Resume` scopes **only that call** (its cancellation
 aborts the in-progress handshake); the resulting subscription is bound to
 the consumer's lifetime — the `ctx` given to `Consume`/`ConsumeRaw` — so
 cancelling a request-scoped `Resume` ctx never silently stops delivery.
+If a `Resume` ctx is cancelled mid-handshake (after the `basic.consume`
+is issued but before the loop adopts it), `Resume` rolls the subscription
+back with a local `basic.cancel` and stays paused, so the call is a clean
+no-op-retry rather than leaving an orphaned broker subscription.
 
 A TCP reconnect during a pause re-subscribes via the normal reconnect
 barrier and **clears** the pause flag: the consumer is genuinely
@@ -1449,8 +1453,11 @@ liveness check is the gate: on a connection error it returns
 probe. When the connection is healthy it returns a populated
 `*ConsumerHealth`:
 
-- `Active` — started, not closed, not paused (i.e. it is, or should be,
-  receiving deliveries).
+- `Active` — started, the consume loop has not exited, not closed, not
+  paused (i.e. it is receiving deliveries). It flips to `false` when the
+  loop exits for any reason — a ctx cancel, a broker `basic.cancel`
+  (`ErrConsumerCancelled`), or a fatal subscribe error — so a probe wired
+  to `Active` will not keep a silently-dead consumer in rotation.
 - `Paused` — between `Pause` and `Resume`.
 - `LastDeliveryAt` — receipt time of the most recent delivery (the zero
   `Time` if none yet). A `LastDeliveryAt` that stops advancing on a queue
