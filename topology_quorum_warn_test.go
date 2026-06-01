@@ -47,6 +47,19 @@ func TestWarnQuorumDeliveryLimit(t *testing.T) {
 		warnQuorumDeliveryLimit(l, []Queue{quorumWithLimit, classic}, "4.0.0")
 		assert.Empty(t, l.warnings)
 	})
+
+	// The broker version is untrusted (connection.start server-properties). A
+	// version carrying a newline must not forge a second log line — %q escapes it
+	// so the warning stays a single rendered line (review T58, Low).
+	t.Run("malicious broker version is escaped, not interpolated raw", func(t *testing.T) {
+		l := &recordingLogger{}
+		warnQuorumDeliveryLimit(l, []Queue{quorumNoLimit}, "4.0\nFATAL injected")
+		require.Len(t, l.warnings, 1)
+		assert.NotContains(t, l.warnings[0], "4.0\nFATAL injected",
+			"a raw newline in the broker version must be escaped, not interpolated verbatim")
+		assert.Contains(t, l.warnings[0], `4.0\nFATAL injected`,
+			"%q-escaped version preserves the content for diagnostics with the newline neutralised")
+	})
 }
 
 // TestParseBrokerMajor covers the version-string parsing used to pick the

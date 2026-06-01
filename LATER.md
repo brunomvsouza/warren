@@ -1253,6 +1253,18 @@ dependency for the doc reconciliation itself.
 
 **Prerequisites:** A future configurable-DLQ-name task (does not yet exist). No code dependency today.
 
+### LATER-87 — Per-message Prometheus `WithLabelValues` lookups on the consumer hot path
+
+**Context:** T71 added `ConsumerInFlightAdd(queue, ±1)` around every dispatch (`consumer.go`) and `RecordRedelivered(queue)` on every redelivered receipt. The Prometheus impl resolves these via `m.inFlight.WithLabelValues(queue)` / `m.redelivered.WithLabelValues(queue)` on each call (`metrics/prometheus.go`), each a label-hash + map lookup. Together with the pre-existing `InFlightBytesAdd` pair, the per-message vec-lookup count roughly doubled. The `{queue}` label is fixed for the life of a `Consumer[M]`.
+
+**Impact:** Extra hash+map lookups per delivery — negligible at typical loads, but measurable approaching the documented ~50k msg/s single-connection ceiling. Not a correctness issue; the `NoOp` default (users without Prometheus) allocates nothing and is unaffected.
+
+**Evidence:** Phase 11 review (security-auditor / performance lens, 2026-06-01) — Suggestion.
+
+**Suggested solution:** Resolve the per-`{queue}` concrete `prometheus.Gauge`/`prometheus.Counter` handles once when the consumer is built (or memoize them in the Prometheus impl keyed by queue) and call `.Add`/`.Inc` directly on the cached handle, eliminating the per-message `WithLabelValues`. This needs either a small `metrics`-package API to expose handle resolution, or internal memoization in the Prometheus collectors — hence deferred rather than done inline.
+
+**Prerequisites:** None hard; coordinate with any future `metrics` interface revision (e.g. T125 embeddable-NoOp) so the handle-caching shape lands once.
+
 <!-- LATER-86 resolved: managedConn.health now routes the probe channel open through
 openChannel (the chanFactory seam) and classifies both the open and close errors via
 wrapAMQPError("warren: health: %w", …), so Consumer.Health / Connection.Health errors are

@@ -207,6 +207,8 @@ func (mc *managedConn) openPublisherEntry(poolSize int, onReturn func(amqp091.Re
 		returnTagMap: new(sync.Map),
 	}
 
+	// done is ignored in production: the demux goroutine ends when the channel's
+	// confirmCh closes (on entry.ch.Close()); only tests await done. See godoc.
 	_ = startConfirmDemux(ch, tracker, entry.returnTagMap, onReturn, buf)
 
 	return entry, nil
