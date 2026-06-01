@@ -29,6 +29,7 @@ func (m *reconnectSpyMetrics) RecordReconnect(_ string) { m.reconnects.Add(1) }
 // clears returns ErrReconnecting at the configured cap instead of stalling
 // forever behind a half-alive broker.
 func TestWaitBarrier_capReturnsErrReconnecting(t *testing.T) {
+	defer goleak.VerifyNone(t)
 	mc := newBareManaged(t)
 	mc.opts.reconnectBarrierTimeout = 100 * time.Millisecond
 
@@ -51,6 +52,7 @@ func TestWaitBarrier_capReturnsErrReconnecting(t *testing.T) {
 // TestWaitBarrier_clearsBeforeCap confirms a barrier that clears before the cap
 // returns nil (no spurious ErrReconnecting): the cap is a ceiling, not a delay.
 func TestWaitBarrier_clearsBeforeCap(t *testing.T) {
+	defer goleak.VerifyNone(t)
 	mc := newBareManaged(t)
 	mc.opts.reconnectBarrierTimeout = 2 * time.Second
 

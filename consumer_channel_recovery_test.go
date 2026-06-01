@@ -2,6 +2,7 @@ package warren
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -90,4 +91,95 @@ func TestConsumer_channelOnlyDeath_selfHeals_andIncrementsMetric(t *testing.T) {
 	cancel()
 	close(second.ch)
 	<-consumerDone
+}
+
+// TestRecoverDeliveryChannel_churnGuard_enforcesFloor proves the T61 churn guard
+// actually sleeps the floor when the channel is flapping. recoverDeliveryChannel
+// only imposes channelRecoverInitialBackoff before reopening if a previous reopen
+// was within channelRecoverMaxBackoff (the "recent" horizon) — without this floor a
+// broker that resubscribes then drops without basic.cancel spins the recovery loop
+// at broker-RTT cadence (<1ms). The only T61 test before this one never set
+// lastChannelReopen, so the floor branch (consumer.go ~1198) was dead in tests: a
+// regression deleting the guard (re-introducing the spin storm) would stay green.
+func TestRecoverDeliveryChannel_churnGuard_enforcesFloor(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
+	require.NoError(t, err)
+
+	// The factory always succeeds immediately, so the ONLY possible source of delay
+	// is the churn-guard floor sleep at the top of recoverDeliveryChannel.
+	consumer.deliverySubFactory = func(_ context.Context) (deliverySub, error) {
+		return deliverySub{ch: make(chan amqp091.Delivery), done: make(chan struct{})}, nil
+	}
+
+	resubCh := make(chan deliverySub) // empty: no hook replacement competes
+	var wg sync.WaitGroup
+
+	// A recent reopen marks the channel as flapping → the guard must impose the floor.
+	consumer.lastChannelReopen = time.Now()
+	start := time.Now()
+	_, _, action := consumer.recoverDeliveryChannel(context.Background(), &wg, resubCh)
+	withGuard := time.Since(start)
+	require.Equal(t, recoverResubscribed, action)
+	assert.GreaterOrEqual(t, withGuard, channelRecoverInitialBackoff-5*time.Millisecond,
+		"a flapping channel (recent reopen) must wait at least the churn-guard floor before reopening")
+
+	// No recent reopen → the guard is skipped and recovery is immediate (the common
+	// single-reconnect case is never penalised by the floor).
+	consumer.lastChannelReopen = time.Time{}
+	start = time.Now()
+	_, _, action = consumer.recoverDeliveryChannel(context.Background(), &wg, resubCh)
+	noGuard := time.Since(start)
+	require.Equal(t, recoverResubscribed, action)
+	assert.Less(t, noGuard, channelRecoverInitialBackoff,
+		"with no recent reopen the floor must not be imposed")
+}
+
+// TestRecoverDeliveryChannel_socketDown_yieldsToHook proves the channel-vs-TCP
+// arbitration at the heart of T61: when the direct reopen fails with
+// ErrNotConnected (the raw socket is nil because a TCP reconnect is in flight),
+// recoverDeliveryChannel must NOT stop the consumer — it backs off and lets the
+// reconnect supervisor hook (resubCh) own recovery. Before this test only the
+// socket-up self-heal path was exercised; a regression turning the ErrNotConnected
+// branch into a recoverStop (killing the consumer on a transient socket loss) would
+// have shipped green.
+func TestRecoverDeliveryChannel_socketDown_yieldsToHook(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	consumer, err := ConsumerFor[string](conn).Queue("testq").Build()
+	require.NoError(t, err)
+
+	// The direct reopen always fails with ErrNotConnected — i.e. a TCP reconnect is
+	// in flight and the raw socket is nil.
+	var openCount atomic.Int64
+	factoryCalled := make(chan struct{})
+	var once sync.Once
+	consumer.deliverySubFactory = func(_ context.Context) (deliverySub, error) {
+		openCount.Add(1)
+		once.Do(func() { close(factoryCalled) })
+		return deliverySub{}, ErrNotConnected
+	}
+
+	hookCh := make(chan amqp091.Delivery)
+	resubCh := make(chan deliverySub)
+	go func() {
+		<-factoryCalled // ensure the direct reopen was attempted and failed first
+		resubCh <- deliverySub{ch: hookCh, done: make(chan struct{})}
+	}()
+
+	var wg sync.WaitGroup
+	sub, reason, action := consumer.recoverDeliveryChannel(context.Background(), &wg, resubCh)
+
+	require.Equal(t, recoverResubscribed, action,
+		"a socket-down direct reopen must yield to the reconnect hook, not stop the consumer")
+	assert.Empty(t, reason)
+	assert.GreaterOrEqual(t, openCount.Load(), int64(1),
+		"the direct reopen must be attempted before deferring to the hook")
+	// The factory never returns a usable sub, so a recoverResubscribed result can
+	// only have come from the hook channel — prove it is the hook's sub, not a
+	// self-healed one.
+	assert.Equal(t, hookCh, sub.ch, "the returned subscription must be the hook-delivered one")
 }
