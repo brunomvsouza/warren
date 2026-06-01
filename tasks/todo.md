@@ -1513,16 +1513,15 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `connection.go`, `consumer.go`, `batch_consumer.go`, `metrics/`, SPEC §6.1/§6.4.
 - **Deps:** T18, T22, T84 (G2). **(R10-15, P2.5)** — *pulled into Phase 13 (v0.1).*
 
-### [ ] T71 — Observability gaps: pool-wait, in-flight, redelivered [P2] · M
+### [x] T71 — Observability gaps: pool-wait, in-flight, redelivered [P2] · M
 - **Acceptance:**
-  - [ ] Channel-pool acquire-wait/saturation metric exposed.
-  - [ ] `consumer_in_flight{queue}` gauge (active handlers) exposed.
-  - [ ] `consumer_redelivered_total{queue}` counter increments on `Redelivered()==true` deliveries.
-  - [ ] **Lens-02 (DS-14):** `consumer_redelivered_total` is the redelivery-class duplicate-budget signal `publisher_retry_total` does not cover — required for the §1 "duplicate budget never invisible" claim to hold for the dominant duplicate source.
-  - [ ] **Lens-05 (SRE-05):** this is the single most important on-call *leading* indicator — without it a brewing poison storm / pool saturation is invisible until it is an outage; assert the redelivery ratio / pool-acquire-wait p99 are alertable.
-  - [ ] **Lens-06 (GA-06):** these new gauges/counters add methods to the user-implementable `metrics.*` interfaces — they land behind the embeddable `metrics.NoOp` base (T125) so adding interface methods stays forward-compatible for external adapters, before rc1.
-  - [ ] **Lens-13 (LT-07/08):** measurement under load: the pool-wait / `consumer_in_flight` / `consumer_redelivered_total` saturation metrics this task adds must land **before** the spike/stress/soak campaigns (T167/T168) can observe the saturation they provoke (LT-08 — a hard dependency of those campaigns); and the default `WithLatencyBuckets` top bucket (5000 ms, §6.9) clips the load tail (`ConfirmTimeout` 30s + the R10-8 barrier cap), so the load reports override the buckets (the override is owned by T169) — coordinate the override range with this metric set (LT-07).
-- **Verify:** Unit/integration assert each metric moves under the relevant condition (pool saturation, busy handlers, a forced redelivery).
+  - [x] Channel-pool acquire-wait metric exposed (`publisher_channel_pool_wait_seconds{exchange}`, recorded only on saturation via `publisherConnPool.onAcquireWait`).
+  - [x] `consumer_in_flight{queue}` gauge (active handlers) exposed (`ConsumerInFlightAdd` ±1 around dispatch).
+  - [x] `consumer_redelivered_total{queue}` counter increments on `Redelivered()==true` deliveries (`RecordRedelivered` on receipt).
+  - [x] **Lens-02 (DS-14) / Lens-05 (SRE-05):** redelivery is the dominant duplicate-budget signal; in-flight + pool-wait are the leading saturation indicators.
+  - [x] **Lens-06 (GA-06):** new methods on `PublisherMetrics`/`ConsumerMetrics` + `NoOp*` + Prometheus (the embeddable-NoOp roadmap is T125).
+  - [x] **Lens-13 (LT-07/08):** SPEC §6.9 notes the load campaigns (T167/T168) depend on these landing first (LT-08) and the `WithLatencyBuckets` top-bucket override is owned by T169 (LT-07).
+- **Verify:** Unit `TestPublisherConnPool_acquireWait_recordedOnSaturation` (no wait on a free slot; positive wait when saturated) and `TestConsumer_redeliveredAndInFlight_metrics` (redelivered increments only on a redelivered delivery; in-flight rises then returns to zero).
 - **Files:** `metrics/`, `channelpool.go`, `consumer.go`.
 - **Deps:** T04, T08, T18. **(R10-16, P2.6)** — coordinates with T50/T52/T53; *pulled into Phase 13 (v0.1).*
 

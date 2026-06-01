@@ -39,9 +39,11 @@ func (s *spyConsumerMetrics) RecordHandler(_ string, _ string, outcome string, _
 	defer s.mu.Unlock()
 	s.handlerOutcomes = append(s.handlerOutcomes, outcome)
 }
-func (s *spyConsumerMetrics) RecordReplierDropNoDLX(_ string)    {}
-func (s *spyConsumerMetrics) RecordConsumerDropNoDLX(_ string)   {}
-func (s *spyConsumerMetrics) RecordShutdownRequeued(_ string)    {}
+func (s *spyConsumerMetrics) RecordReplierDropNoDLX(_ string)      {}
+func (s *spyConsumerMetrics) RecordConsumerDropNoDLX(_ string)     {}
+func (s *spyConsumerMetrics) RecordShutdownRequeued(_ string)      {}
+func (s *spyConsumerMetrics) RecordRedelivered(_ string)           {}
+func (s *spyConsumerMetrics) ConsumerInFlightAdd(_ string, _ int64) {}
 func (s *spyConsumerMetrics) RecordCancelled(_, _ string)        {}
 func (s *spyConsumerMetrics) RecordMaxRedeliveries(_, _ string)  {}
 func (s *spyConsumerMetrics) InFlightBytesAdd(_ string, _ int64) {}

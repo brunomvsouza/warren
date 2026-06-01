@@ -1105,6 +1105,11 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 			// Stamp the receipt time for ConsumerHealth.LastDeliveryAt (T53) the moment
 			// a delivery arrives, before any decode/dispatch work.
 			c.lastDeliveryNanos.Store(time.Now().UnixNano())
+			// consumer_redelivered_total (T71 / DS-14): the dominant duplicate-budget
+			// signal that publisher_retry_total does not cover. Counted on receipt.
+			if d.Redelivered {
+				c.cm.RecordRedelivered(c.queue)
+			}
 			sem <- struct{}{}
 			// In-flight memory guardrail (T50): reserve this body's bytes before
 			// dispatching, blocking the delivery pump (and thus prefetch refill) when
@@ -1121,12 +1126,14 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 			c.cm.InFlightBytesAdd(c.queue, bodyBytes)
 			wg.Add(1)
 			c.inFlight.Add(1)
+			c.cm.ConsumerInFlightAdd(c.queue, 1) // consumer_in_flight gauge (T71)
 			// Capture the current channel's done signal so in-flight handlers
 			// from this channel are cancelled if this channel closes mid-handler.
 			chanDone := cur.done
 			go func(raw amqp091.Delivery, chanDone <-chan struct{}, n int64) {
 				defer wg.Done()
 				defer c.inFlight.Add(-1)
+				defer c.cm.ConsumerInFlightAdd(c.queue, -1)
 				defer func() { <-sem }()
 				defer func() {
 					c.cm.InFlightBytesAdd(c.queue, -n)

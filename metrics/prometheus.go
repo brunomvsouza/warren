@@ -89,6 +89,7 @@ type PrometheusPublisherMetrics struct {
 	publishSeconds   *prometheus.HistogramVec
 	retryTotal       *prometheus.CounterVec
 	rateLimitedTotal *prometheus.CounterVec
+	channelPoolWait  *prometheus.HistogramVec
 	labelRoutingKey  bool
 	labelMessageType bool
 }
@@ -138,7 +139,12 @@ func NewPrometheusPublisherMetrics(reg prometheus.Registerer, buckets []float64,
 		Name: "publisher_rate_limited_total",
 		Help: "Total number of AMQP publishes throttled by the local rate limiter.",
 	}, []string{"exchange"})
-	for _, c := range []prometheus.Collector{m.inFlight, m.publishSeconds, m.retryTotal, m.rateLimitedTotal} {
+	m.channelPoolWait = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "publisher_channel_pool_wait_seconds",
+		Help:    "Duration a publish waited to acquire a channel from the per-connection pool.",
+		Buckets: buckets,
+	}, []string{"exchange"})
+	for _, c := range []prometheus.Collector{m.inFlight, m.publishSeconds, m.retryTotal, m.rateLimitedTotal, m.channelPoolWait} {
 		if err := reg.Register(c); err != nil {
 			return nil, err
 		}
@@ -174,6 +180,11 @@ func (m *PrometheusPublisherMetrics) RecordRetry(exchange, reason string) {
 	m.retryTotal.WithLabelValues(exchange, reason).Inc()
 }
 
+// RecordChannelPoolWait observes the channel-pool acquire-wait for the exchange.
+func (m *PrometheusPublisherMetrics) RecordChannelPoolWait(exchange string, d time.Duration) {
+	m.channelPoolWait.WithLabelValues(exchange).Observe(d.Seconds())
+}
+
 // RecordRateLimited increments publisher_rate_limited_total for the given exchange.
 func (m *PrometheusPublisherMetrics) RecordRateLimited(exchange string) {
 	m.rateLimitedTotal.WithLabelValues(exchange).Inc()
@@ -192,6 +203,8 @@ func (m *PrometheusPublisherMetrics) RecordRateLimited(exchange string) {
 //   - replier_drop_no_dlx_total{queue}
 //   - consumer_drop_no_dlx_total{queue}
 //   - consumer_shutdown_requeued_total{queue}
+//   - consumer_redelivered_total{queue}
+//   - consumer_in_flight{queue}
 //   - consumer_inflight_bytes{queue}
 //   - queue_depth{queue}
 //   - dlq_depth{dlq}
@@ -205,6 +218,8 @@ type PrometheusConsumerMetrics struct {
 	replierDropNoDLX     *prometheus.CounterVec
 	consumerDropNoDLX    *prometheus.CounterVec
 	shutdownRequeued     *prometheus.CounterVec
+	redeliveredTotal     *prometheus.CounterVec
+	inFlight             *prometheus.GaugeVec
 	inFlightBytes        *prometheus.GaugeVec
 	queueDepth           *prometheus.GaugeVec
 	dlqDepth             *prometheus.GaugeVec
@@ -283,6 +298,14 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64, 
 			Name: "consumer_shutdown_requeued_total",
 			Help: "Total number of prefetched-but-undispatched deliveries Nack(requeue=true)'d at consumer shutdown.",
 		}, []string{"queue"}),
+		redeliveredTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "consumer_redelivered_total",
+			Help: "Total number of deliveries received with the redelivered flag set (the dominant duplicate-budget signal).",
+		}, []string{"queue"}),
+		inFlight: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "consumer_in_flight",
+			Help: "Current number of consumer handlers executing.",
+		}, []string{"queue"}),
 		inFlightBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "consumer_inflight_bytes",
 			Help: "Current sum of in-flight message body sizes held by running handlers.",
@@ -306,6 +329,8 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64, 
 		m.replierDropNoDLX,
 		m.consumerDropNoDLX,
 		m.shutdownRequeued,
+		m.redeliveredTotal,
+		m.inFlight,
 		m.inFlightBytes,
 		m.queueDepth,
 		m.dlqDepth,
@@ -369,6 +394,16 @@ func (m *PrometheusConsumerMetrics) RecordConsumerDropNoDLX(queue string) {
 // RecordShutdownRequeued increments consumer_shutdown_requeued_total for the given queue.
 func (m *PrometheusConsumerMetrics) RecordShutdownRequeued(queue string) {
 	m.shutdownRequeued.WithLabelValues(queue).Inc()
+}
+
+// RecordRedelivered increments consumer_redelivered_total for the given queue.
+func (m *PrometheusConsumerMetrics) RecordRedelivered(queue string) {
+	m.redeliveredTotal.WithLabelValues(queue).Inc()
+}
+
+// ConsumerInFlightAdd adjusts the consumer_in_flight gauge for the given queue by delta.
+func (m *PrometheusConsumerMetrics) ConsumerInFlightAdd(queue string, delta int64) {
+	m.inFlight.WithLabelValues(queue).Add(float64(delta))
 }
 
 // InFlightBytesAdd adjusts the consumer_inflight_bytes gauge for the given queue by delta.
