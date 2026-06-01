@@ -64,6 +64,31 @@ func TestTopology_expand_autoDLQ_customBounds(t *testing.T) {
 	assert.Equal(t, string(OverflowRejectPublish), dlq.Args["x-overflow"])
 }
 
+// validate() must reject an unknown DLQOverflow up front (review T65): it is
+// written straight into the auto-DLQ's x-overflow, so an unvalidated typo would
+// otherwise surface only as a late broker PRECONDITION_FAILED at declare time.
+func TestTopology_validate_rejectsUnknownDLQOverflow(t *testing.T) {
+	t.Run("unknown DLQOverflow is rejected", func(t *testing.T) {
+		topo := &Topology{
+			Queues:      []Queue{{Name: "orders", Durable: true}},
+			DeadLetters: []DeadLetter{{Source: "orders", DLQOverflow: OverflowPolicy("drop_head")}},
+		}
+		err := topo.validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidOptions)
+	})
+
+	t.Run("empty and valid DLQOverflow pass", func(t *testing.T) {
+		for _, p := range []OverflowPolicy{"", OverflowDropHead, OverflowRejectPublish} {
+			topo := &Topology{
+				Queues:      []Queue{{Name: "orders", Durable: true}},
+				DeadLetters: []DeadLetter{{Source: "orders", DLQOverflow: p}},
+			}
+			assert.NoError(t, topo.validate(), "DLQOverflow %q must validate", p)
+		}
+	})
+}
+
 // An explicitly-declared DLQ wins: the auto-bounds are NOT injected over a
 // user-declared <source>.dlq (the !exists guard).
 func TestTopology_expand_explicitDLQ_keepsUserArgs(t *testing.T) {
