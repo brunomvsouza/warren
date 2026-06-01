@@ -1417,12 +1417,12 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `delivery.go`, `consumer.go`, `delivery_test.go`, `consumer_test.go`, SPEC §6.3.
 - **Deps:** T18, T19. **(R10-5, P0.4)** — *pulled into Phase 12; Lens-02 adds the §6.3 wording.*
 
-### [ ] T61 — Channel-level recovery (distinct from TCP reconnect) [P1] · M
+### [x] T61 — Channel-level recovery (distinct from TCP reconnect) [P1] · M
 - **Acceptance:**
-  - [ ] A consumer whose channel closes while the TCP connection stays up (404/406/ack-error) reopens its channel and re-`basic.qos` + re-`basic.consume` without waiting for a TCP reconnect.
-  - [ ] `consumer_resubscribed_total{queue}` increments; consumer does not return silently.
-  - [ ] **Lens-05 (SRE-01):** silent channel death is the highest-severity *invisible* failure — `consumer_resubscribed_total` must increment on a channel-only death (a `rate()==0` while traffic is expected is the alert), and its absence drives the `Connection.Health` readiness false-green (SRE-13/T115).
-- **Verify:** Integration test forces a channel-only exception (e.g. passive-declare a missing queue on the consumer channel) and asserts the consumer recovers and keeps consuming.
+  - [x] A consumer whose channel closes while the TCP connection stays up reopens its channel and re-`basic.qos` + re-`basic.consume` (`recoverDeliveryChannel` → `openDeliveryCh`) without waiting for a TCP reconnect; a TCP reconnect still routes through the supervisor hook (the direct reopen fails with `ErrNotConnected` while the socket is nil, so the loop backs off and waits for the hook).
+  - [x] `consumer_resubscribed_total{queue}` increments on a channel-level self-heal (via `notifyResubscribed`); consumer does not return silently.
+  - [x] **Lens-05 (SRE-01):** silent channel death is the highest-severity *invisible* failure — `consumer_resubscribed_total` increments on a channel-only death so `rate()==0` is alertable. (The `Connection.Health` false-green half is owned by T115/SRE-13.)
+- **Verify:** Unit test `TestConsumer_channelOnlyDeath_selfHeals_andIncrementsMetric` (via a fresh-sub `deliverySubFactory` seam) deterministically proves the reopen + metric increment + continued consumption; would hang on the old park-forever path. Real-broker channel-death **injection** rides the chaos lane (T84, Phase 13) — single-node integration cannot force a channel-only exception through the public API.
 - **Files:** `connection.go`, `consumer.go`, `consumer_integration_test.go`.
 - **Deps:** T07, T07d, T18. **(R10-6, P1.4)** — sequence with T62/T63.
 

@@ -328,6 +328,12 @@ type Consumer[M any] struct {
 	// returns it directly, including the done channel for channel-close detection tests.
 	deliverySubOverride *deliverySub
 
+	// deliverySubFactory is a test-injection hook: when non-nil, openDeliveryCh calls
+	// it on every (re)open so a test can return a FRESH deliverySub per call. Unlike
+	// deliverySubOverride (a single fixed sub) this exercises the channel-level
+	// self-heal loop (T61), where each recovery must produce a new live channel.
+	deliverySubFactory func(context.Context) (deliverySub, error)
+
 	// healthCheckOverride is a test-injection hook for Health's connection-liveness
 	// gate: when non-nil, Health calls it instead of c.mc.health. The real gate opens
 	// a broker channel, so the happy path (gate passes -> return the snapshot) is
@@ -1018,16 +1024,28 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 				if c.testHookChannelClosed != nil {
 					c.testHookChannelClosed()
 				}
-				// AMQP channel closed; wait for re-subscribe, a pending basic.cancel,
-				// or ctx cancel. basic.cancel also closes the delivery stream, so the
-				// cancel reason may already be buffered when this !ok fires.
-				select {
-				case <-ctx.Done():
-					wg.Wait()
+				// The delivery channel closed. Two distinct failure modes converge here:
+				//
+				//   - TCP reconnect: the supervisor closed every channel on this socket
+				//     and will re-open + redeclare + re-subscribe via the reconnect hook,
+				//     delivering a replacement on resubCh.
+				//   - Channel-only death (404/406/ack-error with the TCP socket still up):
+				//     the supervisor does NOT reconnect, so the hook never fires. Without
+				//     channel-level recovery the consumer would park here forever — a
+				//     silent death (SRE-01). We self-heal by reopening the channel
+				//     directly and re-issuing basic.qos + basic.consume (T61).
+				//
+				// recoverDeliveryChannel arbitrates: it prefers a hook-delivered
+				// replacement, otherwise reopens the channel itself when the TCP socket
+				// is up. A pending basic.cancel or ctx cancel ends the consumer normally.
+				newCur, reason, action := c.recoverDeliveryChannel(ctx, &wg, resubCh)
+				switch action {
+				case recoverStop:
 					return nil
-				case reason := <-c.cancelReasonCh:
+				case recoverCancelled:
 					return c.handleBrokerCancel(&wg, reason)
-				case cur = <-resubCh:
+				default: // recoverResubscribed
+					cur = newCur
 				}
 				continue
 			}
@@ -1072,6 +1090,79 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 //
 // On every call, a fresh redeliveryCounter (counter B state) is installed atomically
 // so that channel close automatically resets all in-process redelivery counts.
+// recoverAction is the outcome of recoverDeliveryChannel.
+type recoverAction int
+
+const (
+	// recoverResubscribed: a fresh subscription is ready (in the returned sub).
+	recoverResubscribed recoverAction = iota
+	// recoverStop: ctx was cancelled — the consumer should return nil.
+	recoverCancelled // broker basic.cancel arrived — caller handles via handleBrokerCancel.
+	recoverStop
+)
+
+// channelRecoverInitialBackoff / channelRecoverMaxBackoff bound the retry cadence
+// of the channel-level self-heal loop when the socket is mid-TCP-reconnect (so a
+// direct reopen fails) and no hook replacement has arrived yet.
+const (
+	channelRecoverInitialBackoff = 50 * time.Millisecond
+	channelRecoverMaxBackoff     = 2 * time.Second
+)
+
+// recoverDeliveryChannel recovers from a delivery-channel close (T61). It prefers
+// a replacement delivered by the TCP-reconnect supervisor hook (resubCh); failing
+// that, it reopens the channel directly — the channel-only-death path the hook
+// never covers because no TCP reconnect occurs. A direct reopen fails with
+// ErrNotConnected while a TCP reconnect is in flight (the raw socket is nil); in
+// that window the loop backs off and waits for the hook. A pending basic.cancel
+// or ctx cancel ends the consumer.
+//
+// On a successful channel-level reopen it increments consumer_resubscribed_total
+// (via notifyResubscribed) so a rate()==0 while traffic is expected is alertable —
+// silent channel death is the highest-severity invisible failure (SRE-01).
+func (c *Consumer[M]) recoverDeliveryChannel(ctx context.Context, wg *sync.WaitGroup, resubCh <-chan deliverySub) (deliverySub, string, recoverAction) {
+	backoff := channelRecoverInitialBackoff
+	for {
+		// A hook-delivered replacement (TCP reconnect) or a terminal signal wins
+		// immediately if already pending.
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return deliverySub{}, "", recoverStop
+		case reason := <-c.cancelReasonCh:
+			return deliverySub{}, reason, recoverCancelled
+		case sub := <-resubCh:
+			return sub, "", recoverResubscribed
+		default:
+		}
+
+		// Channel-level self-heal: reopen the channel directly. Succeeds when the
+		// TCP socket is up (channel-only death); ErrNotConnected when a TCP
+		// reconnect is in flight, in which case the hook owns recovery.
+		sub, err := c.openDeliveryCh(ctx)
+		if err == nil {
+			notifyResubscribed(c.mc, c.cm, c.queue)
+			return sub, "", recoverResubscribed
+		}
+
+		// Socket down / reconnecting: wait for the hook (or a terminal signal),
+		// bounded so we re-attempt the direct reopen if no hook fires.
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return deliverySub{}, "", recoverStop
+		case reason := <-c.cancelReasonCh:
+			return deliverySub{}, reason, recoverCancelled
+		case sub := <-resubCh:
+			return sub, "", recoverResubscribed
+		case <-time.After(backoff):
+			if backoff < channelRecoverMaxBackoff {
+				backoff = min(backoff*2, channelRecoverMaxBackoff)
+			}
+		}
+	}
+}
+
 func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 	// Rotate counter B state regardless of the channel source (real or injected).
 	// Installing a fresh redeliveryCounter atomically ensures "channel close resets
@@ -1089,6 +1180,10 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 	// subsequent Resume a harmless no-op instead of a duplicate basic.consume with the
 	// same consumer tag on a channel that already re-subscribed (T53).
 
+	if c.deliverySubFactory != nil {
+		c.clearPause()
+		return c.deliverySubFactory(ctx)
+	}
 	if c.deliverySubOverride != nil {
 		c.clearPause()
 		return *c.deliverySubOverride, nil
