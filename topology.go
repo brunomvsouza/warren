@@ -680,8 +680,28 @@ func (t *Topology) validate() error {
 		if q.MaxPriority > 0 && q.Type != "" && q.Type != QueueTypeClassic {
 			return fmt.Errorf("%w: Queue %q: MaxPriority requires Type=QueueTypeClassic", ErrInvalidOptions, q.Name)
 		}
+		// Quorum-queue structural validation (T64 / R10-9). RabbitMQ requires a
+		// quorum queue to be Durable and rejects Exclusive / AutoDelete; declaring
+		// any of these otherwise closes the channel with PRECONDITION_FAILED at
+		// declare time. (x-max-priority on quorum is already rejected above: the
+		// raw Args["x-max-priority"] key by the managed-args guard, and the
+		// MaxPriority field by the Type=Classic requirement.)
+		if q.Type == QueueTypeQuorum {
+			if !q.Durable {
+				return fmt.Errorf("%w: Queue %q: quorum queues must be Durable", ErrInvalidOptions, q.Name)
+			}
+			if q.Exclusive {
+				return fmt.Errorf("%w: Queue %q: Exclusive is not supported on quorum queues", ErrInvalidOptions, q.Name)
+			}
+			if q.AutoDelete {
+				return fmt.Errorf("%w: Queue %q: AutoDelete is not supported on quorum queues", ErrInvalidOptions, q.Name)
+			}
+		}
 		if q.Type == QueueTypeStream {
 			streamQueues[q.Name] = struct{}{}
+			if !q.Durable {
+				return fmt.Errorf("%w: Queue %q: stream queues must be Durable", ErrInvalidOptions, q.Name)
+			}
 			if q.SingleActiveConsumer {
 				return fmt.Errorf("%w: Queue %q: SingleActiveConsumer is not supported on stream queues", ErrInvalidOptions, q.Name)
 			}

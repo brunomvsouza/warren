@@ -1960,9 +1960,20 @@ Behaviour:
     ignores it on classic; reject loudly).
   - `SingleActiveConsumer=true` on a stream queue (broker rejects
     with `INTERNAL_ERROR`; reject locally).
-  - `Type=QueueTypeStream` combined with `Exclusive=true`,
-    `AutoDelete=true`, or `MaxPriority` set (stream queues do not
-    support these).
+  - `Type=QueueTypeQuorum` that is **not `Durable`**, or combined with
+    `Exclusive=true` / `AutoDelete=true` (RabbitMQ requires quorum
+    queues to be durable and forbids exclusive/auto-delete; otherwise
+    the broker closes the channel with `PRECONDITION_FAILED` at
+    declare). `x-max-priority` on a quorum queue is rejected via the two
+    checks below (the `MaxPriority` field and the raw arg).
+  - `MaxPriority > 0` (the `Queue.MaxPriority` struct field — it **does**
+    exist) on any non-classic queue type, and a raw
+    `Args["x-max-priority"]` on any queue (callers must use the
+    `MaxPriority` field, which the broker honours only on classic
+    queues).
+  - `Type=QueueTypeStream` that is **not `Durable`**, or combined with
+    `Exclusive=true`, `AutoDelete=true`, or `MaxPriority` set (stream
+    queues must be durable and do not support these).
   - `Type=QueueTypeStream` with a `DeadLetter` whose source is
     this queue (streams do not dead-letter; the DLX args are
     ignored by the broker).
@@ -3546,9 +3557,12 @@ fresh spec amendment.
   (T64).** `Topology.validate()` validates streams but not quorum
   queues, which the broker requires to be `Durable` and forbids from
   being `Exclusive`/`AutoDelete` or carrying `x-max-priority`. Reject
-  these locally as `ErrInvalidOptions`. Also reconcile the validation's
-  reference to "MaxPriority" (no such struct field) to check
-  `Args["x-max-priority"]`.
+  these locally as `ErrInvalidOptions`. **RMQ-20 reconciliation:** the
+  `Queue.MaxPriority` struct field **does** exist (the old "no such
+  struct field" note is stale and retired); `x-max-priority` on a quorum
+  queue is rejected both via the `MaxPriority` field (non-classic types
+  are rejected) and via the managed-args guard on a raw
+  `Args["x-max-priority"]`. Stream queues must be `Durable` too.
 - **R10-10 — DLQ durability/bounds + Consumer missing-DLX parity
   (T65).** The auto-declared `<source>.dlq` has unspecified
   type/durability and no bounds — an unbounded DLQ fills disk and

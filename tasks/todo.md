@@ -1446,11 +1446,11 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `connection.go`, `options_connection.go`, `connection_internal_test.go`, SPEC §6.1/§6.2.
 - **Deps:** T07, T62, T84 (half-alive proxy). **(R10-8, P1.6)** — sequence with T61/T62; *pulled into Phase 13 (v0.1).*
 
-### [ ] T64 — Quorum-queue structural validation + MaxPriority fix [P1] · S
+### [x] T64 — Quorum-queue structural validation + MaxPriority fix [P1] · S
 - **Acceptance:**
-  - [ ] `Topology.validate()` returns `ErrInvalidOptions` for a quorum queue that is non-`Durable`, `Exclusive`, `AutoDelete`, or carries `x-max-priority` (via the `MaxPriority` field **and** a raw `Args["x-max-priority"]`).
-  - [ ] Stream queues are required to be `Durable` too.
-  - [ ] **Lens-01 (RMQ-20):** the `Queue.MaxPriority` field **does** exist in code (`topology.go:56`) — retire the stale "no such struct field" note; instead **document `Queue.MaxPriority` in SPEC §6.6** (spec/code drift).
+  - [x] `Topology.validate()` returns `ErrInvalidOptions` for a quorum queue that is non-`Durable`, `Exclusive`, or `AutoDelete`; `x-max-priority` on quorum is rejected via the `MaxPriority` field (non-classic types rejected) **and** the managed-args guard on a raw `Args["x-max-priority"]`.
+  - [x] Stream queues are required to be `Durable` too.
+  - [x] **Lens-01 (RMQ-20):** retired the stale "no such struct field" note in §10 R10-9 and documented the validation rules (incl. `Queue.MaxPriority`) in SPEC §6.6.
 - **Verify:** Table-driven test covering each rejected quorum/stream combination + a valid quorum queue passing.
 - **Files:** `topology.go`, `topology_test.go`, SPEC §6.6.
 - **Deps:** T14, T15. **(R10-9, P1.5)** — coordinate with T58 (same `validate()`).
