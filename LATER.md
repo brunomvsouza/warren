@@ -1253,3 +1253,15 @@ dependency for the doc reconciliation itself.
 
 **Prerequisites:** A future configurable-DLQ-name task (does not yet exist). No code dependency today.
 
+### LATER-86 — `managedConn.health` returns the raw `*amqp091.Error` without routing it through `wrapAMQPError`
+
+**Context:** The connection-liveness gate `managedConn.health` (`connection.go:418-420`) returns `raw.Channel()`'s error verbatim (`return ch, err`), unlike every Pause/Resume/subscribe path in T53, which wraps broker errors via `wrapAMQPError` into reply-code sentinels. `Consumer.Health` (`consumer.go:1585`) surfaces that bare error to the public probe path. The rendered string carries only the broker `Code`+`Reason` (`types.go`), never the dial URI or userinfo, so there is **no credential leak** — confirmed by the security audit.
+
+**Impact:** No data exposure. Purely an error-classification inconsistency: a caller doing `errors.Is(healthErr, ErrAccessRefused)` (or any reply-code sentinel) on a `Health` error will not match, because the sentinel wrap is skipped only on this path. T53 newly surfaces this through the public `Consumer.Health` probe API, which is why it is worth tracking now even though the code is pre-existing.
+
+**Evidence:** Phase 10 `/ship` security-auditor (T53, 2026-05-31) — Low.
+
+**Suggested solution:** Wrap the channel-open error in `health`: `return ch, fmt.Errorf("warren: health: %w", wrapAMQPError(err))` (or wrap at the `Consumer.Health` call site). Add a regression test asserting `errors.Is` against the appropriate reply-code sentinel for a refused/closed channel. Treat the change as a small public-contract amendment (Health error classification) — note it in SPEC §6.3 so callers can rely on it.
+
+**Prerequisites:** None. Self-contained; touches `connection.go` (shared by all Health callers, so re-run the consumer + replier Health tests).
+
