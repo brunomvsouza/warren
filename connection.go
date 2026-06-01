@@ -93,6 +93,11 @@ type managedConn struct {
 	// chanFactory, if non-nil, replaces the real amqp091 channel open in openChannel.
 	// Used only in unit tests that inject a fake channel to avoid a live broker.
 	chanFactory func() (topologyChannel, error)
+
+	// dialFactory, if non-nil, replaces the real dialAMQP in reconnectRaw. Used
+	// only in unit tests that need to drive the supervisor's dial path without a
+	// live broker (e.g. asserting the barrier-cap force-reconnect re-dials).
+	dialFactory func(context.Context) (*amqp091.Connection, error)
 }
 
 // — Connection ————————————————————————————————————————————————————————————
@@ -575,6 +580,15 @@ func (mc *managedConn) forceClose() {
 	}
 }
 
+// dial opens one raw AMQP connection, honoring the dialFactory test seam when
+// set and otherwise dialing the next address in the connection's rotation.
+func (mc *managedConn) dial(ctx context.Context) (*amqp091.Connection, error) {
+	if mc.dialFactory != nil {
+		return mc.dialFactory(ctx)
+	}
+	return dialAMQP(ctx, mc.opts, mc.name, mc.nextDialAddr())
+}
+
 // connectOnce dials the broker once (with backoff).  It does NOT run the
 // reconnect barrier — topology hooks are not yet registered at Dial time,
 // and WithOnReconnect must not fire on the initial connection.
@@ -677,7 +691,7 @@ func (mc *managedConn) reconnectRaw(ctx context.Context) (connected bool, lastEr
 	loop := reconnect.New(
 		ctx,
 		func(ctx context.Context) error {
-			raw, err := dialAMQP(ctx, mc.opts, mc.name, mc.nextDialAddr())
+			raw, err := mc.dial(ctx)
 			if err != nil {
 				lastErr = err
 				return err
@@ -707,12 +721,17 @@ func (mc *managedConn) supervisor(ctx context.Context) {
 		mc.mu.RUnlock()
 
 		if raw == nil {
-			// raw is nil at supervisor entry in two cases: a normal shutdown
-			// (Close cancelled ctx — exit), or a boot-degraded socket whose
-			// initial connect failed at Dial (T67 — bring it up under supervision
-			// via the reconnect path below). The notify-watch declarations are
-			// scoped to an inner block so this forward goto is legal.
-			if mc.bootDegraded && ctx.Err() == nil {
+			// raw is nil at supervisor entry in three cases: a normal shutdown
+			// (Close cancelled ctx — exit); a boot-degraded socket whose initial
+			// connect failed at Dial (T67 — bring it up under supervision via the
+			// reconnect path below); or a barrier-cap force-reconnect that nil'd
+			// raw while reconnecting (T63 — re-dial rather than exit). The
+			// notify-watch declarations are scoped to an inner block so this
+			// forward goto is legal.
+			mc.barrierMu.Lock()
+			forcedRedial := mc.reconnecting
+			mc.barrierMu.Unlock()
+			if (mc.bootDegraded || forcedRedial) && ctx.Err() == nil {
 				goto reconnect
 			}
 			return
@@ -815,15 +834,23 @@ func (mc *managedConn) runBarrier(ctx context.Context) {
 	// indefinitely, and ConfirmTimeout does NOT cover the barrier (the frame is
 	// still unwritten). On cap we force-reconnect: close the socket (its rotated
 	// re-dial with WithAddrs hits a different node) and let the supervisor re-run
-	// the barrier. The orphaned hook goroutine unblocks when the socket closes;
-	// mc.wg tracks it so Close drains it.
+	// the barrier.
+	//
+	// The hooks run under hookCtx, cancelled on the cap/shutdown paths so a hook
+	// that loops over many declares bails between operations instead of issuing
+	// the full set against a doomed socket (bounding goroutine accumulation across
+	// repeated caps). A hook blocked inside a single non-ctx-aware amqp091 wire
+	// call (e.g. one queue.declare) still unblocks only when the socket closes —
+	// which the cap path does — and mc.wg tracks it so Close drains it.
+	hookCtx, hookCancel := context.WithCancel(ctx)
+	defer hookCancel()
 	hookErrCh := make(chan error, 1)
 	mc.wg.Add(1)
 	go func() {
 		defer mc.wg.Done()
 		var hookErr error
 		for _, fn := range hooks {
-			if err := fn(ctx); err != nil {
+			if err := fn(hookCtx); err != nil {
 				hookErr = err
 				break
 			}
@@ -838,24 +865,33 @@ func (mc *managedConn) runBarrier(ctx context.Context) {
 		capTimer.Stop()
 	case <-ctx.Done():
 		capTimer.Stop()
-		// Shutdown: the orphaned hook goroutine exits when Close tears down the
-		// socket (drained by mc.wg). Clear the barrier so no publisher hangs.
+		// Shutdown: cancel the hook ctx and let the orphaned hook goroutine exit
+		// when Close tears down the socket (drained by mc.wg). Clear the barrier
+		// so no publisher hangs.
+		hookCancel()
 		mc.barrierMu.Lock()
 		mc.reconnecting = false
 		mc.barrierCond.Broadcast()
 		mc.barrierMu.Unlock()
 		return
 	case <-capTimer.C:
-		// Barrier exceeded its cap. Force-reconnect the half-alive socket; the
-		// supervisor loop observes the close and re-dials. reconnecting stays true
-		// (a fresh reconnect is imminent), and blocked publishers already return
-		// ErrReconnecting via the wait-side cap.
-		mc.opts.metrics.RecordReconnect(mc.role)
+		// Barrier exceeded its cap. Force-reconnect the half-alive socket: cancel
+		// the hooks, close the socket, and — critically — nil mc.raw so the
+		// supervisor loop takes its nil-raw-while-reconnecting branch and re-dials.
+		// (Re-reading the just-closed *amqp091.Connection would register fresh
+		// NotifyClose/NotifyBlocked channels that come back pre-closed, and the
+		// supervisor's closeCh !ok arm would then exit the goroutine ~half the time,
+		// permanently wedging the socket.) reconnecting stays true (a fresh
+		// reconnect is imminent) and blocked publishers already return
+		// ErrReconnecting via the wait-side cap. The forced re-dial records its own
+		// RecordReconnect on the supervisor reconnect path, so we do not count here.
+		hookCancel()
 		mc.opts.logger.Errorf("warren: %s connection[%d] reconnect barrier exceeded %s cap; forcing reconnect",
 			mc.role, mc.idx, mc.opts.reconnectBarrierTimeout)
-		mc.mu.RLock()
+		mc.mu.Lock()
 		raw := mc.raw
-		mc.mu.RUnlock()
+		mc.raw = nil
+		mc.mu.Unlock()
 		if raw != nil {
 			_ = raw.Close()
 		}
@@ -939,6 +975,13 @@ func (mc *managedConn) waitBarrier(ctx context.Context) error {
 	mc.barrierMu.Lock()
 	defer mc.barrierMu.Unlock()
 	for mc.reconnecting || mc.blocked {
+		if !mc.reconnecting {
+			// Not (yet) reconnecting — e.g. a legitimate flow-control blocked
+			// interval. Drop any prior wave's deadline so a later reconnecting
+			// edge anchors its own full cap rather than reusing a stale, already-
+			// elapsed deadline (which would return ErrReconnecting spuriously).
+			capDeadline = time.Time{}
+		}
 		done := make(chan struct{})
 		var timer *time.Timer
 		var timerC <-chan time.Time

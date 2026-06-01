@@ -272,7 +272,7 @@ func (c *Connection) ensureTopologyRedeclare(ctx context.Context, mc *managedCon
 // runTopologyRedeclare iterates the registered topology snapshots in registration
 // order and declares each on a fresh channel. Called from the synchronous
 // reconnect barrier.
-func (c *Connection) runTopologyRedeclare(_ context.Context, mc *managedConn) error {
+func (c *Connection) runTopologyRedeclare(ctx context.Context, mc *managedConn) error {
 	// Snapshot both keys and values under a single lock to avoid repeated
 	// lock acquisitions inside the loop.
 	c.topoMu.RLock()
@@ -283,6 +283,11 @@ func (c *Connection) runTopologyRedeclare(_ context.Context, mc *managedConn) er
 	c.topoMu.RUnlock()
 
 	for _, key := range keys {
+		// Bail between declares if the barrier was capped (ctx cancelled): no
+		// point issuing the rest of the topology against a doomed socket (T63).
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		ch, err := mc.openChannel()
 		if err != nil {
 			return err
