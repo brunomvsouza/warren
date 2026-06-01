@@ -1265,6 +1265,18 @@ dependency for the doc reconciliation itself.
 
 **Prerequisites:** None hard; coordinate with any future `metrics` interface revision (e.g. T125 embeddable-NoOp) so the handle-caching shape lands once.
 
+### LATER-88 — Channel-flap churn guard does not escalate on a sustained fast-flap
+
+**Context:** `recoverDeliveryChannel` (`consumer.go`) imposes a single fixed `channelRecoverInitialBackoff` (50ms) floor before a recent reopen (the T61 churn guard). The exponential backoff in the main recovery loop only escalates on channel *open failure* — it does not engage when the open succeeds and the channel then dies immediately. So a broker that accepts the subscription then drops it without `basic.cancel` reopens-succeeds-then-dies at a steady ~16 Hz (50ms floor + broker RTT) indefinitely, with no ramp.
+
+**Impact:** Bounded, low-severity churn: a pathological flapping channel costs ~16 reopen cycles/sec rather than the pre-fix <1ms busy-loop (a ~50× improvement). Each reopen re-issues `basic.consume` and re-runs `notifyResubscribed`, so sustained flap means steady broker chatter and log/metric noise — but no correctness impact and no goroutine growth. Matches the current code comment's stated intent (“a flap costs ~`channelRecoverInitialBackoff`”), so it is not a blocker.
+
+**Evidence:** Phase 11 review of the correction commits (`/agent-skills:review`, 2026-06-01) — Suggestion.
+
+**Suggested solution:** Track consecutive sub-threshold reopens (reopen within `channelRecoverMaxBackoff` of the prior one) and ramp the imposed floor toward `channelRecoverMaxBackoff` on each successive fast-flap, resetting the counter once a channel survives past the recent-horizon. This bounds a pathological flap to the same 2s ceiling the open-failure path already uses, without penalizing the common single-reconnect case.
+
+**Prerequisites:** None.
+
 <!-- LATER-86 resolved: managedConn.health now routes the probe channel open through
 openChannel (the chanFactory seam) and classifies both the open and close errors via
 wrapAMQPError("warren: health: %w", …), so Consumer.Health / Connection.Health errors are
