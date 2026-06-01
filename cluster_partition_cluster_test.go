@@ -70,15 +70,17 @@ import (
 // readiness gate the partition precondition needs: a freshly declared quorum queue (or
 // one whose replica a prior run's heal just restarted) takes a moment for every
 // follower to come online, so a single read right after Declare can race and see only
-// the majority. The cluster is healthy here (no partition), so QuorumLeader is
-// responsive. Returns the satisfying state.
+// the majority. The readiness decision itself is QuorumQueueState.FullyOnline, unit-
+// tested on the default lane; this wrapper only adds the live poll + timeout. The
+// cluster is healthy here (no partition), so QuorumLeader is responsive. Returns the
+// satisfying state.
 func awaitQueueFullyOnline(t *testing.T, queue string, timeout time.Duration) amqptest.QuorumQueueState {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var last amqptest.QuorumQueueState
 	for {
 		last = amqptest.QuorumLeader(t, queue)
-		if len(last.Members) == 3 && len(last.Online) == 3 {
+		if last.FullyOnline(3) {
 			return last
 		}
 		if !time.Now().Before(deadline) {
@@ -239,6 +241,28 @@ func TestClusterPartitionUnderLoad_PauseMinorityZeroLoss_cluster(t *testing.T) {
 		}
 	}()
 
+	// Stop both load goroutines and WAIT for them to exit before goleak runs — including
+	// on an early require failure. Body defers run before t.Cleanup and, registered after
+	// the goleak defer, run before it; cancelling ctx first unblocks a Publish/Consume
+	// parked on the reconnect barrier so the joins below cannot hang. sync.Once makes the
+	// happy-path explicit stops below no-ops the second time, so neither close(pubDone) nor
+	// the single consumeErr receive ever double-fires. The joins (pubWG.Wait / <-consumeErr)
+	// are themselves unbounded by design; the package-level `-timeout=60m` (Makefile
+	// test-cluster, S3) is the last-resort backstop for a goroutine that never observes the
+	// cancel — it dumps every stack and fails rather than wedging the suite.
+	var (
+		stopPubOnce sync.Once
+		stopConOnce sync.Once
+		consumeRes  error
+	)
+	stopPublisher := func() { stopPubOnce.Do(func() { close(pubDone); pubWG.Wait() }) }
+	stopConsumer := func() { stopConOnce.Do(func() { cancelConsume(); consumeRes = <-consumeErr }) }
+	defer func() {
+		cancel() // unblock anything parked on the barrier so the joins below return
+		stopPublisher()
+		stopConsumer()
+	}()
+
 	confirmedCount := func() int {
 		mu.Lock()
 		defer mu.Unlock()
@@ -292,8 +316,7 @@ func TestClusterPartitionUnderLoad_PauseMinorityZeroLoss_cluster(t *testing.T) {
 	t.Logf("partition healed: queue members=%v online=%v", healed.Members, healed.Online)
 
 	// Stop the load and join the publisher before the recovery gate + drain.
-	close(pubDone)
-	pubWG.Wait()
+	stopPublisher()
 
 	// Recovery sentinel: prove the CONSUMER pipeline is live end to end (re-open channel
 	// → redeclare → re-issue basic.consume), not merely the publisher socket.
@@ -324,8 +347,8 @@ func TestClusterPartitionUnderLoad_PauseMinorityZeroLoss_cluster(t *testing.T) {
 		return len(publishedSet) > 0 && len(lossByMessageID(publishedSet, consumedSet)) == 0
 	}, 90*time.Second, 250*time.Millisecond, "all confirmed publishes must be consumed across the partition (zero loss)")
 
-	cancelConsume()
-	require.NoError(t, filterClusterCanceled(<-consumeErr), "consumer must stop cleanly")
+	stopConsumer()
+	require.NoError(t, filterClusterCanceled(consumeRes), "consumer must stop cleanly")
 
 	mu.Lock()
 	lost := lossByMessageID(publishedSet, consumedSet)

@@ -60,6 +60,41 @@ func TestParseQuorumQueueState(t *testing.T) {
 	})
 }
 
+func TestQuorumQueueState_FullyOnline(t *testing.T) {
+	// The readiness predicate awaitQueueFullyOnline (cluster lane) polls on before it
+	// injects a fault. Verified here on the default lane — without a live cluster — so
+	// the gate logic that distinguishes "fully replicated" from "majority only" is not
+	// exercised solely by a ~minute-scale cluster run.
+	threeMembers := []string{"rabbit@rmq0", "rabbit@rmq1", "rabbit@rmq2"}
+
+	t.Run("all three members present and online satisfies the gate", func(t *testing.T) {
+		s := QuorumQueueState{Members: threeMembers, Online: threeMembers}
+		assert.True(t, s.FullyOnline(3))
+	})
+
+	t.Run("a follower still catching up (member, not yet online) fails the gate", func(t *testing.T) {
+		// The exact race the poller exists to cover: the third node is already a
+		// member at declare but has not finished joining, so Online lags Members.
+		s := QuorumQueueState{Members: threeMembers, Online: threeMembers[:2]}
+		assert.False(t, s.FullyOnline(3), "majority-only online must not be read as fully replicated")
+	})
+
+	t.Run("only the majority are members yet fails the gate", func(t *testing.T) {
+		s := QuorumQueueState{Members: threeMembers[:2], Online: threeMembers[:2]}
+		assert.False(t, s.FullyOnline(3))
+	})
+
+	t.Run("more members than wanted fails the gate (exact count, not a floor)", func(t *testing.T) {
+		four := append(append([]string{}, threeMembers...), "rabbit@rmq3")
+		s := QuorumQueueState{Members: four, Online: four}
+		assert.False(t, s.FullyOnline(3), "an unexpected extra member must not be silently accepted")
+	})
+
+	t.Run("empty state fails the gate (no panic)", func(t *testing.T) {
+		assert.False(t, QuorumQueueState{}.FullyOnline(3))
+	})
+}
+
 func TestFetchQuorumQueueState(t *testing.T) {
 	t.Run("issues an authenticated GET against the escaped vhost path", func(t *testing.T) {
 		var gotPath string

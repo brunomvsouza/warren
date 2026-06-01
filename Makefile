@@ -81,14 +81,21 @@ cluster-down: ## Stop and remove the local RabbitMQ cluster + Toxiproxy.
 # it, re-running `make test-cluster` against a DIFFERENT cluster (e.g. a 4.x image via
 # WARREN_RMQ_IMAGE) silently returns the previous run's cached result — a green that
 # certifies a cluster it never touched. The same applies to the version matrix lane.
+#
+# -timeout=60m raises the package-binary timeout well above Go's 10m default: the ~12
+# campaigns run sequentially (none call t.Parallel — they kill shared nodes), and the
+# rolling-upgrade campaign's OWN ctx ceiling is already 10m, so the default would abort
+# the run mid-suite. Each campaign bounds itself with its own context.WithTimeout, so
+# this -timeout is a deadlock backstop sized above the sum of those ceilings (~56m) — it
+# never preempts a legitimately progressing run, only a true wedge.
 test-cluster: ## Run cluster tests (requires the compose cluster; 'make cluster-up' starts it) + zero-run guard.
 	@WARREN_CLUSTER_NODES="$(WARREN_CLUSTER_NODES)" \
 	WARREN_CLUSTER_MGMT="$(WARREN_CLUSTER_MGMT)" \
 	WARREN_TOXIPROXY_URL="$(WARREN_TOXIPROXY_URL)" \
-	$(GO) test -race -v -count=1 -tags=cluster $(PKG) > cluster.log 2>&1; status=$$?; \
+	$(GO) test -race -v -count=1 -timeout=60m -tags=cluster $(PKG) > cluster.log 2>&1; status=$$?; \
 	cat cluster.log; \
 	ran=$$(grep -cE '^[[:space:]]*--- (PASS|FAIL): Test[A-Za-z0-9_/]*_cluster' cluster.log) || true; \
-	echo "cluster tests executed: $${ran}"; \
+	echo "cluster tests executed: $${ran}" | tee -a cluster.log; \
 	if [ "$${ran:-0}" -eq 0 ]; then \
 		echo "zero-run guard: zero cluster tests executed against the cluster." >&2; \
 		exit 1; \

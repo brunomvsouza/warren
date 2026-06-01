@@ -27,6 +27,11 @@ jobs:
   cluster:
     name: Cluster campaigns (RabbitMQ ${{ matrix.label }})
     runs-on: ubuntu-latest
+    # Outer hard bound for a wedged run. test-cluster's own `go test -timeout=60m` is the
+    # inner bound and fires first with a goroutine dump; this caps the whole job (cluster
+    # bring-up + the 60m test budget + teardown) so a true hang can't sit on a runner for
+    # the 6h Actions default. Generous on purpose — the lane is nightly, not a PR gate.
+    timeout-minutes: 70
     strategy:
       # Independent versions: a 3.13 failure must not cancel the 4.x run or vice versa.
       fail-fast: false
@@ -57,14 +62,27 @@ jobs:
       - name: Run cluster campaigns (race) + zero-run guard
         run: make test-cluster
 
+      # The summary distils cluster.log down to the per-campaign verdicts, the package
+      # line, and the zero-run-guard count (test-cluster tees "cluster tests executed: N"
+      # into cluster.log so it surfaces here, not just in the step log). GitHub runs this
+      # step under `bash -eo pipefail`: a no-match grep exits 1, pipefail promotes that to
+      # the pipeline status, and set -e would then abort the assignment before the
+      # `${summary:-…}` fallback runs — so `|| true` neutralizes the grep exit status, while
+      # the missing-file case is handled by the explicit `-f` guard. (The old
+      # `grep | tail || echo` was doubly broken: the `||` keyed off tail's success, so it
+      # never fired at all.)
       - name: Publish cluster log to job summary
         if: always()
         run: |
           {
             echo "## Cluster campaigns — RabbitMQ ${{ matrix.label }}"
             echo '```'
-            grep -E '^(--- (PASS|FAIL):|ok |FAIL\b|cluster tests executed:)' cluster.log 2>/dev/null | tail -80 \
-              || echo '(no cluster.log produced)'
+            if [ -f cluster.log ]; then
+              summary=$(grep -E '^(--- (PASS|FAIL):|ok |FAIL\b|cluster tests executed:)' cluster.log | tail -80) || true
+              echo "${summary:-(cluster.log produced no PASS/FAIL/summary lines)}"
+            else
+              echo '(no cluster.log produced)'
+            fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

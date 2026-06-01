@@ -89,16 +89,10 @@ func isTolerableFailoverErr(err error) bool {
 		errors.Is(err, warren.ErrChannelError)
 }
 
-// filterClusterCanceled drops the benign context.Canceled a consumer returns when
-// it is stopped on purpose, so it is not recorded as a surface error. (A
-// cluster-lane local: the integration lane's filterCanceled lives behind the
-// `integration` tag and is not compiled here.)
-func filterClusterCanceled(err error) error {
-	if err == nil || errors.Is(err, context.Canceled) {
-		return nil
-	}
-	return err
-}
+// filterClusterCanceled (the benign-cancel filter every campaign's "consumer must
+// stop cleanly" assertion runs through) is defined in the un-tagged
+// cluster_predicates_test.go so its logic gets fast-lane unit coverage; it is in
+// scope here via the shared warren_test package.
 
 // TestClusterQuorumFailover_ZeroLoss_cluster streams confirmed messages to a
 // quorum queue, kills the Raft leader's node mid-stream, and asserts every

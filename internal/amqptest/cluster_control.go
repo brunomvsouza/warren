@@ -46,6 +46,19 @@ type QuorumQueueState struct {
 	MessagesUnacknowledged int `json:"messages_unacknowledged"`
 }
 
+// FullyOnline reports whether the quorum queue has exactly want members AND all
+// want of them online — the readiness condition the cluster lane's
+// awaitQueueFullyOnline poller waits for before injecting a partition or a rolling
+// restart. Membership is assigned at declare, but a follower can still be catching
+// up (already counted as a member, yet not yet in Online), so a single read right
+// after Declare can race and see only the majority online. The count is exact, not
+// a floor: an unexpected extra member is not silently accepted. Kept here (untagged,
+// beside the QuorumQueueState it reads) so the gate condition is unit-testable on
+// the default lane without a live cluster.
+func (s QuorumQueueState) FullyOnline(want int) bool {
+	return len(s.Members) == want && len(s.Online) == want
+}
+
 // parseQuorumQueueState decodes a management-API queue payload into a
 // QuorumQueueState. Kept separate from the HTTP round-trip so the decoding rules
 // (and the empty-for-classic behaviour) are unit-testable without a server.
