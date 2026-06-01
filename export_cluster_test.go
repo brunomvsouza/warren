@@ -10,7 +10,8 @@ package warren
 // fixed value, so a cluster campaign can assert a DETERMINISTIC initial connection
 // distribution instead of the production per-process-random one. The seed must be
 // non-zero (zero is the "unset → randomise" sentinel applyConnDefaults fills in).
-// Exported solely for cluster_failover_rotation_cluster_test.go.
+// Exported for the cluster lane's deterministic-spread campaigns (the rotation and
+// reconnect-storm tests), which pin it so their ≥2-node spread assertions never flake.
 func WithAddrShuffleSeedForTest(seed int64) Option {
 	return func(o *connOptions) { o.addrShuffleSeed = seed }
 }

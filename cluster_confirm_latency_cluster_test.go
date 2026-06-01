@@ -160,8 +160,13 @@ func TestClusterQuorumConfirmLatency_TailNotClipped_cluster(t *testing.T) {
 	// observation under outcome="success".
 	const (
 		loadPublishers = 6
-		perPublisher   = 300 // 1800 attempted; the success floor below stays well under this
-		successFloor   = 1000
+		perPublisher   = 300
+		attempts       = loadPublishers * perPublisher // 1800
+		// On a healthy all-nodes-up cluster nearly every publish confirms; require a
+		// solid majority so the histogram is measured under real load. Derived from
+		// attempts (not a bare literal) so a future loadPublishers/perPublisher bump
+		// cannot silently invert the floor by leaving it above the attempt count.
+		successFloor = attempts / 2 // 900
 	)
 	// quantileTopGuard is the top finite bucket boundary; p50/p99/p999 must fall
 	// strictly below it (a clipped histogram pushes the high quantiles to +Inf).
@@ -229,6 +234,9 @@ func TestClusterQuorumConfirmLatency_TailNotClipped_cluster(t *testing.T) {
 	// Structural guarantee: the top finite bucket sits past the ConfirmTimeout, so a
 	// confirmed publish (bounded by that timeout) CANNOT land in +Inf by construction.
 	top := buckets[len(buckets)-1]
+	require.Equal(t, quantileTopGuard, top.upperBound,
+		"observed top finite bucket must equal the configured top bucket (%.0fs) — the readback and the bucket config must not drift apart",
+		quantileTopGuard)
 	assert.Greater(t, top.upperBound, confirmLatencyConfirmTimeout.Seconds(),
 		"the top finite bucket (%.0fs) must exceed the ConfirmTimeout (%s) so the tail cannot clip to +Inf",
 		top.upperBound, confirmLatencyConfirmTimeout)

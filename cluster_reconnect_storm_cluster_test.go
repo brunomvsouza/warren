@@ -48,12 +48,10 @@ import (
 )
 
 // stormShuffleSeed pins the per-connection address shuffle (T66) so the storm's
-// post-reconnect spread is DETERMINISTIC. As with rotationShuffleSeed, any non-zero
-// value whose per-socket permutations do not all start on the same node works; this
-// one is verified to spread the 3+3 pool. If a change to perConnSeed's mixing, the
-// role strings, the pool size, or the node↔address mapping funnels these
-// permutations onto one node (the ≥2-node assertions start failing), the seed is
-// stale, not the shuffle — re-pick any non-zero value that spreads the pool.
+// post-reconnect spread is DETERMINISTIC. See rotationShuffleSeed for the full
+// staleness contract (re-pick the seed, not the shuffle, if a change to
+// perConnSeed / role strings / pool size / node mapping funnels it onto one node).
+// A distinct value, verified to spread the same 3+3 pool.
 const stormShuffleSeed int64 = 0x3C4D5E6F
 
 // TestClusterReconnectStorm_ZeroLossNoStampede_cluster streams confirmed load to a
