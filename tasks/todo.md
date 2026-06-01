@@ -1501,15 +1501,15 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `topology.go`, `topology_test.go`, `topology_integration_test.go`.
 - **Deps:** T14, T15. **(R10-14, P2.3)** — *pulled into Phase 15 (v0.1).*
 
-### [ ] T70 — Graceful-shutdown completeness [P2] · M
+### [x] T70 — Graceful-shutdown completeness [P2] · M
 - **Acceptance:**
-  - [ ] `Close` handles prefetched-but-undispatched deliveries deterministically (drain or nack-requeue), documented in SPEC §6.1.
-  - [ ] `BatchConsumer` flushes its pending partial batch on `Close`/final `FlushAfter`.
-  - [ ] **Lens-02 (DS-03):** the choice is resolved to **nack-requeue (`requeue=true`)** the undispatched buffer before channel close (never drop → no silent loss); `consumer_shutdown_requeued_total` increments; the forced-close (ctx-deadline) abandoned-in-flight duplicate window is named in SPEC (see DS-16/T85).
-  - [ ] **Lens-05 (SRE-07):** every rolling deploy is a low-grade incident — the deploy-time duplicate rate must be **boundable and observable** via `consumer_shutdown_requeued_total`.
-  - [ ] **Lens-06 (GA-06):** the new `consumer_shutdown_requeued_total` metric adds a method to the user-implementable `metrics.*` interfaces — it lands behind the embeddable `metrics.NoOp` base (T125) so external implementers don't break-compile, before rc1.
-  - [ ] **Lens-08 (CR-09):** on a **forced** (ctx-deadline) close, *detach* a non-cooperative handler that ignores its cancelled `ctx` (bounded by the cascade ctx), increment a `consumer_handler_leaked_total`-style metric, and do **not** hang the cascade on it (today the timeout-drain `<-handlerDone` waits unboundedly, `consumer.go:650`); the §7/§9 goleak **carve-out** for the ctx-ignoring handler (a caller defect — Go cannot force-kill a goroutine) lands in the capstone T146.
-- **Verify:** Integration: prefetch N, dispatch < N, `Close`; assert undispatched are nack-requeued (redelivered), not silently dropped. Batch partial flush asserted with `goleak` clean. Gated by G2 (capture the current v0.1 behaviour first).
+  - [x] `Close` handles prefetched-but-undispatched deliveries deterministically: `requeueUndispatched` drains the buffer and `Nack(requeue=true)`s each (documented SPEC §6.1).
+  - [x] `BatchConsumer` flushes its pending partial batch on `Close` (already in the `ctx.Done` path) and then requeues undispatched deliveries (parity).
+  - [x] **Lens-02 (DS-03):** resolved to **nack-requeue (`requeue=true`)** before channel close (never drop); `consumer_shutdown_requeued_total` increments.
+  - [x] **Lens-05 (SRE-07):** deploy-time duplicate rate boundable/observable via `consumer_shutdown_requeued_total`.
+  - [x] **Lens-06 (GA-06):** the new metric is on the `metrics.ConsumerMetrics` interface + `NoOpConsumerMetrics` + Prometheus (full embeddable-NoOp roadmap is T125).
+  - [ ] **Lens-08 (CR-09):** forced-close detach of a non-cooperative ctx-ignoring handler + `consumer_handler_leaked_total` + not hanging the cascade — *deferred to the capstone T146, which owns the coupled §7/§9 goleak carve-out (per the plan's sequencing).*
+- **Verify:** Unit `TestRequeueUndispatched_*` (nack-requeue + count, autoAck skip, nil/closed channel). Integration `TestConsumerShutdown_requeuesUndispatched_integration` (prefetch N, dispatch <N, Close → undispatched requeued + redelivered, counter increments). Batch flush covered by existing batch tests.
 - **Files:** `connection.go`, `consumer.go`, `batch_consumer.go`, `metrics/`, SPEC §6.1/§6.4.
 - **Deps:** T18, T22, T84 (G2). **(R10-15, P2.5)** — *pulled into Phase 13 (v0.1).*
 

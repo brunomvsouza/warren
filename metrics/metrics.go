@@ -122,6 +122,11 @@ type ConsumerMetrics interface {
 	// known for the source queue — the consumer-side parity of
 	// RecordReplierDropNoDLX, so a silent poison drop stays observable (T65).
 	RecordConsumerDropNoDLX(queue string)
+	// RecordShutdownRequeued increments the counter for prefetched-but-undispatched
+	// deliveries that were Nack(requeue=true)'d at consumer shutdown (T70). Every
+	// rolling deploy is a low-grade incident; this makes the deploy-time duplicate
+	// rate boundable and observable (SRE-07).
+	RecordShutdownRequeued(queue string)
 	// InFlightBytesAdd adjusts the consumer_inflight_bytes gauge by delta (the
 	// in-flight memory guardrail, T50): +len(body) when a delivery is dispatched,
 	// -len(body) when its handler returns.

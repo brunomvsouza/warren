@@ -396,7 +396,12 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 	for {
 		select {
 		case <-ctx.Done():
-			flush() // flush remaining accumulated messages
+			flush() // flush remaining accumulated messages (partial batch)
+			// Nack-requeue any prefetched-but-undispatched deliveries still buffered
+			// (received by the pump but not yet pulled into a batch) so the
+			// deploy-time duplicate is explicit and observable, never a silent drop
+			// (T70 / DS-03). BatchConsumer always uses manual ack (autoAck=false).
+			requeueUndispatched(cur.ch, false, c.cm, c.queue)
 			return nil
 
 		case sub := <-resubCh:

@@ -62,6 +62,9 @@ func (NoOpConsumerMetrics) RecordReplierDropNoDLX(_ string) {}
 // RecordConsumerDropNoDLX discards the Consumer drop-no-DLX counter increment.
 func (NoOpConsumerMetrics) RecordConsumerDropNoDLX(_ string) {}
 
+// RecordShutdownRequeued discards the shutdown-requeue counter increment.
+func (NoOpConsumerMetrics) RecordShutdownRequeued(_ string) {}
+
 // InFlightBytesAdd discards the in-flight-bytes gauge adjustment.
 func (NoOpConsumerMetrics) InFlightBytesAdd(_ string, _ int64) {}
 
