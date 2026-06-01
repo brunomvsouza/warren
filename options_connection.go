@@ -22,6 +22,13 @@ type connOptions struct {
 	addr  string
 	addrs []string
 
+	// addrShuffleSeed is the process-level base for the per-socket WithAddrs
+	// shuffle (T66). Defaulted to a random value in applyConnDefaults so every
+	// client process spreads its sockets across the cluster differently (no
+	// cross-process addrs[0] stampede). Unit tests set it for determinism; a
+	// non-zero value is preserved as-is.
+	addrShuffleSeed int64
+
 	// TLS configuration. Required when the URI scheme is amqps://.
 	tlsConfig *tls.Config
 
@@ -107,11 +114,14 @@ func WithAddr(addr string) Option {
 // WithAddrs sets a cluster-failover list of AMQP URIs. When set, this overrides
 // WithAddr.
 //
-// The list is tried in order on the initial connect: the first reachable node
-// wins and sticks for the life of that socket. On a disconnect, reconnect
-// rotates round-robin to the next URI in the list (wrapping at the end), so a
-// downed node is skipped on the following attempt instead of being retried in
-// place. Each TCP socket in the pool keeps its own cursor.
+// Each TCP socket in the pool walks its OWN shuffled permutation of the list:
+// the first reachable node on that permutation wins and sticks for the life of
+// the socket. The per-socket shuffle (seeded per process and per (role, index))
+// spreads the initial connections across the cluster instead of every socket —
+// and every client process — stampeding the first URI. On a disconnect,
+// reconnect rotates round-robin to the next URI in that socket's permutation
+// (wrapping at the end), so a downed node is skipped on the following attempt
+// instead of being retried in place.
 //
 // All URIs should share the same scheme (amqp:// or amqps://); the TLS, SASL,
 // and credential settings configured on the Connection apply to whichever node

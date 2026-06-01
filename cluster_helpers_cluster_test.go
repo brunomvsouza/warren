@@ -3,11 +3,14 @@
 package warren_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
+	"github.com/stretchr/testify/require"
 
+	"github.com/brunomvsouza/warren"
 	"github.com/brunomvsouza/warren/internal/amqptest"
 )
 
@@ -57,6 +60,39 @@ func awaitNewLeaderCluster(t *testing.T, queue, oldLeader string, timeout time.D
 	}
 	t.Fatalf("no new leader elected for %q within %s (still %q)", queue, timeout, last.Leader)
 	return last // unreachable
+}
+
+// declareQuorumLeaderOnNode declares a durable quorum queue with its Raft leader
+// pinned to addr's node, using a SINGLE-ADDRESS connection so the per-socket
+// WithAddrs shuffle (T66) cannot scatter the declaring socket onto another node —
+// the client-local leader locator places the leader on whichever node the
+// declaring connection lands on, and a one-element address list is never shuffled.
+// The connection is dialed, declares, and is CLOSED before returning (all while
+// every node is alive, so Close drains cleanly); the durable queue and its leader
+// placement persist on the broker for the campaign's load connection to reuse via
+// an idempotent redeclare. This replaces the older "order WithAddrs leader-node
+// first and rely on every socket dialing addrs[0]" trick, which the shuffle breaks.
+func declareQuorumLeaderOnNode(ctx context.Context, t *testing.T, addr, queue string) {
+	t.Helper()
+	dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	conn, err := warren.Dial(dialCtx,
+		warren.WithAddr(addr),
+		warren.WithPublisherConnections(1),
+		warren.WithConsumerConnections(1),
+	)
+	require.NoError(t, err, "declare connection must reach the target leader node")
+	defer func() {
+		closeCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
+		defer c()
+		_ = conn.Close(closeCtx)
+	}()
+
+	topo := &warren.Topology{
+		Queues: []warren.Queue{{Name: queue, Durable: true, Type: warren.QueueTypeQuorum}},
+	}
+	require.NoError(t, topo.Declare(dialCtx, conn),
+		"declaring the quorum queue must pin its leader to the declaring node")
 }
 
 // deleteQuorumQueueCluster best-effort deletes a durable quorum queue via a raw

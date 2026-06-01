@@ -169,6 +169,97 @@ func fetchRunningNodes(client *http.Client, mgmtBase string) (running, total int
 	return parseRunningNodes(body)
 }
 
+// connectionEntry is the subset of a management-API /api/connections entry the
+// cluster lane reads to see WHICH node a client connection landed on. Node is the
+// broker node the socket is attached to; Name is the broker's per-socket connection
+// name (it embeds the client's ephemeral TCP port, so it is unique per TCP socket
+// and changes on every reconnect); ClientProperties.ConnectionName is the
+// human-readable name warren sets per socket (connectionName-role-idx), used to
+// isolate one test's pool from any other client sharing the cluster.
+type connectionEntry struct {
+	Name             string `json:"name"`
+	Node             string `json:"node"`
+	ClientProperties struct {
+		ConnectionName string `json:"connection_name"`
+	} `json:"client_properties"`
+}
+
+// ConnNode pairs a warren connection's client-set connection_name (Name) with the
+// broker node it is attached to (Node) and the broker's per-socket connection name
+// (BrokerName, unique per TCP socket — it changes on reconnect), as read from
+// /api/connections. The rotation campaign (T166e) counts these to tell a CURRENT
+// connection from a still-closing one with the same reused Name during a reconnect,
+// and uses BrokerName to detect when a ForceReconnect has actually replaced the old
+// sockets (the async drop has completed) rather than reading the pre-reconnect view.
+type ConnNode struct {
+	Name       string
+	Node       string
+	BrokerName string
+}
+
+// parseConnectionNodes decodes a management-API /api/connections payload and
+// returns one ConnNode for every connection whose client-set connection_name
+// starts with namePrefix — duplicates included, so a caller can detect a
+// mid-reconnect transient (the same name appearing twice while the old connection
+// closes). The prefix filter isolates one test's pool from any other client on the
+// shared cluster; connections with no connection_name (or a non-matching one) are
+// skipped. An empty prefix matches every named connection. Kept separate from the
+// HTTP round-trip so the filter is unit-testable without a server.
+func parseConnectionNodes(body []byte, namePrefix string) ([]ConnNode, error) {
+	var conns []connectionEntry
+	if err := json.Unmarshal(body, &conns); err != nil {
+		return nil, fmt.Errorf("decode connections state: %w", err)
+	}
+	var out []ConnNode
+	for _, c := range conns {
+		name := c.ClientProperties.ConnectionName
+		if name == "" || !strings.HasPrefix(name, namePrefix) {
+			continue
+		}
+		out = append(out, ConnNode{Name: name, Node: c.Node, BrokerName: c.Name})
+	}
+	return out, nil
+}
+
+// fetchConnectionNodes reads /api/connections from the management API at mgmtBase
+// and returns the ConnNode list for connections matching namePrefix. Credentials in
+// the userinfo ride the Authorization header — never the request URL — mirroring
+// fetchQuorumQueueState. A non-200 status is an error.
+func fetchConnectionNodes(client *http.Client, mgmtBase, namePrefix string) ([]ConnNode, error) {
+	base, err := url.Parse(mgmtBase)
+	if err != nil {
+		return nil, fmt.Errorf("parse management URL: %w", err)
+	}
+	if base.Host == "" {
+		return nil, fmt.Errorf("management URL has no host:port")
+	}
+
+	apiURL := fmt.Sprintf("%s://%s/api/connections", base.Scheme, base.Host)
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if base.User != nil {
+		pass, _ := base.User.Password()
+		req.SetBasicAuth(base.User.Username(), pass)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("management GET %s://%s/api/connections: %w", base.Scheme, base.Host, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("management GET %s returned %d: %s",
+			apiURL, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return parseConnectionNodes(body, namePrefix)
+}
+
 // ToxiproxyClient is a thin client for the Toxiproxy v2 control API (the
 // unauthenticated HTTP API the cluster's toxiproxy sidecar exposes on
 // WARREN_TOXIPROXY_URL). It cuts a node's AMQP connectivity by disabling that

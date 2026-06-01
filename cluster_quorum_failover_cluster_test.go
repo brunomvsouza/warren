@@ -20,14 +20,15 @@ package warren_test
 // migration this asserts (and the durability of confirmed publishes ACROSS that
 // migration) is unobservable below three nodes. Leader placement is made
 // deterministic the same way the T166b control test does it: rabbitmq.conf pins
-// queue_leader_locator=client-local and the WithAddrs list is ordered rmq1-first,
-// so every pooled connection (each managedConn starts its dial cursor at addrs[0])
-// opens on rmq1 and the quorum leader is created there — the node we then kill.
-// rmq0+rmq2 keep a majority and re-elect; the surviving rmq0's management API
-// (WARREN_CLUSTER_MGMT) surfaces the new leader.
+// queue_leader_locator=client-local and a SINGLE-ADDRESS declare connection
+// (declareQuorumLeaderOnNode) pins the quorum leader to rmq1 — the node we then
+// kill. That single-address declare is immune to the per-socket WithAddrs shuffle
+// (T66), which would otherwise scatter the declaring socket and could place the
+// leader on the management node rmq0. rmq0+rmq2 keep a majority and re-elect; the
+// surviving rmq0's management API (WARREN_CLUSTER_MGMT) surfaces the new leader.
 //
-// goleak: after the kill the rmq1-pinned connections rotate (T33 cursor) to
-// rmq0/rmq2 (both alive, next in the WithAddrs list) so Close drains cleanly; the
+// goleak: after the kill the load connection's sockets that had landed on rmq1
+// rotate (shuffled cursor) to rmq0/rmq2 (both alive) so Close drains cleanly; the
 // killed node is restarted in t.Cleanup to restore the cluster for later tests.
 
 import (
@@ -113,11 +114,9 @@ func TestClusterQuorumFailover_ZeroLoss_cluster(t *testing.T) {
 
 	const queue = "test.cluster.quorum.failover"
 
-	// Address list ordered with rmq0 — the only node exposing the management API —
-	// LAST, so the client-local locator never places the quorum leader there: the
-	// declaring connection lands on rmq1 (or rmq2 if rmq1 is momentarily catching up
-	// after an earlier test restarted it), and we kill whichever of those two ends up
-	// the leader, always leaving rmq0 alive to OBSERVE the re-election.
+	// Full WithAddrs list for the load connection; leader placement no longer
+	// depends on its dial order (the single-address declare below pins the leader to
+	// rmq1). rmq0 — the management-API node — is kept last only out of convention.
 	addrs := []string{nodes[1], nodes[2], nodes[0]}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -139,6 +138,12 @@ func TestClusterQuorumFailover_ZeroLoss_cluster(t *testing.T) {
 	deleteQuorumQueueCluster(nodes[0], queue)
 	t.Cleanup(func() { deleteQuorumQueueCluster(nodes[0], queue) })
 
+	// Pin the quorum leader to rmq1 via a single-address declare connection —
+	// shuffle-immune (T66), so the leader is deterministically on a killable
+	// non-management node before the load connection (whose sockets shuffle across
+	// the cluster) ever opens.
+	declareQuorumLeaderOnNode(ctx, t, nodes[1], queue)
+
 	conn, err := warren.Dial(ctx,
 		warren.WithAddrs(addrs),
 		warren.WithPublisherConnections(2),
@@ -154,25 +159,27 @@ func TestClusterQuorumFailover_ZeroLoss_cluster(t *testing.T) {
 	}()
 
 	// Durable quorum queue, default-exchange routed (routing key == queue name), so
-	// there is no exchange/binding to clean up. AttachTo redeclares it on every
-	// reconnect barrier after the leader node dies and the pool rotates.
+	// there is no exchange/binding to clean up. Declare here is an idempotent
+	// redeclare of the queue placed above (identical args do not move the leader);
+	// AttachTo redeclares it on every reconnect barrier after the leader node dies
+	// and the pool rotates.
 	topo := &warren.Topology{
 		Queues: []warren.Queue{{Name: queue, Durable: true, Type: warren.QueueTypeQuorum}},
 	}
 	require.NoError(t, topo.Declare(ctx, conn))
 	require.NoError(t, topo.AttachTo(conn))
 
-	// Precondition: a quorum queue spanning all three members whose leader landed on
-	// a killable non-management node (rmq1 or rmq2 — rmq0 is dialed last). We kill
-	// whichever of the two actually holds the leader rather than insisting on one, so
-	// the test is robust to an earlier test having just restarted rmq1.
+	// Precondition: a quorum queue spanning all three members whose leader is pinned
+	// to rmq1 (a killable non-management node). The Contains check stays robust to an
+	// earlier test's restart timing while the single-address declare makes rmq1 the
+	// deterministic placement.
 	before := amqptest.QuorumLeader(t, queue)
 	require.Equal(t, "quorum", before.Type)
 	require.Len(t, before.Members, 3, "quorum queue must span all three cluster nodes")
 	require.Contains(t, clusterKillableLeaders, before.Leader,
-		"leader must land on a killable non-management node (rmq0 hosts the management API and is dialed last)")
+		"leader must land on a killable non-management node (pinned to rmq1 via the single-address declare)")
 	originalLeader := before.Leader
-	killService := amqptest.NodeService(originalLeader) // "rmq1" or "rmq2"
+	killService := amqptest.NodeService(originalLeader) // "rmq1" (pinned) — "rmq2" only if an external actor moved it
 
 	// Now that we know which node will die, register its restore. Cleanup is LIFO, so
 	// this runs before the queue-delete registered above — the cluster is whole again

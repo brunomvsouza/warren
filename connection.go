@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"maps"
+	"math/rand/v2"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -52,12 +53,25 @@ type managedConn struct {
 	hooksMu sync.Mutex
 	hooks   []func(ctx context.Context) error
 
-	// dialCursor is the round-robin index into the WithAddrs failover list.
-	// It advances once per dial attempt (see nextDialAddr), so the initial
-	// connect walks the list in order and each subsequent reconnect resumes at
-	// the next address. Touched only from the per-socket reconnect path, which
-	// runs serially for a given socket, so it needs no synchronisation.
+	// dialCursor is the round-robin index into this socket's per-connection
+	// shuffled address order (dialOrder, not the raw WithAddrs list). It advances
+	// once per dial attempt (see nextDialAddr), so the initial connect walks the
+	// shuffled order and each subsequent reconnect resumes at the next address.
+	// Touched only from the per-socket reconnect path, which runs serially for a
+	// given socket, so it needs no synchronisation.
 	dialCursor int
+
+	// shuffleSeed seeds this socket's private permutation of the WithAddrs list
+	// (T66). openPool derives it from the process-level base XOR the (role, idx)
+	// so each socket — and, via the random base, each client process — walks a
+	// DIFFERENT order. That prevents every socket from stampeding addrs[0] on a
+	// full-cluster restart. Set directly in unit tests for determinism.
+	shuffleSeed int64
+
+	// addrPerm caches dialOrder()'s shuffled view of dialAddrs(), built lazily on
+	// the first dial. Touched only from the per-socket reconnect path (serial,
+	// same as dialCursor), so it needs no synchronisation.
+	addrPerm []string
 
 	// lifecycle
 	cancel           context.CancelFunc
@@ -184,6 +198,7 @@ func openPool(ctx context.Context, role string, count int, opts *connOptions) ([
 			name:             name,
 			role:             role,
 			idx:              i,
+			shuffleSeed:      perConnSeed(opts.addrShuffleSeed, role, i),
 			done:             make(chan struct{}),
 			forceReconnectCh: make(chan struct{}, 1),
 			opts:             opts,
@@ -466,18 +481,68 @@ func (opts *connOptions) dialAddrs() []string {
 	return []string{opts.addr}
 }
 
+// addrShuffleStream is the PCG stream selector for the address shuffle and the
+// avalanche multiplier in perConnSeed (the 64-bit golden-ratio constant — good
+// bit diffusion so adjacent socket indices map to distant seeds).
+const addrShuffleStream uint64 = 0x9E3779B97F4A7C15
+
+// FNV-1a 64-bit basis/prime, used to fold a socket's role string into its seed.
+const (
+	fnvOffsetBasis uint64 = 1469598103934665603
+	fnvPrime       uint64 = 1099511628211
+)
+
+// shuffledAddrs returns a copy of addrs permuted by a deterministic
+// Fisher–Yates shuffle seeded by seed (T66). The input slice (the shared,
+// read-only opts.addrs) is never mutated. With fewer than two addresses the
+// copy is returned unchanged.
+func shuffledAddrs(addrs []string, seed int64) []string {
+	out := make([]string, len(addrs))
+	copy(out, addrs)
+	if len(out) < 2 {
+		return out
+	}
+	r := rand.New(rand.NewPCG(uint64(seed), addrShuffleStream)) //nolint:gosec // address spread, not cryptographic
+	r.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	return out
+}
+
+// perConnSeed derives a per-socket shuffle seed from the process-level base and
+// the socket's (role, idx), so publisher-0 and consumer-0 — and socket 0 vs 1 —
+// walk different address permutations. The role is folded in via FNV-1a and the
+// index via the golden-ratio multiply (good bit spread); all mixing is done in
+// uint64 to avoid int64 overflow on the constants.
+func perConnSeed(base int64, role string, idx int) int64 {
+	h := fnvOffsetBasis
+	for i := range len(role) {
+		h = (h ^ uint64(role[i])) * fnvPrime
+	}
+	return base ^ int64(h^(uint64(idx)*addrShuffleStream)) //nolint:gosec // seed mix, not cryptographic
+}
+
+// dialOrder returns this socket's shuffled permutation of dialAddrs(), built
+// lazily on first use and cached for the life of the socket so the round-robin
+// cursor walks a stable order.
+func (mc *managedConn) dialOrder() []string {
+	if mc.addrPerm == nil {
+		mc.addrPerm = shuffledAddrs(mc.opts.dialAddrs(), mc.shuffleSeed)
+	}
+	return mc.addrPerm
+}
+
 // nextDialAddr returns the broker address for the next dial attempt and advances
-// the round-robin cursor (T33). With a single address it always returns that
-// address. With WithAddrs it walks the list in order — so the initial connect
-// tries addrs[0], addrs[1], … — and each later reconnect resumes at the next
+// the round-robin cursor. With a single address it always returns that address.
+// With WithAddrs it walks this socket's per-connection *shuffled* order (T66) —
+// so the initial connect starts at a per-socket-distinct node rather than every
+// socket stampeding addrs[0] — and each later reconnect resumes at the next
 // entry, wrapping at the end. The previously-connected address therefore sticks
 // until a disconnect forces a fresh attempt, which then rotates to the next node.
 func (mc *managedConn) nextDialAddr() string {
-	addrs := mc.opts.dialAddrs()
+	addrs := mc.dialOrder()
 	addr := addrs[mc.dialCursor]
 	// Wrap within [0, len) on advance rather than incrementing without bound, so
-	// the cursor can never overflow int into a negative index (opts.addrs is
-	// read-only after Dial, so len is stable).
+	// the cursor can never overflow int into a negative index (the shuffled order
+	// is fixed after the first dial, so len is stable).
 	mc.dialCursor = (mc.dialCursor + 1) % len(addrs)
 	return addr
 }
@@ -754,6 +819,12 @@ func applyConnDefaults(opts *connOptions) {
 	}
 	if opts.addr == "" && len(opts.addrs) == 0 {
 		opts.addr = "amqp://guest:guest@localhost/"
+	}
+	if opts.addrShuffleSeed == 0 {
+		// Per-process random base so each client spreads its sockets across the
+		// cluster differently (T66). Force non-zero so the "0 means unset"
+		// sentinel stays meaningful and a unit-test-set seed is preserved.
+		opts.addrShuffleSeed = int64(rand.Uint64() | 1) //nolint:gosec // address spread, not cryptographic
 	}
 	if opts.logger == nil {
 		opts.logger = log.NewNoOp()

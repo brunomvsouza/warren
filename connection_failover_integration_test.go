@@ -20,20 +20,22 @@ import (
 const deadAddr = "amqp://guest:guest@127.0.0.1:1/"
 
 // fastFailoverBackoff keeps the dead-address retry near-instant so the test
-// does not pay the 1 s default backoff while the round-robin cursor advances
-// to the reachable node. Jitter is left at the default (full); the tight
-// [Min, Max] keeps every attempt near-instant while still exercising the
-// production spreading path.
+// does not pay the 1 s default backoff while the cursor advances through the
+// socket's shuffled order to the reachable node. Jitter is left at the default
+// (full); the tight [Min, Max] keeps every attempt near-instant while still
+// exercising the production spreading path.
 var fastFailoverBackoff = warren.RetryPolicy{
 	Min: 5 * time.Millisecond,
 	Max: 20 * time.Millisecond,
 }
 
-// TestDial_failover_initialConnect_skipsDeadAddr_integration proves the T33
-// acceptance "tries addresses in order on initial connect": with a dead node
-// first and a healthy node second, Dial walks the list, fails on the dead URI,
-// rotates to the healthy URI, and connects. A live Health check confirms the
-// socket completed a real AMQP handshake against the second address.
+// TestDial_failover_initialConnect_skipsDeadAddr_integration proves the failover
+// contract on initial connect: with a dead node and a healthy node in the list,
+// Dial walks the socket's shuffled order, fails on the dead URI if it comes
+// first, rotates to the healthy URI, and connects. A live Health check confirms
+// the socket completed a real AMQP handshake against the reachable address. The
+// per-socket shuffle (T66) means the dead node may be tried first or second; the
+// guarantee under test is that Dial reaches the healthy node either way.
 func TestDial_failover_initialConnect_skipsDeadAddr_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -57,11 +59,12 @@ func TestDial_failover_initialConnect_skipsDeadAddr_integration(t *testing.T) {
 }
 
 // TestDial_failover_reconnectRotates_recoversOnHealthyNode_integration proves
-// the T33 acceptance "on reconnect, rotates to the next address (round-robin)"
-// and "first successful address sticks until the next disconnect": with the
-// healthy node first and a dead node second, the initial connect sticks to the
-// healthy node; ForceReconnect rotates the cursor onto the dead node, which is
-// skipped, and the socket recovers on the healthy node again.
+// the reconnect contract: "on reconnect, rotates to the next address (round-robin
+// over the socket's shuffled order)" and "the connected address sticks until the
+// next disconnect". With a healthy and a dead node in the list, the initial
+// connect sticks to the healthy node; ForceReconnect drops the socket and the
+// cursor advances — rotating past the dead node when it comes up — and the socket
+// recovers on the healthy node again.
 func TestDial_failover_reconnectRotates_recoversOnHealthyNode_integration(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
