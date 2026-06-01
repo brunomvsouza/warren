@@ -110,6 +110,74 @@ func TestFetchQuorumQueueState(t *testing.T) {
 	})
 }
 
+func TestParseRunningNodes(t *testing.T) {
+	t.Run("counts only nodes reporting running", func(t *testing.T) {
+		// A killed-but-still-listed member reports running=false; the readiness gate
+		// must not count it, so a following campaign waits for it to come back.
+		body := []byte(`[
+			{"name":"rabbit@rmq0","running":true},
+			{"name":"rabbit@rmq1","running":false},
+			{"name":"rabbit@rmq2","running":true}
+		]`)
+
+		running, total, err := parseRunningNodes(body)
+		require.NoError(t, err)
+		assert.Equal(t, 2, running)
+		assert.Equal(t, 3, total)
+	})
+
+	t.Run("all running", func(t *testing.T) {
+		body := []byte(`[{"name":"rabbit@rmq0","running":true},{"name":"rabbit@rmq1","running":true},{"name":"rabbit@rmq2","running":true}]`)
+		running, total, err := parseRunningNodes(body)
+		require.NoError(t, err)
+		assert.Equal(t, 3, running)
+		assert.Equal(t, 3, total)
+	})
+
+	t.Run("malformed JSON returns an error", func(t *testing.T) {
+		_, _, err := parseRunningNodes([]byte(`{not an array`))
+		require.Error(t, err)
+	})
+}
+
+func TestFetchRunningNodes(t *testing.T) {
+	t.Run("issues an authenticated GET against /api/nodes and counts running", func(t *testing.T) {
+		var gotPath string
+		var gotAuthOK bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.EscapedPath()
+			_, _, gotAuthOK = r.BasicAuth()
+			// Credentials must arrive in the Authorization header, never the URL.
+			assert.NotContains(t, r.URL.String(), "guest")
+			_, _ = w.Write([]byte(`[{"name":"rabbit@rmq0","running":true},{"name":"rabbit@rmq1","running":false}]`))
+		}))
+		defer srv.Close()
+
+		running, total, err := fetchRunningNodes(srv.Client(), withUserinfo(t, srv.URL, "guest", "guest"))
+		require.NoError(t, err)
+		assert.Equal(t, "/api/nodes", gotPath)
+		assert.True(t, gotAuthOK, "credentials must ride the Authorization header")
+		assert.Equal(t, 1, running)
+		assert.Equal(t, 2, total)
+	})
+
+	t.Run("a non-200 status surfaces as an error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+
+		_, _, err := fetchRunningNodes(srv.Client(), srv.URL)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "401")
+	})
+
+	t.Run("a URL with no host is rejected without an HTTP call", func(t *testing.T) {
+		_, _, err := fetchRunningNodes(http.DefaultClient, "http://")
+		require.Error(t, err)
+	})
+}
+
 func TestToxiproxyClient_disableEnable(t *testing.T) {
 	type update struct {
 		Enabled bool `json:"enabled"`

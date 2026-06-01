@@ -118,6 +118,39 @@ func QuorumLeader(t *testing.T, queue string) QuorumQueueState {
 	return state
 }
 
+// WaitClusterReady polls the management API (WARREN_CLUSTER_MGMT) until at least
+// `want` nodes report running, failing the test if the timeout elapses. It is the
+// readiness gate a campaign uses after an EARLIER test killed and restarted a node:
+// `docker start` returns before RabbitMQ has rebooted and rejoined, so without this
+// gate a following test can declare a quorum queue against a momentarily-absent
+// member and observe a non-deterministic leader placement (the failure mode that
+// makes the cluster lane order-dependent). A short-timeout, keep-alive-disabled
+// HTTP client is used so no pooled connection goroutine survives into a goleak
+// check.
+func WaitClusterReady(t *testing.T, want int, timeout time.Duration) {
+	t.Helper()
+	mgmt := ClusterMgmt(t)
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	defer client.CloseIdleConnections()
+
+	deadline := time.Now().Add(timeout)
+	var lastRunning, lastTotal int
+	var lastErr error
+	for time.Now().Before(deadline) {
+		running, total, err := fetchRunningNodes(client, mgmt)
+		if err == nil && running >= want {
+			return
+		}
+		lastRunning, lastTotal, lastErr = running, total, err
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("cluster not ready: wanted >= %d running nodes within %s (last running=%d total=%d err=%v)",
+		want, timeout, lastRunning, lastTotal, lastErr)
+}
+
 // StopNode gracefully stops a cluster node's container (docker stop → SIGTERM)
 // by its short compose service name (rmq0/rmq1/rmq2).
 func StopNode(t *testing.T, service string) { dockerNode(t, "stop", service) }
