@@ -2560,8 +2560,14 @@ provisioned cluster via `WARREN_CLUSTER_NODES` / `WARREN_CLUSTER_MGMT` /
 variable is unset, mirroring the `integration` lane's `AMQP_TEST_URL`
 rule, and `make test-cluster` carries a **zero-run guard** that fails if
 no `*_cluster` test executed. A single member (`rmq2`) is image-swappable
-via **`WARREN_RMQ2_IMAGE`** (default homogeneous 3.13.7) to form the
-mixed-version (3.13 + 4.x) cluster the rolling-upgrade campaign transits.
+via **`WARREN_RMQ2_IMAGE`** (default homogeneous 3.13.7) to form a
+mixed-version cluster the rolling-upgrade campaign asserts continuity
+across — for **feature-flag-compatible** version pairs (e.g. two 3.13
+patches; validated live with 3.13.7 + 3.13.6). A fresh **4.x** node will
+**not** join a 3.13 cluster via peer discovery (`incompatible_feature_flags`,
+confirmed live) and runs standalone; a genuine 3.13→4.x **major** rolling
+upgrade is an in-place, data-preserving image swap of an existing member,
+which needs persistent volumes the lane does not yet provision (LATER-88).
 
 **Fault injection — two distinct mechanisms, used honestly.** Toxiproxy
 fronts only the **AMQP client ports** (5672), so disabling a proxy severs
@@ -2598,7 +2604,7 @@ it injects, and the cluster property a single node cannot give:
 | Confirm latency (`_confirm_latency`)    | quorum queue under load; baseline + Toxiproxy cut/heal tail | majority-commit confirm latency tail **not clipped** to `+Inf` |
 | Reconnect storm (`_reconnect_storm`)    | 3+3 pool; repeated `ForceReconnect` waves under load | no stampede + zero loss + prefetch↔redelivery exercised |
 | Partition under load (`_partition`)     | quorum queue under load; **Docker-network** partition of a follower | `pause_minority` isolates the minority (drops from the quorum's `online` set), majority surfaces **classifiable errors** not silent stalls, zero loss + recovery on heal |
-| Rolling upgrade (`_rolling_upgrade`)    | quorum queue under load; rolling `docker restart` of each node (opt-in mixed 3.13 + 4.x) | continuity — load keeps confirming, consumers resubscribe, zero loss across every restart |
+| Rolling upgrade (`_rolling_upgrade`)    | quorum queue under load; rolling `docker restart` of each node (opt-in mixed-version, feature-flag-compatible — LATER-88 for the in-place major jump) | continuity — load keeps confirming, consumers resubscribe, zero loss across every restart |
 
 ### Executable examples at checkpoints
 

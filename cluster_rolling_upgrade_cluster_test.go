@@ -24,13 +24,22 @@ package warren_test
 //     sentinel fails the test.
 //
 // Mixed-version: the cluster is homogeneous 3.13.7 by default, so this campaign always
-// asserts rolling-restart-under-load continuity. Set WARREN_RMQ2_IMAGE to a 4.x image
-// before `make cluster-up` and rmq2 runs a different RabbitMQ version — the genuinely
-// mixed-version (3.13 + 4.x) cluster a real rolling upgrade transits. The campaign
-// reads each member's version up front and LOGS whether it ran homogeneous or mixed,
-// so a homogeneous run is reported honestly rather than passing as if it had exercised
-// the cross-version path. The continuity assertions are identical either way; what
-// changes is the version skew they run against.
+// asserts rolling-restart-under-load continuity. Set WARREN_RMQ2_IMAGE to a
+// FEATURE-FLAG-COMPATIBLE different version before `make cluster-up` (e.g. another 3.13
+// patch like rabbitmq:3.13.6-management) and rmq2 runs a different RabbitMQ version —
+// the genuinely mixed-version cluster a rolling upgrade within a feature-flag
+// generation transits (validated live with 3.13.7 + 3.13.6). The campaign reads each
+// member's version up front and LOGS whether it ran homogeneous or mixed, so a
+// homogeneous run is reported honestly rather than passing as if it had exercised the
+// cross-version path. The continuity assertions are identical either way; what changes
+// is the version skew they run against.
+//
+// A 3.13→4.x MAJOR jump is deliberately NOT exercised here: a fresh 4.x node refuses to
+// cluster with 3.13 peers (`incompatible_feature_flags`, confirmed live) and runs
+// standalone. A real major-version rolling upgrade is an IN-PLACE, data-preserving
+// image swap of an existing member — which needs persistent volumes the lane does not
+// yet provision (deferred to LATER-88), not the fresh-boot peer discovery this compose
+// uses.
 //
 // Why a cluster: "the queue stays available while a member restarts" needs a majority
 // to survive the restart — unobservable below three nodes, where restarting the sole
@@ -106,7 +115,8 @@ func TestClusterRollingUpgradeUnderLoad_Continuity_cluster(t *testing.T) {
 			distinct, versions)
 	} else {
 		t.Logf("homogeneous cluster (%v) — rolling-restart-under-load continuity still asserted; "+
-			"set WARREN_RMQ2_IMAGE to a 4.x image before `make cluster-up` to exercise the 3.13+4.x mixed path; node map=%v",
+			"set WARREN_RMQ2_IMAGE to a feature-flag-compatible different version (e.g. another 3.13 patch) "+
+			"before `make cluster-up` to exercise the mixed-version path; node map=%v",
 			distinct, versions)
 	}
 
