@@ -749,3 +749,65 @@ func TestConsumer_Pause_LeavesInFlightHandlerToFinish(t *testing.T) {
 		t.Fatal("consumer did not stop after ctx cancel")
 	}
 }
+
+// TestConsumer_RunConsume_AdoptsReplacementSubFromResubCh covers runConsume's
+// `case sub := <-resubCh` arm at the unit level — the hot handoff branch by
+// which both the reconnect hook and Resume swap the running loop onto a fresh
+// subscription. Previously this adoption was exercised only on the integration
+// lane (TestConsumer_PauseThenForceReconnect_ClearsStalePause_integration); here
+// a delivery arriving on the NEW channel after the handoff proves the loop
+// rebound `cur` to the replacement sub (T53, /ship gap).
+func TestConsumer_RunConsume_AdoptsReplacementSubFromResubCh(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	c, err := ConsumerFor[string](conn).Queue("q").Tag("ctag-x").Build()
+	require.NoError(t, err)
+
+	// Drive the initial subscription through the override; pre-create resubCh so the
+	// loop reuses it (no race on the lazy nil-init) and our push lands on the size-1
+	// buffer deterministically.
+	chA := make(chan amqp091.Delivery)
+	c.deliverySubOverride = &deliverySub{ch: chA, done: nil}
+	c.resubCh = make(chan deliverySub, 1)
+
+	got := make(chan string, 2)
+	consumeCtx, cancelConsume := context.WithCancel(context.Background())
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = c.Consume(consumeCtx, func(_ context.Context, body string) error {
+			got <- body
+			return nil
+		})
+	}()
+
+	// A delivery on the ORIGINAL subscription confirms the loop is live on chA.
+	chA <- amqp091.Delivery{Body: []byte(`"a"`), Acknowledger: &fakeAcknowledger{}}
+	select {
+	case b := <-got:
+		require.Equal(t, "a", b, "handler must receive the delivery from the original subscription")
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never received the delivery from the original subscription")
+	}
+
+	// Hand the running loop a replacement subscription, as a reconnect/Resume would.
+	chB := make(chan amqp091.Delivery)
+	c.resubCh <- deliverySub{ch: chB, done: nil}
+
+	// A delivery on the NEW channel can only be received if the loop adopted it as cur.
+	chB <- amqp091.Delivery{Body: []byte(`"b"`), Acknowledger: &fakeAcknowledger{}}
+	select {
+	case b := <-got:
+		require.Equal(t, "b", b, "handler must receive the delivery from the adopted replacement subscription")
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never received a delivery from the adopted replacement subscription")
+	}
+
+	cancelConsume()
+	select {
+	case <-consumeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer did not stop after ctx cancel")
+	}
+}

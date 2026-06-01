@@ -36,6 +36,14 @@ type JSONOption func(*jsonCodec)
 // the lax codec — NewJSONStrict rejects unknown fields outright. Detection adds one
 // extra json.Unmarshal pass per Decode and only when an observer is set, so the
 // default (no observer) path is unchanged; nested-object drift is not reported.
+//
+// Cost note: that extra pass unmarshals the WHOLE payload into a
+// map[string]json.RawMessage, so its overhead scales with message size, not just
+// schema size (the per-type known-field set is memoized, so the reflection half is
+// paid once per type). On a hot consumer path with large payloads this roughly
+// doubles decode allocation; enable the observer deliberately and size any sampling
+// accordingly.
+//
 // fn must be safe for concurrent use (one codec may serve many consumer goroutines)
 // and must not block or panic.
 func WithUnknownFieldObserver(fn func(path string)) JSONOption {
