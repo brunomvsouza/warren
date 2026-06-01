@@ -241,7 +241,8 @@ func (c *Connection) AuthenticatedUser() string { return c.authUser }
 // already done; ErrReconnecting if a reconnect barrier is active;
 // ErrTopologyRedeclareFailed if the connection is in a degraded topology state;
 // ErrNotConnected if the socket is not yet established; otherwise any error from
-// the channel open/close round-trip.
+// the channel open/close round-trip, classified through the AMQP reply-code
+// sentinels (errors.Is against ErrAccessRefused, ErrNotFound, etc. — SPEC §6.3).
 func (c *Connection) Health(ctx context.Context) error {
 	c.closedMu.Lock()
 	closed := c.closed
@@ -392,7 +393,8 @@ func (mc *managedConn) negotiatedChannelMax() uint16 {
 
 // health probes broker responsiveness on this socket: it honors a done ctx and
 // the reconnect/degraded state, then opens and immediately closes a temporary
-// AMQP channel. See Connection.Health for the full error precedence.
+// AMQP channel, classifying any broker error through wrapAMQPError. See
+// Connection.Health for the full error precedence.
 func (mc *managedConn) health(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -415,11 +417,18 @@ func (mc *managedConn) health(ctx context.Context) error {
 	if raw == nil {
 		return ErrNotConnected
 	}
-	ch, err := raw.Channel()
+	// Route the probe through openChannel (honoring the chanFactory test seam) and
+	// classify both the open and close errors through wrapAMQPError, so a broker
+	// reply code surfaces as a sentinel callers can errors.Is — consistent with
+	// every other broker-touching path. SPEC §6.3.
+	ch, err := mc.openChannel()
 	if err != nil {
-		return err
+		return fmt.Errorf("warren: health: %w", wrapAMQPError(err))
 	}
-	return ch.Close()
+	if err := ch.Close(); err != nil {
+		return fmt.Errorf("warren: health: %w", wrapAMQPError(err))
+	}
+	return nil
 }
 
 // forceClose signals the supervisor to drop the current connection and
