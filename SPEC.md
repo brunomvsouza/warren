@@ -553,6 +553,20 @@ and consumer traffic onto separate connections: a slow consumer
 cannot starve publish acks, and a flow-controlled publisher cannot
 block consumer dispatch.
 
+**`WithAddrs` is shuffled per connection (T66).** Each pooled socket
+gets its own random ordering of the address list at `Dial`; reconnect
+then rotates round-robin through that per-connection order. Shuffling
+per connection (rather than every socket walking `addrs[0]` first)
+spreads the pool — and, across instances, the fleet — over the cluster
+nodes, so a full-cluster restart does not stampede `addr[0]`. This
+**compounds with the once-per-recovery topology redeclare (DS-09/T62)**:
+without both, a recovering broker faces a synchronised reconnect storm
+(every socket of every instance hammering one node with redeclares). The
+"no `addr[0]` stampede on a full-cluster restart" assertion is
+**unrunnable on the single-node integration harness** and binds to the
+multi-node cluster lane (T166); the unit suite asserts the shuffle is a
+permutation that distributes the starting address.
+
 For publishers, each publisher connection owns a channel pool of
 size `WithChannelPoolSize(n)` (default 8 — this is per connection,
 not global). `Publisher[M].Publish` acquires a channel from any
