@@ -233,6 +233,11 @@ func TestConsumer_Resume_CtxCancelledDuringHandoff_RollsBack(t *testing.T) {
 	c := pausableConsumer(t, fake)
 	c.paused.Store(true)
 
+	// Sentinel counter-B state: a rolled-back Resume must not rotate it (S3). Only a
+	// committed re-subscribe resets in-process redelivery counts.
+	sentinel := &redeliveryCounter{}
+	c.counterState.Store(sentinel)
+
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	c.runCtx = runCtx
 	defer cancelRun() // lifecycle cancel drains the rolled-back pump before goleak
@@ -249,6 +254,7 @@ func TestConsumer_Resume_CtxCancelledDuringHandoff_RollsBack(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, []string{"ctag-x"}, fake.cancels(), "a cancelled handoff must roll back the basic.consume")
 	assert.True(t, c.paused.Load(), "a cancelled Resume handoff must leave the consumer paused")
+	assert.Same(t, sentinel, c.counterState.Load(), "a rolled-back Resume must not rotate counter-B state")
 }
 
 func TestConsumer_Resume_BeforeStart_Errors(t *testing.T) {
@@ -527,6 +533,59 @@ func TestStartPump_CancelChDeath_ClosesChannelDone_EvenWhenPaused(t *testing.T) 
 	default:
 		t.Fatal("the broker cancel reason was not forwarded to cancelReasonCh")
 	}
+}
+
+// TestStartPump_TwoPumpsShareNotify_ChannelDeathClosesChannelDoneOnce pins the
+// shared-notify aliasing invariant (S2): under a rapid Pause→Resume the prior pump
+// and the Resume pump are transiently both alive and select on the SAME closeCh and
+// closeDone (resubscribeLocked reuses live.*). A single physical-channel death — one
+// value on the shared closeCh — must still close channelDone exactly once: the pump
+// that drains the death closes it, the other (paused, no death) returns without
+// closing, and the sync.Once guard makes any contended double-close a no-op. Both
+// pumps exit (goleak), so the aliasing leaks neither a goroutine nor a missed close.
+func TestStartPump_TwoPumpsShareNotify_ChannelDeathClosesChannelDoneOnce(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	c, err := ConsumerFor[string](conn).Queue("q").Build()
+	require.NoError(t, err)
+	c.paused.Store(true) // paused: only a genuine death may close channelDone
+
+	// Two independent delivery streams (one per pump) sharing ONE closeCh/cancelCh and
+	// ONE once-guarded closeDone — exactly what resubscribeLocked sets up.
+	deliveriesA := make(chan amqp091.Delivery)
+	deliveriesB := make(chan amqp091.Delivery)
+	closeCh := make(chan *amqp091.Error, 1)
+	cancelCh := make(chan string, 1)
+
+	channelDone := make(chan struct{})
+	var once sync.Once
+	var closeCount atomic.Int64
+	closeDone := func() {
+		closeCount.Add(1)
+		once.Do(func() { close(channelDone) })
+	}
+
+	outA := c.startPump(context.Background(), deliveriesA, closeCh, cancelCh, closeDone)
+	outB := c.startPump(context.Background(), deliveriesB, closeCh, cancelCh, closeDone)
+
+	// One physical death: a single value on the shared closeCh, then both streams close.
+	closeCh <- &amqp091.Error{Code: 504, Reason: "channel closed"}
+	close(deliveriesA)
+	close(deliveriesB)
+
+	_, okA := <-outA
+	_, okB := <-outB
+	assert.False(t, okA, "pump A closes out when its delivery stream ends")
+	assert.False(t, okB, "pump B closes out when its delivery stream ends")
+
+	select {
+	case <-channelDone:
+	default:
+		t.Fatal("a physical channel death must close channelDone even with two pumps sharing the notify channels")
+	}
+	assert.Equal(t, int64(1), closeCount.Load(),
+		"exactly one pump consumes the single death signal and closes channelDone; the other returns without closing")
 }
 
 // TestConsumer_Resume_RacesReconnect_NeverActiveAndPaused drives a reconnect

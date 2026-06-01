@@ -163,6 +163,11 @@ func (b *ConsumerBuilder[M]) WithQueueDepthSampler(interval time.Duration) *Cons
 // minutes suits most workloads, SPEC §6.2.1). Only the Consume path is wrapped;
 // ConsumeRaw handlers manage their own acks and are unaffected. store==nil (the
 // default) disables the middleware.
+//
+// Seen and Mark run under the per-delivery handler context, so a configured
+// HandlerTimeout bounds them too: a handler that consumes most of its budget can
+// leave Mark with a near-expired context, which (failing open) risks a future
+// duplicate rather than an error. Keep store calls fast relative to HandlerTimeout.
 func (b *ConsumerBuilder[M]) WithDedupe(store DedupeStore, ttl time.Duration) *ConsumerBuilder[M] {
 	b.dedupeStore = store
 	b.dedupeTTL = ttl
