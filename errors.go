@@ -1,6 +1,7 @@
 package warren
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -25,8 +26,10 @@ var (
 	// ErrChannelPoolExhausted is returned when ctx is cancelled before a semaphore
 	// token becomes available. It wraps ctx.Err() so callers can distinguish a
 	// voluntary cancellation (context.Canceled) from a deadline (context.DeadlineExceeded)
-	// via errors.Is. Note: IsTransient returns true for this error regardless of the
-	// underlying ctx.Err() — see LATER-07 for the planned fix when PublishRetry is added.
+	// via errors.Is. Note: IsTransient treats this error as transient EXCEPT when the
+	// wrapped ctx.Err() is context.Canceled — an upstream cancellation will never
+	// succeed on retry, so IsTransient returns false for it (T54). A deadline
+	// (context.DeadlineExceeded) remains transient.
 	ErrChannelPoolExhausted = errors.New("warren: channel pool exhausted")
 
 	// Publisher errors.
@@ -211,8 +214,19 @@ func AMQPCode(err error) (uint16, bool) {
 // without any chance of success.
 //
 // Note on ErrResourceError (506): NOT transient by default — see its godoc.
+//
+// Note on context.Canceled: NEVER transient, even when the error also wraps a
+// transient sentinel (e.g. ErrChannelPoolExhausted observed mid-cancellation).
+// An upstream request cancellation will fail identically on every retry, so a
+// PublishRetry would burn connections without any chance of success (T54).
+// context.DeadlineExceeded is deliberately NOT special-cased — a timeout may
+// succeed on a subsequent attempt.
 func IsTransient(err error) bool {
 	if err == nil {
+		return false
+	}
+	// Context cancellation overrides any transient classification below.
+	if errors.Is(err, context.Canceled) {
 		return false
 	}
 	if errors.Is(err, ErrTransient) {
