@@ -257,11 +257,16 @@ func TestClusterRollingUpgradeUnderLoad_Continuity_cluster(t *testing.T) {
 	close(pubDone)
 	pubWG.Wait()
 
-	// Recovery: every member is back and the queue spans all three again.
+	// Recovery: every member is back and the queue spans all three again. WaitClusterReady
+	// inside the loop only gates on the Erlang nodes being *running* — after the last
+	// node's restart its quorum-queue replica is a Member again but its Raft follower may
+	// still be catching up before it reports Online (a lag that is sub-threshold on 3.13
+	// but observable on 4.x). Poll for all members online rather than reading once, so the
+	// recovery gate asserts the steady state, not a snapshot mid-rejoin.
 	require.NoError(t, conn.Health(ctx), "Health must pass after the rolling restart")
-	after := amqptest.QuorumLeader(t, queue)
-	require.Len(t, after.Members, 3, "quorum queue must span all three members after the rolling restart")
-	require.Len(t, after.Online, 3, "all three members must be online again after the rolling restart")
+	after := awaitQueueFullyOnline(t, queue, 120*time.Second)
+	require.Len(t, after.Members, len(nodes), "quorum queue must span all members after the rolling restart")
+	require.Len(t, after.Online, len(nodes), "all members must be online again after the rolling restart")
 
 	// Recovery sentinel: prove the CONSUMER pipeline is live end to end (consumer
 	// re-subscribed on a surviving node), not merely the publisher socket.
