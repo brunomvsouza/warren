@@ -1343,10 +1343,10 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 - **Files:** `consumer.go`, `consumer_builder.go`.
 - **Deps:** T18, T38b.
 
-### [ ] T56 — Schema Drift Observability [P3] · S
+### [x] T56 — Schema Drift Observability [P3] · S
 - **Acceptance:**
-  - [ ] `WithUnknownFieldObserver(func(path string))` on `codec.NewJSON`.
-  - [ ] Hook emits `codec_unknown_fields_total` prometheus counter.
+  - [x] `WithUnknownFieldObserver(func(path string))` on `codec.NewJSON`.
+  - [x] Hook emits `codec_unknown_fields_total` prometheus counter. (codec is a leaf package with no metrics dependency by design; the observer is the emission hook — the canonical wiring increments `codec_unknown_fields_total{type}` from `fn`, documented in godoc + SPEC §6.)
 - **Verify:** Decoding `{"id":1, "unknown_new_field": "test"}` triggers the observer without failing the decode.
 - **Files:** `codec/json.go`, `codec/json_test.go`.
 - **Deps:** T09.

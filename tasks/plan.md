@@ -976,7 +976,7 @@ Goal: Address gaps identified in the SRE assessment (operability at scale, memor
 - **T53** ✅ `consumer.go`: Expose `Pause(ctx)` and `Resume(ctx)` for manual graceful degradation (local `basic.cancel` / re-`basic.consume` on the same channel; in-flight handlers survive). Evolved the check to a rich `Health(ctx) (*ConsumerHealth, error)` with `Active`/`Paused`/`LastDeliveryAt`/`InFlightHandlers` for k8s liveness probes (returns `(nil, err)` on connection failure; signature reconciled in SPEC §6/§6.3, `rpc_replier.go` adapted).
 - **T54** ✅ `errors.go`: Refine `IsTransient()` to return false when the root cause is `context.Canceled`, blocking useless PublishRetries from upstream request cancellations.
 - **T55** ✅ `consumer_builder.go`: Create native `WithDedupe(store, ttl)` middleware, abstracting LRU/Redis cache from the handler and ensuring correct commits.
-- **T56** `codec/json.go`: Add `WithUnknownFieldObserver(func(path string))` to lax `NewJSON`, emitting the `codec_unknown_fields_total` metric to monitor silent schema drift.
+- **T56** ✅ `codec/json.go`: Add `WithUnknownFieldObserver(func(path string))` to lax `NewJSON`, emitting the `codec_unknown_fields_total` metric to monitor silent schema drift.
 
 ### Phase 11 — AMQP/SRE Specialist Re-review (Rev 10)
 
