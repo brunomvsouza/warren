@@ -497,6 +497,43 @@ func (c *Consumer[M]) recordPoisonDropNoDLX() {
 	}
 }
 
+// requeueUndispatched drains the prefetched-but-undispatched deliveries buffered
+// in ch at consumer shutdown (T70 / DS-03 / SRE-07). See requeueUndispatched.
+func (c *Consumer[M]) requeueUndispatched(ch <-chan amqp091.Delivery) {
+	requeueUndispatched(ch, c.brokerAutoAck, c.cm, c.queue)
+}
+
+// requeueUndispatched drains the prefetched-but-undispatched deliveries buffered
+// in ch at consumer shutdown and Nack(requeue=true)'s each, incrementing
+// consumer_shutdown_requeued_total (T70 / DS-03 / SRE-07). This makes the
+// deploy-time duplicate explicit and observable instead of relying on the
+// broker's implicit requeue-on-channel-close (an at-least-once duplicate that is
+// acceptable under §6.2.1, never a silent drop). The drain is non-blocking: it
+// requeues what is already buffered without waiting on the pump (whose in-hand
+// delivery, if any, the broker requeues on close anyway). A no-ack consumer
+// (AutoAck) has nothing to nack — the broker already acked on dispatch.
+func requeueUndispatched(ch <-chan amqp091.Delivery, brokerAutoAck bool, cm metrics.ConsumerMetrics, queue string) {
+	if brokerAutoAck || ch == nil {
+		return
+	}
+	for {
+		select {
+		case d, ok := <-ch:
+			if !ok {
+				return
+			}
+			if err := d.Nack(false /* multiple */, true /* requeue */); err != nil {
+				// Channel already gone: the broker requeues unacked deliveries on
+				// close, so this is still not a loss. Stop draining.
+				return
+			}
+			cm.RecordShutdownRequeued(queue)
+		default:
+			return
+		}
+	}
+}
+
 // connIndexForTag returns a stable index in [0, n) for the given consumer tag (FNV-1a).
 func connIndexForTag(tag string, n int) int {
 	if n <= 1 {
@@ -1023,6 +1060,7 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 		select {
 		case <-ctx.Done():
 			wg.Wait()
+			c.requeueUndispatched(cur.ch)
 			return nil
 
 		case sub := <-resubCh:

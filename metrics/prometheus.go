@@ -191,6 +191,7 @@ func (m *PrometheusPublisherMetrics) RecordRateLimited(exchange string) {
 //   - consumer_max_redeliveries_total{queue,cause}
 //   - replier_drop_no_dlx_total{queue}
 //   - consumer_drop_no_dlx_total{queue}
+//   - consumer_shutdown_requeued_total{queue}
 //   - consumer_inflight_bytes{queue}
 //   - queue_depth{queue}
 //   - dlq_depth{dlq}
@@ -203,6 +204,7 @@ type PrometheusConsumerMetrics struct {
 	maxRedeliveriesTotal *prometheus.CounterVec
 	replierDropNoDLX     *prometheus.CounterVec
 	consumerDropNoDLX    *prometheus.CounterVec
+	shutdownRequeued     *prometheus.CounterVec
 	inFlightBytes        *prometheus.GaugeVec
 	queueDepth           *prometheus.GaugeVec
 	dlqDepth             *prometheus.GaugeVec
@@ -277,6 +279,10 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64, 
 			Name: "consumer_drop_no_dlx_total",
 			Help: "Total number of Consumer poison messages dropped after MaxRedeliveries with no known dead-letter exchange.",
 		}, []string{"queue"}),
+		shutdownRequeued: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "consumer_shutdown_requeued_total",
+			Help: "Total number of prefetched-but-undispatched deliveries Nack(requeue=true)'d at consumer shutdown.",
+		}, []string{"queue"}),
 		inFlightBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "consumer_inflight_bytes",
 			Help: "Current sum of in-flight message body sizes held by running handlers.",
@@ -299,6 +305,7 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64, 
 		m.maxRedeliveriesTotal,
 		m.replierDropNoDLX,
 		m.consumerDropNoDLX,
+		m.shutdownRequeued,
 		m.inFlightBytes,
 		m.queueDepth,
 		m.dlqDepth,
@@ -357,6 +364,11 @@ func (m *PrometheusConsumerMetrics) RecordReplierDropNoDLX(queue string) {
 // RecordConsumerDropNoDLX increments consumer_drop_no_dlx_total for the given queue.
 func (m *PrometheusConsumerMetrics) RecordConsumerDropNoDLX(queue string) {
 	m.consumerDropNoDLX.WithLabelValues(queue).Inc()
+}
+
+// RecordShutdownRequeued increments consumer_shutdown_requeued_total for the given queue.
+func (m *PrometheusConsumerMetrics) RecordShutdownRequeued(queue string) {
+	m.shutdownRequeued.WithLabelValues(queue).Inc()
 }
 
 // InFlightBytesAdd adjusts the consumer_inflight_bytes gauge for the given queue by delta.

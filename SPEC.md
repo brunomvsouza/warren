@@ -710,6 +710,17 @@ internally via `Concurrency(n)`.
   4. Closes every TCP connection in the pool.
   This entire cascade runs up to the `ctx` deadline; if exceeded,
   connections are closed forcefully.
+  **Prefetched-but-undispatched deliveries (T70 / DS-03 / SRE-07).** On
+  consumer shutdown, deliveries the broker prefetched but the consumer
+  had not yet dispatched to a handler are **`Nack(requeue=true)`'d** —
+  never dropped. A `BatchConsumer` also flushes its pending **partial
+  batch** before this requeue. This is an at-least-once duplicate
+  (acceptable under §6.2.1), made **explicit and observable** via
+  `consumer_shutdown_requeued_total{queue}` rather than left to the
+  broker's implicit requeue-on-channel-close, so the deploy-time
+  duplicate rate is boundable. (The forced-close detach of a
+  *non-cooperative* handler that ignores its cancelled ctx — CR-09 — and
+  its goleak carve-out are owned by the capstone T146.)
   **Component registration (lifecycle contract).** "Managed
   components" are the `Publisher[M]` / `Consumer[M]` / `BatchConsumer[M]`
   / `Caller` / `Replier` values built from this `*Connection`: each

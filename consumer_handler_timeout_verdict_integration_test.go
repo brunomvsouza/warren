@@ -41,6 +41,7 @@ func (s *spyConsumerMetrics) RecordHandler(_ string, _ string, outcome string, _
 }
 func (s *spyConsumerMetrics) RecordReplierDropNoDLX(_ string)    {}
 func (s *spyConsumerMetrics) RecordConsumerDropNoDLX(_ string)   {}
+func (s *spyConsumerMetrics) RecordShutdownRequeued(_ string)    {}
 func (s *spyConsumerMetrics) RecordCancelled(_, _ string)        {}
 func (s *spyConsumerMetrics) RecordMaxRedeliveries(_, _ string)  {}
 func (s *spyConsumerMetrics) InFlightBytesAdd(_ string, _ int64) {}
