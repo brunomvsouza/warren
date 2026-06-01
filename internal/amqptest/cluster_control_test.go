@@ -195,6 +195,20 @@ func TestFetchConnectionNodes(t *testing.T) {
 		_, err := fetchConnectionNodes(http.DefaultClient, "http://", "camp")
 		require.Error(t, err)
 	})
+
+	t.Run("a malformed credentialed URL fails without leaking userinfo", func(t *testing.T) {
+		// Both credentialed AND malformed (space in host) so url.Parse rejects the
+		// raw input. net/url's own error echoes that input verbatim; the wrapper must
+		// not, or the password would surface in a t.Fatalf log line (SPEC §8).
+		// The "" prefix is irrelevant here (url.Parse fails before it is used) but,
+		// being distinct from the other callers' "camp", keeps unparam from flagging
+		// namePrefix as constant — the production caller in cluster.go varies it but
+		// is hidden behind the cluster build tag on this lane.
+		_, err := fetchConnectionNodes(http.DefaultClient, "http://guest:s3cr3t@ host/", "")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "s3cr3t", "the parse error must not leak the password")
+		assert.NotContains(t, err.Error(), "guest", "the parse error must not leak the username")
+	})
 }
 
 func TestParseRunningNodes(t *testing.T) {

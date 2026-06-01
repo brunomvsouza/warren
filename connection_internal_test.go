@@ -652,6 +652,37 @@ func TestPerConnSeed_deterministicAndDistinct(t *testing.T) {
 	assert.Len(t, seeds, 8, "every (role, idx) pair must get a distinct seed")
 }
 
+// TestApplyConnDefaults_seedUnset_fillsNonZeroBase guards the addrShuffleSeed
+// defaulting in applyConnDefaults: an unset (0) seed must be filled with a
+// non-zero per-process base. The "0 means unset" sentinel is load-bearing — the
+// WithAddrShuffleSeedForTest seam and the per-process randomization both depend
+// on it — yet a regression dropping the `| 1` (or the whole block) could leave
+// the seed at 0, silently re-introducing the addr[0] stampede T66 prevents with
+// no other test failing. Two independent fills must also differ, pinning the
+// per-process-random intent (not a fixed constant). Collision is ~1/2^64.
+func TestApplyConnDefaults_seedUnset_fillsNonZeroBase(t *testing.T) {
+	var a, b connOptions // zero value → addrShuffleSeed == 0 (unset)
+	applyConnDefaults(&a)
+	applyConnDefaults(&b)
+
+	assert.NotZero(t, a.addrShuffleSeed, "an unset seed must default to a non-zero base")
+	assert.NotZero(t, b.addrShuffleSeed, "an unset seed must default to a non-zero base")
+	assert.NotEqual(t, a.addrShuffleSeed, b.addrShuffleSeed,
+		"the default base must be per-process random, not a fixed constant")
+}
+
+// TestApplyConnDefaults_seedExplicit_preserved guards the other half of the
+// sentinel: a caller-set non-zero seed survives applyConnDefaults untouched.
+// The cluster lane's determinism (and the WithAddrShuffleSeedForTest seam's
+// "a non-zero value is preserved as-is" contract) silently rely on this; assert
+// it on the default lane too.
+func TestApplyConnDefaults_seedExplicit_preserved(t *testing.T) {
+	const want int64 = 0x5EED_F00D
+	opts := connOptions{addrShuffleSeed: want}
+	applyConnDefaults(&opts)
+	assert.Equal(t, want, opts.addrShuffleSeed, "an explicitly-set non-zero seed must be preserved")
+}
+
 // dialOrder builds the shuffled permutation once and caches it (stable across
 // calls), matching shuffledAddrs for the socket's seed.
 func TestDialOrder_cachedStablePermutation(t *testing.T) {
