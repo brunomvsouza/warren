@@ -104,7 +104,7 @@ const (
 // cancel is observed first (the normal path), or a shutdown/closed error if Close
 // wins the race. Any OTHER error means the failover path misbehaved and must
 // surface. The standby consumer instead stops via a plain context cancel, so it
-// reuses filterClusterCanceled (defined in cluster_quorum_failover_cluster_test.go).
+// reuses filterClusterCanceled (defined in the un-tagged cluster_predicates_test.go).
 //
 // ErrConsumerCancelled is deliberately NOT in the tolerated set: a SIGKILLed node
 // cannot send a broker-side basic.cancel, so a consumer-cancel arriving here would

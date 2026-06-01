@@ -147,9 +147,12 @@ func TestClusterRollingUpgradeUnderLoad_Continuity_cluster(t *testing.T) {
 	require.NoError(t, topo.Declare(ctx, conn))
 	require.NoError(t, topo.AttachTo(conn))
 
-	before := amqptest.QuorumLeader(t, queue)
+	// Precondition: a quorum queue spanning all three members. Poll for full replication
+	// (as the partition campaign does) rather than reading once right after Declare —
+	// membership is assigned at declare, but a follower can still be catching up to Online,
+	// and awaitQueueFullyOnline gates on all members present AND online.
+	before := awaitQueueFullyOnline(t, queue, 60*time.Second)
 	require.Equal(t, "quorum", before.Type)
-	require.Len(t, before.Members, 3, "quorum queue must span all three cluster nodes")
 
 	var (
 		mu           sync.Mutex
@@ -226,6 +229,28 @@ func TestClusterRollingUpgradeUnderLoad_Continuity_cluster(t *testing.T) {
 		}
 	}()
 
+	// Stop both load goroutines and WAIT for them to exit before goleak runs — including
+	// on an early require failure. Body defers run before t.Cleanup and, registered after
+	// the goleak defer, run before it; cancelling ctx first unblocks a Publish/Consume
+	// parked on the reconnect barrier so the joins below cannot hang. sync.Once makes the
+	// happy-path explicit stops below no-ops the second time, so neither close(pubDone) nor
+	// the single consumeErr receive ever double-fires. The joins (pubWG.Wait / <-consumeErr)
+	// are themselves unbounded by design; the package-level `-timeout=60m` (Makefile
+	// test-cluster, S3) is the last-resort backstop for a goroutine that never observes the
+	// cancel — it dumps every stack and fails rather than wedging the suite.
+	var (
+		stopPubOnce sync.Once
+		stopConOnce sync.Once
+		consumeRes  error
+	)
+	stopPublisher := func() { stopPubOnce.Do(func() { close(pubDone); pubWG.Wait() }) }
+	stopConsumer := func() { stopConOnce.Do(func() { cancelConsume(); consumeRes = <-consumeErr }) }
+	defer func() {
+		cancel() // unblock anything parked on the barrier so the joins below return
+		stopPublisher()
+		stopConsumer()
+	}()
+
 	confirmedCount := func() int {
 		mu.Lock()
 		defer mu.Unlock()
@@ -254,8 +279,7 @@ func TestClusterRollingUpgradeUnderLoad_Continuity_cluster(t *testing.T) {
 	}
 
 	// Stop the load and join the publisher before the recovery gate + drain.
-	close(pubDone)
-	pubWG.Wait()
+	stopPublisher()
 
 	// Recovery: every member is back and the queue spans all three again. WaitClusterReady
 	// inside the loop only gates on the Erlang nodes being *running* — after the last
@@ -297,8 +321,8 @@ func TestClusterRollingUpgradeUnderLoad_Continuity_cluster(t *testing.T) {
 		return len(publishedSet) > 0 && len(lossByMessageID(publishedSet, consumedSet)) == 0
 	}, 90*time.Second, 250*time.Millisecond, "all confirmed publishes must be consumed across the rolling restart (zero loss)")
 
-	cancelConsume()
-	require.NoError(t, filterClusterCanceled(<-consumeErr), "consumer must stop cleanly")
+	stopConsumer()
+	require.NoError(t, filterClusterCanceled(consumeRes), "consumer must stop cleanly")
 
 	mu.Lock()
 	lost := lossByMessageID(publishedSet, consumedSet)
