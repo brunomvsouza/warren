@@ -8,6 +8,8 @@ import (
 	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
+
+	"github.com/brunomvsouza/warren/log"
 )
 
 // Topology describes the AMQP exchanges, queues, bindings, and dead-letter rules
@@ -215,6 +217,8 @@ func (t *Topology) Declare(ctx context.Context, conn *Connection) error {
 	}
 	expanded := t.expand()
 
+	warnDelayedExchanges(conn.opts.logger, expanded.Exchanges)
+
 	ch, err := conn.openDeclareChannel(ctx)
 	if err != nil {
 		return err
@@ -222,6 +226,29 @@ func (t *Topology) Declare(ctx context.Context, conn *Connection) error {
 	defer ch.Close() //nolint:errcheck
 
 	return declareOnChannel(expanded, ch)
+}
+
+// warnDelayedExchanges emits one durability warning per ExchangeDelayed in the
+// declared topology (T57 / SPEC §6.5). The rabbitmq_delayed_message_exchange
+// plugin stores scheduled messages in a node-local, non-replicated table, so a
+// confirmed delayed publish can still be lost on node failure — the warning
+// makes that load-bearing caveat visible at declare time. A nil logger is a
+// no-op (callers pass log.NewNoOp() by default).
+func warnDelayedExchanges(logger log.Logger, exchanges []Exchange) {
+	if logger == nil {
+		return
+	}
+	for _, e := range exchanges {
+		if e.Kind != ExchangeDelayed {
+			continue
+		}
+		logger.Warningf("warren: exchange %q is an ExchangeDelayed (x-delayed-message): "+
+			"the plugin stores scheduled messages in a node-local, non-replicated table, "+
+			"so a confirmed delayed publish can still be lost on node failure even with "+
+			"durable topology and confirms on; for delays that must survive node failure "+
+			"prefer a durable queue with x-message-ttl + DLX (see Message.Delay, SPEC §6.5)",
+			e.Name)
+	}
 }
 
 // expand returns a deep copy of t with all in-memory pre-pass mutations applied:

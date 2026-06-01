@@ -55,7 +55,14 @@ const (
 	ExchangeTopic ExchangeKind = "topic"
 	// ExchangeHeaders routes messages based on header attributes instead of routing key.
 	ExchangeHeaders ExchangeKind = "headers"
-	// ExchangeDelayed routes messages via the rabbitmq_delayed_message_exchange plugin.
+	// ExchangeDelayed routes messages via the rabbitmq_delayed_message_exchange
+	// plugin (requires the plugin; set Args["x-delayed-type"] to the underlying
+	// routing kind). Durability caveat (load-bearing): the plugin stores scheduled
+	// messages in a node-local, non-replicated table that is NOT a quorum/durable
+	// queue, so a confirmed delayed publish can still be lost if the owning node
+	// fails before the delay elapses — even with durable topology and confirms on.
+	// For delays that must survive node failure, prefer a durable (ideally quorum)
+	// queue with x-message-ttl plus a DLX. See Message.Delay and SPEC §6.5.
 	ExchangeDelayed ExchangeKind = "x-delayed-message"
 )
 

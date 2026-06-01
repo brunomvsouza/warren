@@ -1380,10 +1380,10 @@ shares the supervisor — sequence, do not parallelize.**
 into Phase 12's priority sequence (they violate the §1 no-silent-failure
 bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 
-### [ ] T57 — Delayed-exchange durability godoc/warning [P0] · XS
+### [x] T57 — Delayed-exchange durability godoc/warning [P0] · XS
 - **Acceptance:**
-  - [ ] Godoc on `Message.Delay` and `ExchangeKindDelayed` mirrors the SPEC §6.5 warning: scheduled messages live in a non-replicated node-local table and are lost on node failure; recommends durable-queue + `x-message-ttl` + DLX.
-  - [ ] (Optional) `Topology.Declare` emits a one-time warning log when an `ExchangeDelayed` is declared.
+  - [x] Godoc on `Message.Delay` and `ExchangeKindDelayed` mirrors the SPEC §6.5 warning: scheduled messages live in a non-replicated node-local table and are lost on node failure; recommends durable-queue + `x-message-ttl` + DLX.
+  - [x] (Optional) `Topology.Declare` emits a one-time warning log when an `ExchangeDelayed` is declared.
 - **Verify:** `go doc` shows the warning; unit test asserts the warning log fires once per delayed-exchange declare.
 - **Files:** `message.go`, `topology.go`, `types.go`.
 - **Deps:** T10, T14, T31. **(R10-1, P0.1)**
