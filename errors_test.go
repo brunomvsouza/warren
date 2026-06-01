@@ -1,6 +1,7 @@
 package warren_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -87,6 +88,28 @@ func TestIsTransient(t *testing.T) {
 		{name: "ErrPreconditionFailed (406)", err: warren.ErrPreconditionFailed, want: false},
 		{name: "ErrTopologyRedeclareFailed", err: warren.ErrTopologyRedeclareFailed, want: false},
 		{name: "ErrInvalidMessage", err: warren.ErrInvalidMessage, want: false},
+
+		// Context cancellation overrides transient classification (T54): an upstream
+		// request cancellation must NOT trigger a PublishRetry, even when the error
+		// also wraps a transient sentinel.
+		{name: "context.Canceled bare", err: context.Canceled, want: false},
+		{
+			name: "ErrChannelPoolExhausted wrapping context.Canceled is NOT transient",
+			err:  fmt.Errorf("%w: %w", warren.ErrChannelPoolExhausted, context.Canceled),
+			want: false,
+		},
+		{
+			name: "context.Canceled wrapping ErrChannelClosed is NOT transient",
+			err:  fmt.Errorf("%w: %w", context.Canceled, warren.ErrChannelClosed),
+			want: false,
+		},
+		{
+			name: "ErrTransient wrapping context.Canceled is NOT transient",
+			err:  fmt.Errorf("%w: %w", warren.ErrTransient, context.Canceled),
+			want: false,
+		},
+		// context.DeadlineExceeded is left untouched — a timeout may be retryable.
+		{name: "context.DeadlineExceeded bare", err: context.DeadlineExceeded, want: false},
 	}
 
 	for _, tc := range tests {

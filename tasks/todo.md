@@ -1328,9 +1328,9 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 - **Files:** `consumer.go`, `consumer_health_test.go`, `consumer_pause_test.go`, `consumer_pause_integration_test.go`, `rpc_replier.go`, SPEC §6/§6.3, README. (`consumer_builder.go` unchanged — no new builder options needed.)
 - **Deps:** T18, T36.
 
-### [ ] T54 — Context Cancellation vs Transient Errors [P2] · XS
+### [x] T54 — Context Cancellation vs Transient Errors [P2] · XS
 - **Acceptance:**
-  - [ ] `IsTransient(err)` returns `false` if `errors.Is(err, context.Canceled)`.
+  - [x] `IsTransient(err)` returns `false` if `errors.Is(err, context.Canceled)`.
 - **Verify:** Table-driven test explicitly for `ErrChannelPoolExhausted` wrapped with `context.Canceled`.
 - **Files:** `errors.go`, `errors_test.go`.
 - **Deps:** T02, T07.

@@ -2091,6 +2091,13 @@ func AMQPCode(err error) (code uint16, ok bool)
 // PublishRetry must accept that a retry can produce a duplicate
 // (the broker may have persisted the message before the channel
 // died). See §6.2.1.
+//
+// Note on context.Canceled: NEVER transient — returns false even when
+// the error also wraps a transient sentinel (e.g. ErrChannelPoolExhausted
+// observed while the caller's ctx was cancelled mid-acquire). An upstream
+// request cancellation fails identically on every retry, so PublishRetry
+// must not loop on it. context.DeadlineExceeded is NOT special-cased — a
+// timeout may succeed on a later attempt.
 func IsTransient(err error) bool
 
 // IsPermanent reports whether err is classified as non-retryable.
