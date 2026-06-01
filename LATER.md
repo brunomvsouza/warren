@@ -1277,6 +1277,18 @@ dependency for the doc reconciliation itself.
 
 **Prerequisites:** None.
 
+### LATER-89 — `Connection.Health` pins to `pubConns[0]`, so a boot-degraded first socket reports unhealthy while the role can serve
+
+**Context:** `Connection.Health` (`connection.go:351-361`) probes a single fixed publisher socket — `pubConns[0]` — rather than asking whether the publisher *role* can serve. Before the T67 partial-pool-connect policy this was benign: every pooled socket was live at boot or `Dial` failed. T67 changed that: a pool now boots with `connected >= 1` per role, and the failed socket is marked `bootDegraded` / `reconnecting` and brought up under supervision. If the boot-degraded socket happens to be index 0, `Health` returns `ErrReconnecting`/`ErrNotConnected` even though `pubConns[1..]` are live and the connection can publish. The partial-pool integration test sidesteps this by waiting (`require.Eventually`) until the *whole* pool is live, so the gap is currently unobserved by tests.
+
+**Impact:** A health/readiness probe wired to `Connection.Health` can report the connection unhealthy during the boot-degraded window (and on any later reconnect of socket 0) while the role is fully able to serve — a false-negative that could gate traffic, fail a readiness check, or trigger an unnecessary restart of an otherwise-serving process. No correctness impact on publish/consume; the misreport is confined to the health signal. A reviewer flagged the underlying design as "seems wrong" during the Phase 11 `/ship`.
+
+**Evidence:** Phase 11 `/ship` fan-out (`code-reviewer`, connection slice, 2026-06-01) — Suggestion; user concurred the pinning is wrong and asked to defer.
+
+**Suggested solution:** Redefine `Health` in role terms: report OK for a role if **any** socket in that role's pool is live (not degraded, not reconnecting), and surface a distinct degraded-but-serving signal (or reduced-capacity warning) instead of a hard error when some-but-not-all sockets are down. Alternatively, document explicitly that `Health` reflects `conn[0]` specifically so operators do not wire it as a role-readiness gate. Cross-check against SPEC §6.1's degraded-state contract so the role-level semantics and the existing `ErrTopologyRedeclareFailed` degraded path stay consistent. Add a unit test driving a pool whose `pubConns[0]` is boot-degraded while `pubConns[1]` is live, asserting `Health` passes.
+
+**Prerequisites:** None (T67 already shipped, which is what made this reachable).
+
 <!-- LATER-86 resolved: managedConn.health now routes the probe channel open through
 openChannel (the chanFactory seam) and classifies both the open and close errors via
 wrapAMQPError("warren: health: %w", …), so Consumer.Health / Connection.Health errors are
