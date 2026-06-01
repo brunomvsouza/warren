@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	amqp091 "github.com/rabbitmq/amqp091-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -293,6 +294,79 @@ func TestHealth_cancelledCtx_returnsCtxErr(t *testing.T) {
 	cancel()
 	err := mc.health(ctx)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// — health: broker-error classification (LATER-86, SPEC §6.3) ——————————————
+
+// healthChan is a minimal topologyChannel for health() unit tests: it records
+// whether Close was called and returns a configurable Close error. Injected via
+// managedConn.chanFactory so the probe's open/close round-trip — otherwise
+// integration-only — is exercised as a unit test.
+type healthChan struct {
+	closeErr error
+	closed   bool
+}
+
+func (h *healthChan) ExchangeDeclare(_, _ string, _, _, _, _ bool, _ amqp091.Table) error {
+	return nil
+}
+
+func (h *healthChan) QueueDeclare(name string, _, _, _, _ bool, _ amqp091.Table) (amqp091.Queue, error) {
+	return amqp091.Queue{Name: name}, nil
+}
+
+func (h *healthChan) QueueBind(_, _, _ string, _ bool, _ amqp091.Table) error { return nil }
+
+func (h *healthChan) Close() error {
+	h.closed = true
+	return h.closeErr
+}
+
+func TestHealth_channelOpenError_wrappedAsReplyCodeSentinel(t *testing.T) {
+	// LATER-86: a broker error from opening the health-probe channel must be
+	// classified through wrapAMQPError, so callers can errors.Is it against the
+	// reply-code sentinels (SPEC §6.3) — not receive a bare *amqp091.Error that
+	// matches no sentinel. Every other T53 broker path already wraps; Health must
+	// be consistent.
+	mc := newBareManaged(t)
+	mc.raw = &amqp091.Connection{} // non-nil so the nil-raw guard passes; never dereferenced (chanFactory wins)
+	mc.chanFactory = func() (topologyChannel, error) {
+		return nil, &amqp091.Error{Code: 403, Reason: "ACCESS_REFUSED - operation not permitted"}
+	}
+
+	err := mc.health(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrAccessRefused, "a 403 channel-open error must classify as ErrAccessRefused")
+	assert.Contains(t, err.Error(), "warren: health:", "the wrap must carry the operation prefix")
+}
+
+func TestHealth_channelCloseError_wrappedAsReplyCodeSentinel(t *testing.T) {
+	// LATER-86: an error from closing the probe channel must likewise route through
+	// wrapAMQPError, not surface bare.
+	mc := newBareManaged(t)
+	mc.raw = &amqp091.Connection{}
+	ch := &healthChan{closeErr: &amqp091.Error{Code: 406, Reason: "PRECONDITION_FAILED - stale"}}
+	mc.chanFactory = func() (topologyChannel, error) { return ch, nil }
+
+	err := mc.health(context.Background())
+	require.Error(t, err)
+	assert.True(t, ch.closed, "Close must have been attempted")
+	assert.ErrorIs(t, err, ErrPreconditionFailed, "a 406 close error must classify as ErrPreconditionFailed")
+	assert.Contains(t, err.Error(), "warren: health:")
+}
+
+func TestHealth_success_returnsNilAfterOpenAndClose(t *testing.T) {
+	// The happy path opens then closes a probe channel and returns nil. The real
+	// open is integration-only; the chanFactory seam exercises the success path as
+	// a unit test and asserts the probe channel is always closed.
+	mc := newBareManaged(t)
+	mc.raw = &amqp091.Connection{}
+	ch := &healthChan{}
+	mc.chanFactory = func() (topologyChannel, error) { return ch, nil }
+
+	err := mc.health(context.Background())
+	require.NoError(t, err)
+	assert.True(t, ch.closed, "a successful health probe must close the channel it opened")
 }
 
 // — runBarrier: hook paths ————————————————————————————————————————————————

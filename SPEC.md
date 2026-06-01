@@ -1450,8 +1450,11 @@ re-call `Pause` if a drained state must persist across one.
 `Health(ctx)` returns `(*ConsumerHealth, error)`. The pinned-connection
 liveness check is the gate: on a connection error it returns
 `(nil, err)`, since a zeroed snapshot alongside an error would mislead a
-probe. When the connection is healthy it returns a populated
-`*ConsumerHealth`:
+probe. A broker error from the liveness probe's channel open/close
+round-trip is classified through the §6.8 reply-code sentinels, so a
+probe may `errors.Is(err, ErrAccessRefused)` (etc.) to distinguish a
+permission/precondition failure from a transient one. When the
+connection is healthy it returns a populated `*ConsumerHealth`:
 
 - `Active` — started, the consume loop has not exited, not closed, not
   paused (i.e. it is receiving deliveries). It flips to `false` when the
