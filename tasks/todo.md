@@ -1483,12 +1483,12 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `connection.go`, SPEC §6.1, `metrics/`, `connection_integration_test.go`.
 - **Deps:** T07, T07d. **(R10-12, P2.2)** — *pulled into Phase 16 (v0.1).*
 
-### [ ] T68 — Alternate-exchange support [P2] · S
+### [x] T68 — Alternate-exchange support [P2] · S
 - **Acceptance:**
-  - [ ] `x-alternate-exchange` declarable on an `Exchange` (server-side catch-all for unroutable messages), complementing `Mandatory()`+`OnReturn`.
-  - [ ] **Lens-04 (EDA-01):** the platform-level unroutable safety net — a mis-routed publish *without* `Mandatory()` vanishes silently (EG-1); the AE catches it server-side regardless of per-publish discipline. Complements T103's client-side exchange-name validation.
-  - [ ] **Lens-06 (GA-05):** the alternate exchange is exposed **additively** — via the existing `Exchange.Args` or a new optional field whose zero value = today's behaviour; **no exported `Exchange` field is renamed or removed** (T124 pins the topology roadmap additive).
-- **Verify:** Integration: publish (non-mandatory) to no matching binding with an AE configured → message arrives on the AE-bound queue.
+  - [x] The alternate exchange is declarable on an `Exchange` via the additive `AlternateExchange` field, injecting the broker's `alternate-exchange` arg (corrected from the spec's misnomer `x-alternate-exchange`). validate() rejects a raw `Args["alternate-exchange"]`.
+  - [x] **Lens-04 (EDA-01):** server-side catch-all for unroutable messages, complementing `Mandatory()`+`OnReturn`.
+  - [x] **Lens-06 (GA-05):** exposed **additively** — new optional field, zero value = today's behaviour; no exported `Exchange` field renamed/removed.
+- **Verify:** Unit `TestTopology_expand_alternateExchange` + `TestTopology_validate_rejectsRawAlternateExchangeArg`. Integration `TestAlternateExchange_catchesUnroutable_integration` (non-mandatory publish to a no-binding key → lands on the AE-bound catch queue).
 - **Files:** `topology.go`, `topology_test.go`, `topology_integration_test.go`.
 - **Deps:** T14, T15. **(R10-13, P2.4)** — *pulled into Phase 15 (v0.1).*
 

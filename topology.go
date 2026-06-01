@@ -41,7 +41,16 @@ type Exchange struct {
 	// closed, so it is generally not observable by the caller. Leave
 	// NoWait=false if you rely on Declare surfacing ErrTopologyMismatch.
 	NoWait bool
-	Args   map[string]any
+	// AlternateExchange names the server-side catch-all exchange for messages
+	// this exchange cannot route (the broker's `alternate-exchange` argument).
+	// It is the platform-level unroutable safety net (T68 / EDA-01): a mis-routed
+	// publish WITHOUT Mandatory() vanishes silently, and per-publish discipline
+	// does not scale across many producers — the alternate exchange catches the
+	// unroutable message server-side regardless. The zero value (empty) preserves
+	// today's behaviour. Declare the named exchange (and bind a catch-all queue
+	// to it) in the same Topology. Set the field, not Args["alternate-exchange"].
+	AlternateExchange string
+	Args              map[string]any
 }
 
 // Queue declares an AMQP queue.
@@ -455,6 +464,15 @@ func (t *Topology) expand() *Topology {
 		if e.Args != nil {
 			out.Exchanges[i].Args = copyArgs(e.Args)
 		}
+		// AlternateExchange (T68) injects the broker's `alternate-exchange`
+		// argument. The field is the single source of truth; validate() rejects a
+		// raw Args["alternate-exchange"].
+		if e.AlternateExchange != "" {
+			if out.Exchanges[i].Args == nil {
+				out.Exchanges[i].Args = make(map[string]any, 1)
+			}
+			out.Exchanges[i].Args["alternate-exchange"] = e.AlternateExchange
+		}
 	}
 	for i, q := range t.Queues {
 		out.Queues[i] = q
@@ -685,6 +703,12 @@ func (t *Topology) validate() error {
 		}
 		if _, ok := validKinds[e.Kind]; !ok {
 			return fmt.Errorf("%w: Exchange %q: unknown Kind %q", ErrInvalidOptions, e.Name, e.Kind)
+		}
+		// The alternate-exchange arg is set by the library from the typed
+		// AlternateExchange field (T68); a raw Args value would be a second source
+		// of truth that bypasses the field.
+		if _, raw := e.Args["alternate-exchange"]; raw {
+			return fmt.Errorf("%w: Exchange %q: set the AlternateExchange field instead of Args[\"alternate-exchange\"]", ErrInvalidOptions, e.Name)
 		}
 		if e.Kind == ExchangeDelayed {
 			v, ok := e.Args["x-delayed-type"]
