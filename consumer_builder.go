@@ -47,6 +47,11 @@ type ConsumerBuilder[M any] struct {
 	maxRedeliveries  int
 	counterBDisabled bool // true when quorum queue with DeliveryLimit > 0
 
+	// dedupeStore + dedupeTTL back the WithDedupe middleware (T55). nil store
+	// (the default) disables it.
+	dedupeStore DedupeStore
+	dedupeTTL   time.Duration
+
 	c      codec.Codec
 	cm     metrics.ConsumerMetrics
 	tracer otel.Tracer
@@ -135,6 +140,32 @@ func (b *ConsumerBuilder[M]) MaxInFlightBytes(n int64) *ConsumerBuilder[M] {
 // single point as "current".
 func (b *ConsumerBuilder[M]) WithQueueDepthSampler(interval time.Duration) *ConsumerBuilder[M] {
 	b.depthSampleInterval = interval
+	return b
+}
+
+// WithDedupe enables native consumer-side deduplication keyed by MessageID,
+// backed by store (T55). It abstracts the manual dedupe pattern (SPEC §6.2.1)
+// off the handler: before each delivery, the middleware asks store.Seen(id) and,
+// on a hit, acks the message WITHOUT invoking the handler; after the handler
+// returns nil (success), it calls store.Mark(id, ttl) so future redeliveries of
+// the same MessageID are recognised. A handler error is never marked, so the
+// message is reprocessed on redelivery.
+//
+// Failure mode is fail-OPEN: if store.Seen or store.Mark returns an error, the
+// middleware logs a warning and processes the message anyway, trading a possible
+// duplicate for availability — consistent with the at-least-once contract. The
+// store must therefore be treated as a best-effort cache, not a correctness gate;
+// handlers with non-idempotent side-effects should still guard themselves.
+//
+// Deliveries without a MessageID cannot be deduped and are passed straight to the
+// handler. ttl is the retention window passed to store.Mark; size it to cover the
+// maximum plausible duplicate gap (broker outage + reconnect + retry budget — 15
+// minutes suits most workloads, SPEC §6.2.1). Only the Consume path is wrapped;
+// ConsumeRaw handlers manage their own acks and are unaffected. store==nil (the
+// default) disables the middleware.
+func (b *ConsumerBuilder[M]) WithDedupe(store DedupeStore, ttl time.Duration) *ConsumerBuilder[M] {
+	b.dedupeStore = store
+	b.dedupeTTL = ttl
 	return b
 }
 

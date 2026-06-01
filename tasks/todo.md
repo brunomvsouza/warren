@@ -1335,10 +1335,10 @@ Decomposition of **T166** (Phase 24, Lens-13) pulled forward to run after Phase 
 - **Files:** `errors.go`, `errors_test.go`.
 - **Deps:** T02, T07.
 
-### [ ] T55 — Deduplication Middleware [P3] · M
+### [x] T55 — Deduplication Middleware [P3] · M
 - **Acceptance:**
-  - [ ] `WithDedupe(DedupeStore, ttl)` exposed on ConsumerBuilder.
-  - [ ] Pre-handler check (HIT -> Ack), Post-handler mark (on success).
+  - [x] `WithDedupe(DedupeStore, ttl)` exposed on ConsumerBuilder.
+  - [x] Pre-handler check (HIT -> Ack), Post-handler mark (on success).
 - **Verify:** Dedupes messages with same `MessageID`. Fails open on store error (logs warning, processes msg).
 - **Files:** `consumer.go`, `consumer_builder.go`.
 - **Deps:** T18, T38b.

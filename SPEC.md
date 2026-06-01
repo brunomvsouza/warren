@@ -1096,6 +1096,36 @@ via `Message[M].Headers`.
 The `examples/idempotent_consume/` directory ships a runnable
 reference for the pattern above.
 
+**Native `WithDedupe` middleware.** For the common case the library
+offers `ConsumerBuilder.WithDedupe(store DedupeStore, ttl)`, which
+abstracts the pattern above off the handler:
+
+```go
+type DedupeStore interface {
+    Seen(ctx context.Context, id string) (bool, error)
+    Mark(ctx context.Context, id string, ttl time.Duration) error
+}
+```
+
+On the `Consume` path (not `ConsumeRaw`, which owns its acks) the
+middleware, keyed by `MessageID`:
+
+- asks `store.Seen(id)` before the handler — a hit **acks** the
+  delivery without invoking the handler;
+- on a miss, runs the handler and, only on a `nil` return, calls
+  `store.Mark(id, ttl)` so future redeliveries are recognised — a
+  handler **error is never marked**, so the message is reprocessed;
+- **fails open**: any `Seen`/`Mark` error logs a sampled warning
+  (MessageID never logged; store error reported by type only, §8) and
+  processes the message anyway. The store is a best-effort cache, not
+  a correctness gate — non-idempotent handlers must still self-guard.
+
+Deliveries without a `MessageID` cannot be deduped and pass straight
+to the handler. `store == nil` (the default) disables the middleware.
+Size `ttl` exactly as the manual cache window above (15 minutes suits
+most workloads). `DedupeStore` implementations must be safe for
+concurrent use.
+
 ### 6.3 Consumer
 
 ```go
@@ -1197,6 +1227,7 @@ func (b *ConsumerBuilder[M]) AutoAck() *ConsumerBuilder[M]           // explicit
 func (b *ConsumerBuilder[M]) Args(Headers) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) OnCancel(func(tag string)) *ConsumerBuilder[M] // basic.cancel from broker; arg is the cancelled consumer tag (the frame carries no description). The consumer_cancelled_total metric label uses a bounded reason enum, not this tag — see §6.3
 func (b *ConsumerBuilder[M]) MaxRedeliveries(n int) *ConsumerBuilder[M]
+func (b *ConsumerBuilder[M]) WithDedupe(store DedupeStore, ttl time.Duration) *ConsumerBuilder[M] // native MessageID dedupe middleware (Consume path); fail-open; store==nil disables — see §6.2.1
 func (b *ConsumerBuilder[M]) Metrics(metrics.ConsumerMetrics) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) WithoutMetrics() *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) Tracer(otel.Tracer) *ConsumerBuilder[M]
