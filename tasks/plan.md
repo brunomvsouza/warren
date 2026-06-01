@@ -965,14 +965,14 @@ Goal: stand up the **multi-node cluster harness** and the **cluster-only-provabl
 
 Goal: Address gaps identified in the SRE assessment (operability at scale, memory limits, and cardinality) originating from `LATER.md`.
 
-- **T47** `topology.go`: Inject `Binding{Exchange: dlxName, Queue: dlqName, RoutingKey: "#"}` in the in-memory expansion of `DeadLetter` (fix routing limbo).
-- **T48** `codec/json.go`: Evaluate `dec.More()` in `Decode` and return `ErrInvalidMessage` if trailing data exists. Add Fuzz target for strict mode.
-- **T49** `metrics/prometheus.go` and `consumer.go`: Change the `reason` label in `consumer_cancelled_total` from a raw UUIDv7 to a closed enum (`"queue_deleted"`, `"exclusive_revoked"`, `"unknown"`), preventing Prometheus OOM.
-- **T50** `consumer.go`: Expose `MaxInFlightBytes(n)` on the builder. Decrement semaphore after handler; pause ingestion when the limit is reached to avoid local OOM.
-- **T51** `publisher.go`: Add `WithPublishRateLimit(perSec)` (local token-bucket) to protect the broker from accidental runaway loops.
-- **T52** `consumer.go` and `metrics/`: Create `WithQueueDepthSampler` to poll (via `declare-passive`) and export native `queue_depth` and `dlq_depth` gauges.
-- **T52a** `consumer.go`: Failure-aware depth sampler — clamp sub-100ms intervals to a 100ms floor (one-time warn) and back off exponentially (capped, never below the configured interval) while every probe in a sample fails, so a permanently-missing queue or a reconnecting socket stops probing at full rate. Resolves LATER-80.
-- **T52b** `consumer.go` and `metrics/`: Delete the `queue_depth`/`dlq_depth` series when the sampler stops, so a long-lived process cycling through distinct queue names cannot accumulate stale frozen series. Resolves LATER-81.
+- **T47** ✅ `topology.go`: Inject `Binding{Exchange: dlxName, Queue: dlqName, RoutingKey: "#"}` in the in-memory expansion of `DeadLetter` (fix routing limbo).
+- **T48** ✅ `codec/json.go`: Evaluate `dec.More()` in `Decode` and return `ErrInvalidMessage` if trailing data exists. Add Fuzz target for strict mode.
+- **T49** ✅ `metrics/prometheus.go` and `consumer.go`: Change the `reason` label in `consumer_cancelled_total` from a raw UUIDv7 to a closed enum (`"queue_deleted"`, `"exclusive_revoked"`, `"unknown"`), preventing Prometheus OOM.
+- **T50** ✅ `consumer.go`: Expose `MaxInFlightBytes(n)` on the builder. Decrement semaphore after handler; pause ingestion when the limit is reached to avoid local OOM.
+- **T51** ✅ `publisher.go`: Add `WithPublishRateLimit(perSec)` (local token-bucket) to protect the broker from accidental runaway loops.
+- **T52** ✅ `consumer.go` and `metrics/`: Create `WithQueueDepthSampler` to poll (via `declare-passive`) and export native `queue_depth` and `dlq_depth` gauges.
+- **T52a** ✅ `consumer.go`: Failure-aware depth sampler — clamp sub-100ms intervals to a 100ms floor (one-time warn) and back off exponentially (capped, never below the configured interval) while every probe in a sample fails, so a permanently-missing queue or a reconnecting socket stops probing at full rate. Resolves LATER-80.
+- **T52b** ✅ `consumer.go` and `metrics/`: Delete the `queue_depth`/`dlq_depth` series when the sampler stops, so a long-lived process cycling through distinct queue names cannot accumulate stale frozen series. Resolves LATER-81.
 - **T53** ✅ `consumer.go`: Expose `Pause(ctx)` and `Resume(ctx)` for manual graceful degradation (local `basic.cancel` / re-`basic.consume` on the same channel; in-flight handlers survive). Evolved the check to a rich `Health(ctx) (*ConsumerHealth, error)` with `Active`/`Paused`/`LastDeliveryAt`/`InFlightHandlers` for k8s liveness probes (returns `(nil, err)` on connection failure; signature reconciled in SPEC §6/§6.3, `rpc_replier.go` adapted).
 - **T54** ✅ `errors.go`: Refine `IsTransient()` to return false when the root cause is `context.Canceled`, blocking useless PublishRetries from upstream request cancellations.
 - **T55** ✅ `consumer_builder.go`: Create native `WithDedupe(store, ttl)` middleware, abstracting LRU/Redis cache from the handler and ensuring correct commits.
