@@ -1388,12 +1388,12 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `message.go`, `topology.go`, `types.go`.
 - **Deps:** T10, T14, T31. **(R10-1, P0.1)**
 
-### [ ] T58 — Quorum `DeliveryLimit==0` default-20 warning [P0] · XS
+### [x] T58 — Quorum `DeliveryLimit==0` default-20 warning [P0] · XS
 - **Acceptance:**
-  - [ ] `Topology.validate()` logs a warning when `Type=QueueTypeQuorum && DeliveryLimit==0`.
-  - [ ] **Version-aware (Lens-01 RMQ-06):** read the broker version from `connection.start` server-properties — on 4.x warn "broker default 20, drops at 21"; on **3.13** warn "unbounded — infinite poison loop". The stale `topology.go:48-49` "Zero means unbounded" godoc is corrected.
-  - [ ] SPEC §9 poison-loop wording aligned with the corrected §6.3/§6.6.
-- **Verify:** Table test: quorum + `DeliveryLimit==0` → warning; quorum + `DeliveryLimit>0` → no warning; classic → no warning. Per-version poison-loop **integration** assertion on 3.13 and 4.x (gate G3).
+  - [x] `Topology.Declare` (via `warnQuorumDeliveryLimit`) logs a warning when `Type=QueueTypeQuorum && DeliveryLimit==0`. (validate() returns error-only and has no logger; the warning lives on the Declare path alongside the T57 delayed-exchange warning.)
+  - [x] **Version-aware (Lens-01 RMQ-06):** read the broker version from `connection.start` server-properties (`Connection.brokerVersion()`) — on 4.x warn "broker default 20, drops at 21"; on **3.13** warn "unbounded — infinite poison loop"; unknown version warns about both. The stale `topology.go` "Zero means unbounded" godoc is corrected.
+  - [x] SPEC §9/§6.6 poison-loop wording aligned (version-aware split documented).
+- **Verify:** Table test: quorum + `DeliveryLimit==0` → warning; quorum + `DeliveryLimit>0` → no warning; classic → no warning. Per-version poison-loop **integration** assertion on 3.13 and 4.x (gate G3) — *deferred to Phase 12 T74 (gate G3 owns the 3.13/4.x differential broker lane).*
 - **Files:** `topology.go`, `connection.go` (broker-version helper), `topology_test.go`.
 - **Deps:** T14, T15, T20. **(R10-2, P0.2)** — coordinate with T64 (same `validate()`); dep gate G3/T74.
 

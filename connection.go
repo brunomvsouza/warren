@@ -352,6 +352,19 @@ func (c *Connection) NumPubConns() int { return len(c.pubConns) }
 // NumConConns returns the number of consumer TCP connections in the pool.
 func (c *Connection) NumConConns() int { return len(c.conConns) }
 
+// brokerVersion returns the broker's reported version string (from the
+// connection.start server-properties), or "" if no live socket is available or
+// the property is absent. Used by Topology.Declare to emit version-aware
+// warnings (T58). Best-effort: it reads from the first live connection found.
+func (c *Connection) brokerVersion() string {
+	for _, mc := range append(append([]*managedConn(nil), c.pubConns...), c.conConns...) {
+		if v := mc.serverVersion(); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // registerReconnectHook adds fn to every managed connection's hook list.
 // Called by Topology.AttachTo (T16) and Consumer re-subscribe (T18).
 // This is an internal API; it is not part of the public surface.
@@ -392,6 +405,23 @@ func (c *Connection) openDeclareChannel(_ context.Context) (topologyChannel, err
 		return nil, ErrNotConnected
 	}
 	return c.pubConns[0].openChannel()
+}
+
+// serverVersion returns the broker version string from the connection.start
+// server-properties ("version"), or "" if the socket is not established or the
+// property is missing/non-string.
+func (mc *managedConn) serverVersion() string {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	if mc.raw == nil {
+		return ""
+	}
+	v, ok := mc.raw.Properties["version"]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
 }
 
 // negotiatedChannelMax returns the channel-max the broker negotiated during the
