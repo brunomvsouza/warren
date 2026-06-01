@@ -675,6 +675,11 @@ func (r *declareRecorder) QueueBind(name, key, exchange string, noWait bool, arg
 	return r.err
 }
 
+func (r *declareRecorder) ExchangeBind(destination, key, source string, noWait bool, args amqp091.Table) error {
+	r.calls = append(r.calls, "ebind:"+source+"->"+destination)
+	return r.err
+}
+
 func (r *declareRecorder) Close() error { return nil }
 
 func TestTopology_declareOnChannel_order(t *testing.T) {

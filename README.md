@@ -125,7 +125,7 @@ On reconnect, a **synchronous barrier** runs before traffic resumes on that sock
 | --- | --- |
 | **Connection** | Role-split TCP pool, PLAIN/EXTERNAL SASL, TLS (`amqps://`), multi-node failover, `Health` / `Close` / `ForceReconnect` |
 | **Publisher** | Publisher confirms, mandatory + returns, `PublishRetry`, `WithPublishRateLimit`, confirm/publish timeouts, payload-size guardrail, concurrency-safe |
-| **Topology** | Declarative exchanges/queues/bindings, dead-letter expansion, reconnect redeclare, degraded-state callbacks |
+| **Topology** | Declarative exchanges/queues/bindings, dead-letter expansion (durable bounded DLQ), alternate exchanges, exchange-to-exchange bindings, quorum/stream structural validation, reconnect redeclare, degraded-state callbacks |
 | **Consumer** | Prefetch, concurrency, `MaxInFlightBytes` memory guardrail, `MaxRedeliveries`, `HandlerTimeout`, `AutoAck`, `SingleActiveConsumer`, `WithDedupe` (MessageID dedupe middleware), `WithQueueDepthSampler` (`queue_depth`/`dlq_depth` gauges), `Pause`/`Resume` draining + `Health` snapshot for liveness probes, `basic.cancel` surfacing, `ConsumeRaw` escape hatch |
 | **Batch** | `PublishBatch` (always-all, `[]PublishResult`) and `BatchConsumerFor[M]` with size + timer flush triggers |
 | **Codec** | Lax JSON (default, with `WithUnknownFieldObserver` schema-drift hook), strict JSON, Protobuf, CloudEvents (structured + binary) |

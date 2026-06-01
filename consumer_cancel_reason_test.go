@@ -81,7 +81,8 @@ func (f *fakeInspectChannel) QueueDeclarePassive(name string, _, _, _, _ bool, _
 	return amqp091.Queue{Name: name}, nil
 }
 
-func (f *fakeInspectChannel) QueueBind(_, _, _ string, _ bool, _ amqp091.Table) error { return nil }
+func (f *fakeInspectChannel) QueueBind(_, _, _ string, _ bool, _ amqp091.Table) error    { return nil }
+func (f *fakeInspectChannel) ExchangeBind(_, _, _ string, _ bool, _ amqp091.Table) error { return nil }
 
 func (f *fakeInspectChannel) Close() error {
 	f.closed = true

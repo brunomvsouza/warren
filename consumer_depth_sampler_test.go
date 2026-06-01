@@ -43,7 +43,8 @@ func (f *fakeDepthChannel) QueueDeclare(_ string, _, _, _, _ bool, _ amqp091.Tab
 	return amqp091.Queue{}, nil
 }
 
-func (f *fakeDepthChannel) QueueBind(_, _, _ string, _ bool, _ amqp091.Table) error { return nil }
+func (f *fakeDepthChannel) QueueBind(_, _, _ string, _ bool, _ amqp091.Table) error    { return nil }
+func (f *fakeDepthChannel) ExchangeBind(_, _, _ string, _ bool, _ amqp091.Table) error { return nil }
 
 func (f *fakeDepthChannel) QueueDeclarePassive(name string, _, _, _, _ bool, _ amqp091.Table) (amqp091.Queue, error) {
 	f.mu.Lock()
@@ -300,7 +301,8 @@ func (b *bareTopoChannel) QueueDeclare(_ string, _, _, _, _ bool, _ amqp091.Tabl
 	return amqp091.Queue{}, nil
 }
 
-func (b *bareTopoChannel) QueueBind(_, _, _ string, _ bool, _ amqp091.Table) error { return nil }
+func (b *bareTopoChannel) QueueBind(_, _, _ string, _ bool, _ amqp091.Table) error    { return nil }
+func (b *bareTopoChannel) ExchangeBind(_, _, _ string, _ bool, _ amqp091.Table) error { return nil }
 
 func (b *bareTopoChannel) Close() error {
 	b.mu.Lock()

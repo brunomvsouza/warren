@@ -25,6 +25,26 @@ type Topology struct {
 	Queues      []Queue
 	Bindings    []Binding
 	DeadLetters []DeadLetter
+	// ExchangeBindings declares exchange→exchange bindings (exchange.bind) for
+	// layered fan-out topologies (T69 / EDA-03). It is a SEPARATE slice — Binding
+	// (exchange→queue) is intentionally not reshaped (GA-05). The declare-once /
+	// deep-snapshot semantics extend to ExchangeBindings.
+	ExchangeBindings []ExchangeBinding
+}
+
+// ExchangeBinding declares an exchange-to-exchange binding (exchange.bind):
+// messages routed to Source that match RoutingKey are forwarded to Destination.
+// This enables layered ingest→per-domain fan-out without flattening the topology.
+type ExchangeBinding struct {
+	// Source is the upstream exchange messages are published to / arrive at.
+	Source string
+	// Destination is the downstream exchange that receives matching messages.
+	Destination string
+	// RoutingKey filters which messages are forwarded (matched per Source's kind).
+	RoutingKey string
+	// NoWait skips the broker confirmation (see the NoWait caveat on Binding).
+	NoWait bool
+	Args   map[string]any
 }
 
 // Exchange declares an AMQP exchange.
@@ -282,6 +302,7 @@ type topologyChannel interface {
 	ExchangeDeclare(name, kind string, durable, autoDelete, internal, noWait bool, args amqp091.Table) error
 	QueueDeclare(name string, durable, autoDelete, exclusive, noWait bool, args amqp091.Table) (amqp091.Queue, error)
 	QueueBind(name, key, exchange string, noWait bool, args amqp091.Table) error
+	ExchangeBind(destination, key, source string, noWait bool, args amqp091.Table) error
 	Close() error
 }
 
@@ -447,16 +468,23 @@ func autoDLQArgs(dl DeadLetter) map[string]any {
 func (t *Topology) expand() *Topology {
 	// Deep-copy all slices so mutations don't affect the original.
 	out := &Topology{
-		Exchanges:   make([]Exchange, len(t.Exchanges)),
-		Queues:      make([]Queue, len(t.Queues)),
-		Bindings:    make([]Binding, len(t.Bindings)),
-		DeadLetters: make([]DeadLetter, len(t.DeadLetters)),
+		Exchanges:        make([]Exchange, len(t.Exchanges)),
+		Queues:           make([]Queue, len(t.Queues)),
+		Bindings:         make([]Binding, len(t.Bindings)),
+		DeadLetters:      make([]DeadLetter, len(t.DeadLetters)),
+		ExchangeBindings: make([]ExchangeBinding, len(t.ExchangeBindings)),
 	}
 	copy(out.DeadLetters, t.DeadLetters)
 	for i, b := range t.Bindings {
 		out.Bindings[i] = b
 		if b.Args != nil {
 			out.Bindings[i].Args = copyArgs(b.Args)
+		}
+	}
+	for i, eb := range t.ExchangeBindings {
+		out.ExchangeBindings[i] = eb
+		if eb.Args != nil {
+			out.ExchangeBindings[i].Args = copyArgs(eb.Args)
 		}
 	}
 	for i, e := range t.Exchanges {
@@ -649,6 +677,11 @@ func declareOnChannel(topo *Topology, ch topologyChannel) error {
 			return wrapMismatch(err)
 		}
 	}
+	for _, eb := range topo.ExchangeBindings {
+		if err := ch.ExchangeBind(eb.Destination, eb.RoutingKey, eb.Source, eb.NoWait, amqp091.Table(eb.Args)); err != nil {
+			return wrapMismatch(err)
+		}
+	}
 	return nil
 }
 
@@ -818,6 +851,15 @@ func (t *Topology) validate() error {
 			if k, ok := exchKind[b.Exchange]; ok && k == ExchangeFanout {
 				return fmt.Errorf("%w: Binding to fanout exchange %q must have an empty RoutingKey", ErrInvalidOptions, b.Exchange)
 			}
+		}
+	}
+
+	for _, eb := range t.ExchangeBindings {
+		if eb.Source == "" {
+			return fmt.Errorf("%w: ExchangeBinding.Source must not be empty", ErrInvalidOptions)
+		}
+		if eb.Destination == "" {
+			return fmt.Errorf("%w: ExchangeBinding.Destination must not be empty", ErrInvalidOptions)
 		}
 	}
 
