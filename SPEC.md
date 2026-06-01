@@ -1842,13 +1842,21 @@ type Topology struct {
 }
 
 type Exchange struct {
-    Name       string
-    Kind       ExchangeKind
-    Durable    bool
-    AutoDelete bool
-    Internal   bool
-    NoWait     bool     // skip broker confirmation (faster, but errors are silent)
-    Args       Headers
+    Name              string
+    Kind              ExchangeKind
+    Durable           bool
+    AutoDelete        bool
+    Internal          bool
+    NoWait            bool   // skip broker confirmation (faster, but errors are silent)
+    // AlternateExchange (T68) names the server-side catch-all for messages this
+    // exchange cannot route — the broker's `alternate-exchange` argument (NOTE:
+    // no `x-` prefix; the earlier "x-alternate-exchange" wording was a misnomer).
+    // Additive: the zero value preserves today's behaviour, and no existing
+    // field is renamed/removed (GA-05). Set the field, not Args["alternate-exchange"]
+    // (validate() rejects the raw arg). Declare the named AE (and a catch-all
+    // queue bound to it) in the same Topology.
+    AlternateExchange string
+    Args              Headers
 }
 
 type ExchangeKind string
@@ -3633,9 +3641,11 @@ fresh spec amendment.
   implement what happens when some of the 2+2 pooled connections fail
   at boot (succeed-if-≥1-per-role with supervised reconnect of the
   rest, vs fail-fast) — currently unspecified.
-- **R10-13 — Alternate-exchange support (T68).** Expose
-  `x-alternate-exchange` so unroutable messages have a server-side
-  catch-all, complementing per-publish `Mandatory()`+`OnReturn`.
+- **R10-13 — Alternate-exchange support (T68).** Expose the broker's
+  `alternate-exchange` argument (via the additive `Exchange.AlternateExchange`
+  field — the original "x-alternate-exchange" wording was a misnomer; the
+  real RabbitMQ argument has no `x-` prefix) so unroutable messages have a
+  server-side catch-all, complementing per-publish `Mandatory()`+`OnReturn`.
 - **R10-14 — Exchange-to-exchange bindings (T69).** `Binding` only
   binds exchange→queue; add exchange→exchange (`exchange.bind`) for
   layered fan-out topologies (a real RabbitMQ extension).
