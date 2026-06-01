@@ -2469,6 +2469,7 @@ value.
 | Conformance   | `conformance`   | `conformance/*`           | Every commit, separate CI job |
 | Fuzz          | Go fuzz         | `*_fuzz_test.go`          | Nightly, 10m budget per target |
 | Benchmark     | `-bench`        | `*_bench_test.go`         | On-demand and on release tag |
+| Cluster       | `cluster`       | `*_cluster_test.go`       | On-demand / nightly — **never a per-PR gate** (Rev 23 D5) |
 
 ### Frameworks
 
@@ -2532,6 +2533,72 @@ direct-reply-to), not frame-encoding details. They live in the
   confirm churn to surface goroutine leaks under realistic timing
   (`goleak.VerifyNone`); CI runs a smaller cycle count, dialed up to
   1000 via `WARREN_CHAOS_CHURN_CYCLES`.
+
+### Cluster reliability lane
+
+The half of the §9 reliability claims a single-node broker cannot prove
+— quorum leader failover, SingleActiveConsumer failover on real node
+death, multi-node `WithAddrs` rotation, partition handling, and
+mixed-version rolling upgrade — runs on a dedicated **`cluster`
+build-tag lane** against a real multi-node cluster. It is **on-demand /
+nightly, never a required per-PR gate** (Rev 23 D5); the single-node
+`integration` lane stays the per-PR gate, and the **standing** dedicated
+multi-node environment is deferred to **LATER-49**.
+
+**Harness.** `test/docker-compose.cluster.yml` (`make cluster-up`) stands
+a **3-node quorum cluster** — pinned `rabbitmq:3.13.7-management`,
+`default_queue_type = quorum`, `cluster_partition_handling =
+pause_minority` (autoheal is intentionally unset so the pause is
+observable), `queue_leader_locator = client-local` (pinned, so leader
+placement is deterministic across the mixed-version member whose 4.x
+default is `balanced`) — plus a **Toxiproxy sidecar** hosting one proxy
+per node, each fronting that node's AMQP port. Tests dial the
+Toxiproxy-fronted ports so the control toolkit can cut/heal a node's
+client connectivity transparently. The lane talks to the externally
+provisioned cluster via `WARREN_CLUSTER_NODES` / `WARREN_CLUSTER_MGMT` /
+`WARREN_TOXIPROXY_URL`; each helper **fails (does not skip)** when its
+variable is unset, mirroring the `integration` lane's `AMQP_TEST_URL`
+rule, and `make test-cluster` carries a **zero-run guard** that fails if
+no `*_cluster` test executed. A single member (`rmq2`) is image-swappable
+via **`WARREN_RMQ2_IMAGE`** (default homogeneous 3.13.7) to form the
+mixed-version (3.13 + 4.x) cluster the rolling-upgrade campaign transits.
+
+**Fault injection — two distinct mechanisms, used honestly.** Toxiproxy
+fronts only the **AMQP client ports** (5672), so disabling a proxy severs
+**clients** but leaves inter-node Erlang distribution intact — it can
+never make a node a minority and so **cannot** trigger `pause_minority`.
+Accordingly:
+- **Client-connectivity** faults (the confirm-latency partition-tail
+  campaign) use the Toxiproxy cut/heal.
+- A **real broker-to-broker partition** (the pause_minority campaign)
+  is injected by disconnecting a node from the cluster's Docker network
+  (`docker network disconnect`, `amqptest.PartitionNode`), which severs
+  both client and inter-node links so the isolated node becomes a
+  minority and pauses.
+- **Node death / restart** use `docker kill` (crash) and `docker
+  restart` (graceful rolling restart).
+
+**Zero loss** is measured everywhere as the **published-set minus the
+consumed-set, deduplicated by `MessageID`** (the TV-09 method the
+reconnect chaos test self-tests with an injected drop): at-least-once
+duplicates from the reconnect barrier and `PublishRetry` are tolerated;
+only a never-consumed confirmed message counts as loss.
+
+**Per-campaign topology labels** — what each campaign asserts, the fault
+it injects, and the cluster property a single node cannot give:
+
+| Campaign (file)                         | Topology / fault                                   | Cluster-only property proven |
+| --------------------------------------- | -------------------------------------------------- | ---------------------------- |
+| Dial smoke (`_smoke`)                   | 3-node quorum; no fault                            | dial across 3 nodes → `Health` green, end to end |
+| Control toolkit (`_control`)            | quorum queue; `docker kill` the leader's node      | management API reports a **new** Raft leader |
+| Quorum leader failover (`_quorum_failover`) | quorum queue, leader pinned to a killable node; kill under load | zero loss across a **Raft re-election** |
+| SAC failover (`_sac_failover`)          | SingleActiveConsumer `Prefetch(1)`; kill active node | broker promotes the standby, publish-order == handler-order |
+| SAC multi in-flight (`_sac_failover_multi`) | SAC `Prefetch(N>1)`, gated handler; kill active node | the whole **multi-message** unacked set redelivered to the standby in order |
+| WithAddrs rotation (`_failover_rotation`) | N connections over 3 addrs; full-cluster restart  | reconnections **re-spread** — no `addr[0]` stampede |
+| Confirm latency (`_confirm_latency`)    | quorum queue under load; baseline + Toxiproxy cut/heal tail | majority-commit confirm latency tail **not clipped** to `+Inf` |
+| Reconnect storm (`_reconnect_storm`)    | 3+3 pool; repeated `ForceReconnect` waves under load | no stampede + zero loss + prefetch↔redelivery exercised |
+| Partition under load (`_partition`)     | quorum queue under load; **Docker-network** partition of a follower | `pause_minority` isolates the minority (drops from the quorum's `online` set), majority surfaces **classifiable errors** not silent stalls, zero loss + recovery on heal |
+| Rolling upgrade (`_rolling_upgrade`)    | quorum queue under load; rolling `docker restart` of each node (opt-in mixed 3.13 + 4.x) | continuity — load keeps confirming, consumers resubscribe, zero loss across every restart |
 
 ### Executable examples at checkpoints
 
