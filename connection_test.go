@@ -579,8 +579,12 @@ func TestDial_sASLExternal_getClientCertificateFn_passesValidation(t *testing.T)
 
 func TestDial_multiConn_dialCalledPubPlusConTimes(t *testing.T) {
 	defer goleak.VerifyNone(t)
-	// Each connection in the pool attempts a dial. With Retries=1 and an instant-
-	// fail dialer, Dial exhausts all attempts after exactly pubConns+conConns calls.
+	// With every dial failing, the publisher pool gets zero live connections, so
+	// the partial-pool policy (T67) fails Dial for that role — but only AFTER
+	// attempting every publisher socket (each once, Retries=1). Because the pool
+	// fails fast at connected==0, no supervisors are started, so there are no
+	// background reconnect dials: the dialer is called exactly pubN times
+	// (sequentially, from the first pass), and the consumer pool is never reached.
 	const pubN, conN = 3, 2
 	var count int32
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -590,19 +594,14 @@ func TestDial_multiConn_dialCalledPubPlusConTimes(t *testing.T) {
 		warren.WithConsumerConnections(conN),
 		warren.WithReconnectBackoff(warren.RetryPolicy{Retries: 1}),
 		warren.WithDialer(func(_, _ string) (net.Conn, error) {
-			// Use a closure variable; atomic not needed because the dialer is
-			// only called from Dial (sequential pool opening).
 			count++
 			return nil, errors.New("no broker")
 		}),
 	)
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, warren.ErrInvalidOptions))
-	// Dial opens pubN publisher connections first; first failure aborts the pool.
-	// So we get exactly 1 call (the first connection in the publisher pool fails).
-	// With Retries=1 exactly one attempt is made per socket.
-	assert.Equal(t, int32(1), count,
-		"Dial stops after the first connection failure; got %d dial calls", count)
+	assert.Equal(t, int32(pubN), count,
+		"a fully-failed publisher pool fails Dial after exactly pubN attempts (no background dials); got %d", count)
 }
 
 func TestDial_multiConn_singlePub_opensCorrectPools(t *testing.T) {

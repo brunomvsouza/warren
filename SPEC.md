@@ -553,6 +553,21 @@ and consumer traffic onto separate connections: a slow consumer
 cannot starve publish acks, and a flow-controlled publisher cannot
 block consumer dispatch.
 
+**Partial-pool-connect policy at `Dial` (T67 / SRE-08).** `Dial`
+**succeeds if at least one connection per role connects**; sockets that
+fail their initial connect are marked boot-degraded and brought up by
+their supervisor under the normal reconnect backoff. `Dial` **fails
+fast** only when an entire role gets zero connections (a Connection that
+cannot serve a role is useless) or when the `Dial` ctx is cancelled. A
+reduced-capacity boot is **not silent**: it increments
+`connection_degraded_total{role, reason="boot_reduced_capacity"}` and
+logs a warning naming the live/total counts, so an operator sees the
+capacity loss instead of discovering it under load. This avoids the two
+bad alternatives an undefined policy leaves: fail-fast lets one flaky
+node block every deploy, and succeed-degraded-silently hides lost
+capacity. Supervisors are started only after the pool is known to boot,
+so a fail-fast path spawns no background reconnect goroutines.
+
 **`WithAddrs` is shuffled per connection (T66).** Each pooled socket
 gets its own random ordering of the address list at `Dial`; reconnect
 then rotates round-robin through that per-connection order. Shuffling

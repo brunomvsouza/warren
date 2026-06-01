@@ -49,6 +49,12 @@ type managedConn struct {
 	degraded    bool
 	degradedErr error
 
+	// bootDegraded is set when this socket's initial connect failed at Dial but
+	// the pool still booted because ≥1 connection in its role succeeded (T67 /
+	// SRE-08). Its supervisor enters the reconnect path immediately to bring the
+	// socket up under supervision instead of giving up at boot.
+	bootDegraded bool
+
 	// reconnect hooks registered by Topology.AttachTo (T16) and Consumer (T18)
 	hooksMu sync.Mutex
 	hooks   []func(ctx context.Context) error
@@ -138,12 +144,19 @@ const topoRedeclareCoalesceWindow = 10 * time.Second
 // Dial establishes a supervised pool of AMQP connections and returns the
 // Connection.  It opens WithPublisherConnections + WithConsumerConnections TCP
 // sockets (default 2+2), validates options, and attempts each connection with
-// the configured backoff policy.  Dial returns when all initial connections
-// succeed.
+// the configured backoff policy.
+//
+// Partial-pool-connect policy (T67): Dial succeeds once at least ONE connection
+// per role connects; sockets that fail their initial connect are brought up by
+// their supervisor under the reconnect backoff, and the reduced-capacity boot is
+// surfaced via connection_degraded_total{reason="boot_reduced_capacity"} plus a
+// warning log. Dial fails only when an entire role gets zero connections, or
+// when ctx is cancelled.
 //
 // Validation errors (ErrInvalidOptions) are returned synchronously.  Network
 // errors cause Dial to retry up to the configured Retries limit per socket;
-// when exhausted (or ctx cancelled), the last network error is returned.
+// when an entire role is exhausted (or ctx cancelled), the last network error
+// is returned.
 func Dial(ctx context.Context, options ...Option) (*Connection, error) {
 	opts := connOptions{
 		saslMechanism:   SASLPlain,
@@ -210,6 +223,8 @@ func Dial(ctx context.Context, options ...Option) (*Connection, error) {
 // openPool dials count connections of the given role and starts their supervisors.
 func openPool(ctx context.Context, role string, count int, opts *connOptions) ([]*managedConn, error) {
 	pool := make([]*managedConn, count)
+	connected := 0
+	var lastErr error
 	for i := range count {
 		name := connpool.ConnName(opts.connectionName, role, i)
 		mc := &managedConn{
@@ -224,24 +239,78 @@ func openPool(ctx context.Context, role string, count int, opts *connOptions) ([
 		mc.barrierCond = sync.NewCond(&mc.barrierMu)
 
 		if err := mc.connectOnce(ctx); err != nil {
-			// shut down already-opened conns in this pool
-			for j := range i {
-				pool[j].cancel()
-				<-pool[j].done
-			}
-			return nil, err
+			// Partial-pool-connect policy (T67 / SRE-08): a single socket failing
+			// at boot does NOT fail Dial as long as ≥1 connection in this role
+			// connects. Mark it boot-degraded so its supervisor brings it up under
+			// supervision, and pre-set reconnecting so callers block on the barrier
+			// (and observe the T63 cap) rather than racing a nil socket. Supervisors
+			// are NOT started here — only after we know the pool boots — so a
+			// fail-fast (connected==0) path spawns no background reconnect goroutines.
+			mc.bootDegraded = true
+			mc.barrierMu.Lock()
+			mc.reconnecting = true
+			mc.barrierMu.Unlock()
+			lastErr = err
+		} else {
+			connected++
 		}
-
-		// start supervisor; inherit trace/log values from Dial ctx but not its
-		// cancellation (supervisor must outlive the caller's context).
-		// cancel is stored on mc and called by Connection.Close.
-		supCtx, cancel := context.WithCancel(context.WithoutCancel(ctx)) //nolint:gosec // G118: cancel stored on struct, called by Close
-		mc.cancel = cancel
-		go mc.supervisor(supCtx)
 
 		pool[i] = mc
 	}
+
+	// Decide whether the pool boots BEFORE spawning any supervisor.
+	// A cancelled Dial ctx must fail even if some sockets connected before
+	// cancellation — the caller asked to stop.
+	if ctx.Err() != nil {
+		closeRawConns(pool)
+		return nil, ctx.Err()
+	}
+	// Fail-fast only when the ENTIRE role has no connectivity: a Connection with
+	// zero live sockets for a role cannot serve that role.
+	if connected == 0 {
+		closeRawConns(pool)
+		return nil, fmt.Errorf("warren: %s pool: no connection could be established: %w", role, lastErr)
+	}
+
+	// The pool boots. Start a supervisor for every connection — live sockets are
+	// watched for close/block, boot-degraded sockets are brought up via the
+	// reconnect path. The supervisor inherits the Dial ctx's trace/log values but
+	// not its cancellation (it must outlive the caller's context); mc.cancel is
+	// stored and called by Connection.Close.
+	for _, mc := range pool {
+		supCtx, cancel := context.WithCancel(context.WithoutCancel(ctx)) //nolint:gosec // G118: cancel stored on struct, called by Close
+		mc.cancel = cancel
+		go mc.supervisor(supCtx)
+	}
+
+	// Booted with reduced capacity: make the silent capacity loss observed
+	// (SRE-08) — the missing sockets reconnect under supervision.
+	if connected < count {
+		opts.metrics.RecordDegraded(role, "boot_reduced_capacity")
+		opts.logger.Warningf(
+			"warren: %s pool booted at reduced capacity: %d/%d connections live, %d reconnecting under supervision (last error: %v)",
+			role, connected, count, count-connected, redact.Error(lastErr),
+		)
+	}
 	return pool, nil
+}
+
+// closeRawConns closes the live raw socket of every connection in the pool that
+// managed to connect. Used on the openPool fail-fast paths (cancelled ctx or
+// zero connections in a role) where no supervisors have been started yet, so
+// there is nothing to cancel — only raw sockets to release.
+func closeRawConns(conns []*managedConn) {
+	for _, mc := range conns {
+		if mc == nil {
+			continue
+		}
+		mc.mu.RLock()
+		raw := mc.raw
+		mc.mu.RUnlock()
+		if raw != nil {
+			_ = raw.Close()
+		}
+	}
 }
 
 // closeManagedConns cancels all conns in the slice and waits for them to exit.
@@ -637,50 +706,60 @@ func (mc *managedConn) supervisor(ctx context.Context) {
 		mc.mu.RUnlock()
 
 		if raw == nil {
+			// raw is nil at supervisor entry in two cases: a normal shutdown
+			// (Close cancelled ctx — exit), or a boot-degraded socket whose
+			// initial connect failed at Dial (T67 — bring it up under supervision
+			// via the reconnect path below). The notify-watch declarations are
+			// scoped to an inner block so this forward goto is legal.
+			if mc.bootDegraded && ctx.Err() == nil {
+				goto reconnect
+			}
 			return
 		}
 
-		blockedCh := raw.NotifyBlocked(make(chan amqp091.Blocking, 2))
-		closeCh := raw.NotifyClose(make(chan *amqp091.Error, 1))
+		{
+			blockedCh := raw.NotifyBlocked(make(chan amqp091.Blocking, 2))
+			closeCh := raw.NotifyClose(make(chan *amqp091.Error, 1))
 
-		blockedStart := time.Time{}
-		for {
-			select {
-			case <-ctx.Done():
-				_ = raw.Close()
-				return
+			blockedStart := time.Time{}
+			for {
+				select {
+				case <-ctx.Done():
+					_ = raw.Close()
+					return
 
-			case b, ok := <-blockedCh:
-				if !ok {
+				case b, ok := <-blockedCh:
+					if !ok {
+						goto reconnect
+					}
+					if b.Active {
+						blockedStart = time.Now()
+						mc.barrierMu.Lock()
+						mc.blocked = true
+						mc.barrierMu.Unlock()
+						mc.safeOnBlocked(b.Reason)
+					} else if !blockedStart.IsZero() {
+						elapsed := time.Since(blockedStart)
+						blockedStart = time.Time{}
+						mc.barrierMu.Lock()
+						mc.blocked = false
+						mc.barrierCond.Broadcast()
+						mc.barrierMu.Unlock()
+						mc.opts.metrics.RecordBlocked(mc.role, elapsed)
+					}
+
+				case _, ok := <-closeCh:
+					if !ok || ctx.Err() != nil {
+						return
+					}
+					goto reconnect
+
+				case <-mc.forceReconnectCh:
+					// Operator-initiated reconnect: close the raw connection (which
+					// may produce a graceful ok=false on closeCh) and reconnect.
+					_ = raw.Close()
 					goto reconnect
 				}
-				if b.Active {
-					blockedStart = time.Now()
-					mc.barrierMu.Lock()
-					mc.blocked = true
-					mc.barrierMu.Unlock()
-					mc.safeOnBlocked(b.Reason)
-				} else if !blockedStart.IsZero() {
-					elapsed := time.Since(blockedStart)
-					blockedStart = time.Time{}
-					mc.barrierMu.Lock()
-					mc.blocked = false
-					mc.barrierCond.Broadcast()
-					mc.barrierMu.Unlock()
-					mc.opts.metrics.RecordBlocked(mc.role, elapsed)
-				}
-
-			case _, ok := <-closeCh:
-				if !ok || ctx.Err() != nil {
-					return
-				}
-				goto reconnect
-
-			case <-mc.forceReconnectCh:
-				// Operator-initiated reconnect: close the raw connection (which
-				// may produce a graceful ok=false on closeCh) and reconnect.
-				_ = raw.Close()
-				goto reconnect
 			}
 		}
 
