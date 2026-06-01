@@ -1466,13 +1466,12 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `topology.go`, `consumer.go`, `consumer_builder.go`, `metrics/`.
 - **Deps:** T15, T47, T18, T30. **(R10-10, P1.3)**
 
-### [ ] T66 — `WithAddrs` shuffle + reconnect rotation [P2] · S
+### [x] T66 — `WithAddrs` shuffle + reconnect rotation [P2] · S
 - **Acceptance:**
-  - [ ] The address list is shuffled per connection at `Dial`; reconnect rotates to the next address rather than always retrying index 0.
-  - [ ] **Lens-02 (DS-10):** SPEC §6.1 notes this compounds with DS-09 (T62) into a recovery storm; the chaos lane asserts no `addr[0]` stampede on a full-cluster restart.
-  - [ ] **Lens-05 (SRE-04):** the chaos lane asserts no `addr[0]` stampede on a full-cluster restart (compounds with SRE-06/T62 into a recovery storm).
-  - [ ] **Lens-13 (LT-01/05):** harness fidelity: the "no `addr[0]` stampede on a full-cluster restart" assertion is **unrunnable on the single-node testcontainers harness** it is scheduled against — it binds to the **T166** multi-node cluster harness; the reconnect-storm is also a spike-on-recovery, exercised by the **T168** composite set. This assertion is confirmed, not re-filed — T166 finally gives it a harness that can run it.
-- **Verify:** Unit test asserts N connections start from a distribution of addresses; reconnect picks a different address. Chaos: a full-cluster restart shows reconnections spread across addresses.
+  - [x] The address list is shuffled per connection at `Dial` (`shuffleAddrs` → `managedConn.dialAddrs`); reconnect rotates round-robin through the per-connection shuffled order (`nextDialAddr`) rather than always retrying index 0.
+  - [x] **Lens-02 (DS-10) / Lens-05 (SRE-04):** SPEC §6.1 notes this compounds with DS-09/T62 into a recovery storm. *The chaos full-cluster-restart "no `addr[0]` stampede" assertion is unrunnable single-node — binds to the T166 cluster lane (already implemented there per the plan's T166e).* 
+  - [x] **Lens-13 (LT-01/05):** documented in SPEC §6.1 — the stampede assertion binds to T166 (multi-node); the unit suite asserts the shuffle distributes the starting address.
+- **Verify:** Unit `TestShuffleAddrs_*` (permutation, single/empty, start-address distribution) and `TestManagedConn_nextDialAddr_rotatesOverShuffledList`. Cluster stampede assertion rides T166.
 - **Files:** `connection.go`, `options_connection.go`, `connection_internal_test.go`.
 - **Deps:** T07, T07d. **(R10-11, P2.1)** — *already pulled into Phase 12.*
 
