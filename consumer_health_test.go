@@ -82,3 +82,72 @@ func TestConsumer_Snapshot_ActiveFalseAfterClose(t *testing.T) {
 	snap := c.snapshot()
 	assert.False(t, snap.Active, "a closed consumer is not Active")
 }
+
+func TestConsumer_Snapshot_ActiveFalseAfterCtxCancel(t *testing.T) {
+	// A consumer whose Consume loop has exited via ctx cancel — WITHOUT a Close call
+	// — is no longer consuming. Active must be false so a readiness probe does not
+	// keep a silently-dead consumer in rotation; this is the exact case Health exists
+	// to surface (SPEC §6.3, T53).
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	c, err := ConsumerFor[string](conn).Queue("q").Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery)
+	c.deliverySubOverride = &deliverySub{ch: deliveryCh, done: nil}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		_ = c.Consume(ctx, func(context.Context, string) error { return nil })
+	}()
+
+	require.Eventually(t, func() bool { return c.snapshot().Active }, time.Second, 5*time.Millisecond,
+		"a running, never-paused consumer is Active")
+
+	cancel()
+	<-consumeDone
+
+	assert.False(t, c.snapshot().Active, "a consumer whose loop exited via ctx cancel is not Active")
+	assert.False(t, c.snapshot().Paused)
+}
+
+func TestConsumer_Snapshot_ActiveFalseAfterBrokerCancel(t *testing.T) {
+	// A consumer whose loop exited via a broker basic.cancel (returning
+	// ErrConsumerCancelled) is permanently stopped. Active must be false even though
+	// neither Close nor a ctx cancel happened (T53).
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	// OnCancel set + NoOp metrics make classifyCancel return without broker I/O.
+	c, err := ConsumerFor[string](conn).Queue("q").OnCancel(func(string) {}).Build()
+	require.NoError(t, err)
+
+	deliveryCh := make(chan amqp091.Delivery)
+	c.deliverySubOverride = &deliverySub{ch: deliveryCh, done: nil}
+	c.cancelReasonCh = make(chan string, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumeErr := make(chan error, 1)
+	go func() {
+		consumeErr <- c.Consume(ctx, func(context.Context, string) error { return nil })
+	}()
+
+	require.Eventually(t, func() bool { return c.snapshot().Active }, time.Second, 5*time.Millisecond,
+		"consumer must be running before the broker cancel")
+
+	// Broker basic.cancel: runConsume fires OnCancel and returns ErrConsumerCancelled.
+	c.cancelReasonCh <- "ctag-x"
+
+	select {
+	case err := <-consumeErr:
+		require.ErrorIs(t, err, ErrConsumerCancelled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Consume did not return after the broker cancel")
+	}
+
+	assert.False(t, c.snapshot().Active, "a broker-cancelled consumer is not Active")
+}

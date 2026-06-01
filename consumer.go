@@ -327,6 +327,12 @@ type Consumer[M any] struct {
 	// started guards against calling Consume/ConsumeRaw more than once.
 	started atomic.Bool
 
+	// stopped is set once runConsume returns — via ctx cancel, a broker basic.cancel
+	// (ErrConsumerCancelled), or a fatal openDeliveryCh error. It distinguishes a
+	// consumer whose loop has permanently exited from a closed one, so ConsumerHealth.
+	// Active reports false for a silently-dead consumer even without a Close call (T53).
+	stopped atomic.Bool
+
 	// — T53 Health snapshot + draining state —
 	// lastDeliveryNanos is the UnixNano of the most recent delivery received from the
 	// broker (0 = none yet); surfaced as ConsumerHealth.LastDeliveryAt.
@@ -798,6 +804,10 @@ func (c *Consumer[M]) runConsume(ctx context.Context, h RawHandler[M], autoAck b
 	if !c.started.CompareAndSwap(false, true) {
 		return fmt.Errorf("%w: consumer already started; create a new consumer via Build() to restart", ErrInvalidOptions)
 	}
+	// Mark the consumer stopped on every return path (ctx cancel, broker basic.cancel,
+	// fatal openDeliveryCh error) so ConsumerHealth.Active flips to false once the loop
+	// exits — a silently-dead consumer must not report Active (T53).
+	defer c.stopped.Store(true)
 
 	// Queue-depth sampler (T52): run on its own context + waitgroup so every return
 	// path below (ctx cancel, basic.cancel, a fatal openDeliveryCh error) stops and
@@ -955,18 +965,23 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 	c.counterState.Store(&redeliveryCounter{})
 
 	// (Re)opening a delivery channel — initial connect or reconnect — means the
-	// consumer is actively subscribed again, so clear any stale pause. This keeps
-	// the Health snapshot accurate after a reconnect-during-pause and makes a
-	// subsequent Resume a harmless no-op instead of a duplicate basic.consume with
-	// the same consumer tag on a channel that already re-subscribed (T53).
-	c.paused.Store(false)
+	// consumer is actively subscribed again, so clear any stale pause. The clear runs
+	// under pauseMu, paired on the real path with publishing the fresh c.live, so a
+	// Resume racing a reconnect observes a consistent (paused, live) pair: it either
+	// sees paused==true with the OLD channel and re-subscribes there, or paused==false
+	// and becomes a no-op — never paused==true alongside a half-replaced channel. This
+	// keeps the Health snapshot accurate after a reconnect-during-pause and makes a
+	// subsequent Resume a harmless no-op instead of a duplicate basic.consume with the
+	// same consumer tag on a channel that already re-subscribed (T53).
 
 	if c.deliverySubOverride != nil {
+		c.clearPause()
 		return *c.deliverySubOverride, nil
 	}
 	if c.deliveryCh != nil {
 		// done is nil: channel-close detection is not exercised in basic unit tests.
 		// cancelReasonCh (when set) is handled in runConsume's main select loop.
+		c.clearPause()
 		return deliverySub{ch: c.deliveryCh, done: nil}, nil
 	}
 
@@ -1011,9 +1026,12 @@ func (c *Consumer[M]) openDeliveryCh(ctx context.Context) (deliverySub, error) {
 	var onceDone sync.Once
 	closeChannelDone := func() { onceDone.Do(func() { close(channelDone) }) }
 
-	// Record the physical-channel state so Pause/Resume can drive this channel (T53).
+	// Record the physical-channel state so Pause/Resume can drive this channel, and
+	// clear any stale pause in the SAME critical section so the (paused, live) pair is
+	// observed atomically by a concurrent Resume/Pause (T53).
 	c.pauseMu.Lock()
 	c.live = &liveSub{ch: ch, closeCh: closeCh, cancelCh: cancelCh, done: channelDone, closeDone: closeChannelDone}
+	c.paused.Store(false)
 	c.pauseMu.Unlock()
 
 	out := c.startPump(ctx, deliveries, closeCh, cancelCh, closeChannelDone)
@@ -1042,6 +1060,15 @@ func (c *Consumer[M]) startPump(ctx context.Context, deliveries <-chan amqp091.D
 					// drain both non-blockingly to recover the real reason. Only a real
 					// basic.cancel (ok=true) forwards a reason; a closed cancelCh
 					// (ok=false) just means the channel is shutting down.
+					//
+					// This relies on an amqp091-go ordering guarantee: on an abnormal
+					// channel shutdown it sends on the NotifyClose/NotifyCancel channels
+					// BEFORE closing the delivery channels (both under its notify mutex),
+					// so by the time we observe `deliveries` closed the death signal is
+					// already buffered and the non-blocking drains above see it. If a
+					// future amqp091-go bump reordered that, this drain could miss a real
+					// death and skip closeChannelDone — TestStartPump_ChannelDeath_*
+					// guards against it.
 					death := false
 					select {
 					case <-closeCh:
@@ -1476,8 +1503,11 @@ func safeDecodeConsumer(c codec.Codec, payload []byte, headers amqp091.Table, co
 // returns it only when the pinned connection is healthy; on a connection error
 // Health returns (nil, err), since a snapshot would carry no meaningful state.
 type ConsumerHealth struct {
-	// Active is true when the consumer is started, not closed, and not paused —
-	// i.e. it is (or should be) receiving and dispatching deliveries.
+	// Active is true when the consumer is started, its consume loop has not exited,
+	// it is not closed, and it is not paused — i.e. it is receiving and dispatching
+	// deliveries. It flips to false when the loop exits for any reason (ctx cancel,
+	// a broker basic.cancel, or a fatal subscribe error), so a probe wired to Active
+	// will not keep a silently-dead consumer in rotation.
 	Active bool
 	// Paused is true between Pause and Resume.
 	Paused bool
@@ -1487,6 +1517,15 @@ type ConsumerHealth struct {
 	LastDeliveryAt time.Time
 	// InFlightHandlers is the number of handler invocations currently executing.
 	InFlightHandlers int
+}
+
+// clearPause clears a stale pause flag under pauseMu. A fresh subscription means
+// the consumer is subscribed again; doing it under the lock lets a concurrent
+// Pause/Resume observe the cleared flag consistently with c.live (T53).
+func (c *Consumer[M]) clearPause() {
+	c.pauseMu.Lock()
+	c.paused.Store(false)
+	c.pauseMu.Unlock()
 }
 
 // isClosed reports whether Close has been called.
@@ -1506,9 +1545,13 @@ func (c *Consumer[M]) snapshot() ConsumerHealth {
 	if n := c.lastDeliveryNanos.Load(); n != 0 {
 		last = time.Unix(0, n)
 	}
+	// Read paused once: deriving Active and Paused from two separate Loads would let a
+	// concurrent Pause/Resume land between them and produce an inconsistent snapshot
+	// with Active && Paused both true (T53).
+	paused := c.paused.Load()
 	return ConsumerHealth{
-		Active:           c.started.Load() && !c.isClosed() && !c.paused.Load(),
-		Paused:           c.paused.Load(),
+		Active:           c.started.Load() && !c.stopped.Load() && !c.isClosed() && !paused,
+		Paused:           paused,
 		LastDeliveryAt:   last,
 		InFlightHandlers: int(c.inFlight.Load()),
 	}
@@ -1568,6 +1611,11 @@ func (c *Consumer[M]) Pause(ctx context.Context) error {
 // re-subscribe handshake); the resulting subscription is bound to the consumer
 // lifetime — the ctx passed to Consume/ConsumeRaw — not to this ctx, so a
 // request-scoped Resume ctx cannot silently stop delivery (T53).
+//
+// If the ctx is cancelled mid-handshake (after the basic.consume is issued but
+// before the loop adopts it), Resume rolls the subscription back with a local
+// basic.cancel and leaves the consumer paused, so the call is a clean no-op-retry
+// rather than leaving an orphaned broker subscription.
 func (c *Consumer[M]) Resume(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1590,11 +1638,21 @@ func (c *Consumer[M]) Resume(ctx context.Context) error {
 	}
 	select {
 	case c.resubCh <- sub:
+		c.paused.Store(false)
+		return nil
 	case <-ctx.Done():
+		// The Resume ctx was cancelled after the basic.consume was issued but before
+		// the running loop adopted the new subscription. Roll back so we leave neither
+		// an orphaned broker subscription nor an inconsistent Health (Paused while
+		// actually subscribed): cancel the basic.consume just issued and stay paused,
+		// so a later Resume is a clean retry. The pump started by resubscribeLocked is
+		// bound to runCtx and exits when this local cancel closes its delivery stream
+		// (paused, no death signal → channelDone stays open, in-flight handlers unharmed).
+		if c.live != nil {
+			_ = c.live.ch.Cancel(c.tag, false)
+		}
 		return ctx.Err()
 	}
-	c.paused.Store(false)
-	return nil
 }
 
 // resubscribeLocked re-issues basic.consume on the live channel and starts a fresh
