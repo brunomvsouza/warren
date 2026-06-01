@@ -245,7 +245,7 @@ func TestPublisher_Publish_publishRetry_retriesTransient(t *testing.T) {
 	defer stopPool()
 	defer func() { _ = pub.Close(context.Background()) }()
 
-	pub.retryPolicy = &RetryPolicy{Min: time.Millisecond, Max: 5 * time.Millisecond, WithoutJitter: true}
+	pub.retryPolicy = &RetryPolicy{Min: time.Millisecond, Max: 5 * time.Millisecond, Jitter: JitterNone}
 
 	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
 	require.NoError(t, err, "PublishRetry must succeed after transient error is resolved")
@@ -261,7 +261,7 @@ func TestPublisher_Publish_publishRetry_doesNotRetryPermanent(t *testing.T) {
 
 	// mandatory=true is required: basic.return only arrives for mandatory publishes.
 	pub.mandatory = true
-	pub.retryPolicy = &RetryPolicy{Min: time.Millisecond, WithoutJitter: true}
+	pub.retryPolicy = &RetryPolicy{Min: time.Millisecond, Jitter: JitterNone}
 
 	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
 	require.Error(t, err)
@@ -278,7 +278,7 @@ func TestPublisher_Publish_publishRetry_limitsAttempts(t *testing.T) {
 	defer stopPool()
 	defer func() { _ = pub.Close(context.Background()) }()
 
-	pub.retryPolicy = &RetryPolicy{Min: time.Millisecond, Max: 5 * time.Millisecond, WithoutJitter: true, Retries: 1}
+	pub.retryPolicy = &RetryPolicy{Min: time.Millisecond, Max: 5 * time.Millisecond, Jitter: JitterNone, Retries: 1}
 
 	err := pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}})
 	require.Error(t, err)
@@ -294,7 +294,7 @@ func TestPublisher_Publish_publishRetry_ctxCancelledDuringBackoff(t *testing.T) 
 	defer stopPool()
 	defer func() { _ = pub.Close(context.Background()) }()
 
-	pub.retryPolicy = &RetryPolicy{Min: 500 * time.Millisecond, Max: time.Second, WithoutJitter: true}
+	pub.retryPolicy = &RetryPolicy{Min: 500 * time.Millisecond, Max: time.Second, Jitter: JitterNone}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -325,7 +325,7 @@ func TestPublisher_Publish_publishRetry_incrementsMetric(t *testing.T) {
 	defer func() { _ = pub.Close(context.Background()) }()
 
 	pub.exchange = "ex"
-	pub.retryPolicy = &RetryPolicy{Min: time.Millisecond, Max: 5 * time.Millisecond, WithoutJitter: true}
+	pub.retryPolicy = &RetryPolicy{Min: time.Millisecond, Max: 5 * time.Millisecond, Jitter: JitterNone}
 
 	require.NoError(t, pub.Publish(context.Background(), Message[testPayload]{Body: &testPayload{}}))
 

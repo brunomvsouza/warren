@@ -323,7 +323,7 @@ func TestPublisher_Publish_RateLimited_PacesEveryRetryAttempt(t *testing.T) {
 	pub, _, stopPool := newTestPub[testPayload](fake, pm)
 	const perSec = 50 // 20ms interval, burst 50
 	pub.rateLimiter = newRateLimiter(perSec)
-	pub.retryPolicy = &RetryPolicy{Retries: 3, Min: time.Millisecond, Max: time.Millisecond, WithoutJitter: true}
+	pub.retryPolicy = &RetryPolicy{Retries: 3, Min: time.Millisecond, Max: time.Millisecond, Jitter: JitterNone}
 	defer goleak.VerifyNone(t)
 	defer stopPool()
 	defer func() { _ = pub.Close(context.Background()) }()
@@ -359,7 +359,7 @@ func TestPublisher_Publish_RateLimit_CancelDuringWait_NoRetryMetric(t *testing.T
 	pm := &capturePublisherMetrics{}
 	pub, _, stopPool := newTestPub[testPayload](fake, pm)
 	pub.rateLimiter = newRateLimiter(1) // 1s interval, burst 1
-	pub.retryPolicy = &RetryPolicy{Retries: 5, Min: time.Second, Max: time.Second, WithoutJitter: true}
+	pub.retryPolicy = &RetryPolicy{Retries: 5, Min: time.Second, Max: time.Second, Jitter: JitterNone}
 	defer goleak.VerifyNone(t)
 	defer stopPool()
 	defer func() { _ = pub.Close(context.Background()) }()

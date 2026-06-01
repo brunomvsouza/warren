@@ -6,11 +6,39 @@ import (
 	"time"
 )
 
-// RetryPolicy configures exponential backoff with optional jitter for the
-// reconnect loop. Zero values are replaced with safe defaults at call time:
-// Min=1s, Max=30s, Factor=2.0.
+// JitterStrategy selects how NextBackoff perturbs the exponential delay to
+// de-synchronize a fleet that failed together — the defence against the
+// "thundering herd" that hammers a recovering broker when every client retries
+// in lockstep. The zero value is JitterFull, the SRE-recommended default, so a
+// RetryPolicy that does not set Jitter gets the strongest spreading for free.
+type JitterStrategy int
+
+const (
+	// JitterFull spreads each delay uniformly across the whole exponential
+	// window: random(0, exp), clamped to [Min, Max]. This is the default (zero
+	// value) and the AWS-recommended strategy ("Exponential Backoff And Jitter")
+	// — two clients that failed at the same instant pick independent delays
+	// across the entire window instead of clustering near one value, so a
+	// recovering broker sees retries arrive smoothly rather than in a spike.
+	JitterFull JitterStrategy = iota
+	// JitterEqual keeps half the exponential delay and jitters the other half:
+	// exp/2 + random(0, exp/2), clamped to [Min, Max]. A tighter spread than full
+	// jitter — choose it when a guaranteed minimum progress per attempt matters
+	// more than maximal de-correlation.
+	JitterEqual
+	// JitterNone disables jitter: NextBackoff returns the pure exponential delay,
+	// deterministic for a given attempt. Intended for tests and reproductions;
+	// avoid it in production, where a synchronized fleet retrying in lockstep can
+	// stampede a recovering broker.
+	JitterNone
+)
+
+// RetryPolicy configures exponential backoff with jitter for the reconnect loop
+// and publish retries. Zero values are replaced with safe defaults at call time:
+// Min=1s, Max=30s, Factor=2.0, Jitter=JitterFull.
 type RetryPolicy struct {
-	// Min is the minimum backoff duration. Defaults to 1s when zero.
+	// Min is the minimum backoff duration. Defaults to 1s when zero. It is also
+	// the floor every jitter strategy clamps up to, so no attempt returns less.
 	Min time.Duration
 	// Max is the maximum backoff duration. Defaults to 30s when zero.
 	Max time.Duration
@@ -20,14 +48,16 @@ type RetryPolicy struct {
 	// Retries is the maximum number of consecutive failed attempts before the
 	// reconnect loop gives up. Zero means unlimited retries.
 	Retries int
-	// WithoutJitter disables the ±25% random jitter applied to each backoff
-	// duration. Use in tests where deterministic timing is required.
-	WithoutJitter bool
+	// Jitter selects how the exponential delay is perturbed to de-synchronize a
+	// recovering fleet. The zero value is JitterFull (SRE-recommended); set
+	// JitterNone for deterministic timing in tests.
+	Jitter JitterStrategy
 }
 
-// NextBackoff returns the backoff duration for attempt n (1-indexed).
-// The result is capped to [Min, Max] and, unless WithoutJitter is set, has
-// a random ±25% perturbation applied before capping.
+// NextBackoff returns the backoff duration for attempt n (1-indexed). The pure
+// exponential delay is Min*Factor^(n-1) capped at Max; the configured Jitter
+// strategy then perturbs it, and the result is always clamped to [Min, Max] so
+// every strategy honours the same bound.
 func (p RetryPolicy) NextBackoff(n int) time.Duration {
 	min := p.Min
 	if min <= 0 {
@@ -42,13 +72,22 @@ func (p RetryPolicy) NextBackoff(n int) time.Duration {
 		factor = 2.0
 	}
 
-	d := float64(min) * math.Pow(factor, float64(n-1))
-	d = math.Min(d, float64(max))
+	exp := float64(min) * math.Pow(factor, float64(n-1))
+	exp = math.Min(exp, float64(max))
 
-	if !p.WithoutJitter {
-		d += d * 0.25 * (2*rand.Float64() - 1) //nolint:gosec
-		d = math.Max(float64(min), math.Min(d, float64(max)))
+	var d float64
+	switch p.Jitter {
+	case JitterNone:
+		d = exp
+	case JitterEqual:
+		d = exp/2 + rand.Float64()*(exp/2) //nolint:gosec // jitter spread, not cryptographic
+	default: // JitterFull
+		d = rand.Float64() * exp //nolint:gosec // jitter spread, not cryptographic
 	}
 
+	// Honour the [Min, Max] contract regardless of strategy: full jitter can land
+	// below Min, so clamp up; exp is already capped at Max, so clamp down guards
+	// only against rounding.
+	d = math.Max(float64(min), math.Min(d, float64(max)))
 	return time.Duration(d)
 }

@@ -21,11 +21,12 @@ const deadAddr = "amqp://guest:guest@127.0.0.1:1/"
 
 // fastFailoverBackoff keeps the dead-address retry near-instant so the test
 // does not pay the 1 s default backoff while the round-robin cursor advances
-// to the reachable node.
+// to the reachable node. Jitter is left at the default (full); the tight
+// [Min, Max] keeps every attempt near-instant while still exercising the
+// production spreading path.
 var fastFailoverBackoff = warren.RetryPolicy{
-	Min:           5 * time.Millisecond,
-	Max:           20 * time.Millisecond,
-	WithoutJitter: true,
+	Min: 5 * time.Millisecond,
+	Max: 20 * time.Millisecond,
 }
 
 // TestDial_failover_initialConnect_skipsDeadAddr_integration proves the T33

@@ -301,7 +301,7 @@ func TestPublishBatch_NoRetry(t *testing.T) {
 	defer func() { _ = pub.Close(context.Background()) }()
 
 	// Set an aggressive retry policy on the publisher.
-	pub.retryPolicy = &RetryPolicy{Retries: 5, Min: 1 * time.Millisecond, WithoutJitter: true}
+	pub.retryPolicy = &RetryPolicy{Retries: 5, Min: 1 * time.Millisecond, Jitter: JitterNone}
 
 	msgs := []Message[testPayload]{{Body: &testPayload{Value: "nack"}}}
 

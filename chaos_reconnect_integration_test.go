@@ -49,13 +49,14 @@ type chaosMsg struct {
 }
 
 // chaosRetry retries a publish that hits the reconnect barrier so a confirmed
-// publish is durable despite the storm; jitter off for deterministic timing.
+// publish is durable despite the storm. Jitter is left at the default (full) so
+// the retry storm spreads across the window the way it would in production,
+// instead of retrying in lockstep — the bounded [Min, Max] keeps it prompt.
 var chaosRetry = warren.RetryPolicy{
-	Min:           10 * time.Millisecond,
-	Max:           200 * time.Millisecond,
-	Factor:        2.0,
-	Retries:       6,
-	WithoutJitter: true,
+	Min:     10 * time.Millisecond,
+	Max:     200 * time.Millisecond,
+	Factor:  2.0,
+	Retries: 6,
 }
 
 func chaosDuration(t *testing.T) time.Duration {
