@@ -3,8 +3,12 @@
 package amqptest
 
 import (
+	"net/http"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
+	"time"
 )
 
 // Cluster lane environment variables. The cluster lane talks to an externally
@@ -79,4 +83,70 @@ func ToxiproxyURL(t *testing.T) string {
 			"(e.g. http://localhost:8474)", EnvToxiproxyURL)
 	}
 	return u
+}
+
+// ---------------------------------------------------------------------------
+// Cluster control toolkit (T166b)
+//
+// The thin *testing.T wrappers below drive the pure / transport helpers in
+// cluster_control.go against the live compose cluster. Each fails the test
+// (t.Fatal) on any error, mirroring the fail-not-skip discipline of the env
+// helpers above. They are the primitives the failover campaigns (T166c–g)
+// compose: discover the quorum leader, kill/stop/start a node, and cut/heal a
+// node's AMQP port via Toxiproxy.
+// ---------------------------------------------------------------------------
+
+// QuorumLeader queries the live management API (WARREN_CLUSTER_MGMT) for the
+// quorum queue's current Raft leadership (leader/members/online) on the default
+// vhost and fails the test on any error. A short-timeout, keep-alive-disabled
+// HTTP client is used so no pooled connection goroutine survives into a goleak
+// check. Single-node brokers cannot produce the leader migration this observes,
+// which is why it lives in the cluster lane.
+func QuorumLeader(t *testing.T, queue string) QuorumQueueState {
+	t.Helper()
+	mgmt := ClusterMgmt(t)
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	defer client.CloseIdleConnections()
+
+	state, err := fetchQuorumQueueState(client, mgmt, "/", queue)
+	if err != nil {
+		t.Fatalf("read quorum queue %q state via management API: %v", queue, err)
+	}
+	return state
+}
+
+// StopNode gracefully stops a cluster node's container (docker stop → SIGTERM)
+// by its short compose service name (rmq0/rmq1/rmq2).
+func StopNode(t *testing.T, service string) { dockerNode(t, "stop", service) }
+
+// StartNode (re)starts a previously stopped or killed node's container. It is a
+// no-op (exit 0) against an already-running container, so it is safe to call from
+// t.Cleanup to restore the cluster after a kill.
+func StartNode(t *testing.T, service string) { dockerNode(t, "start", service) }
+
+// KillNode forcibly kills a node's container (docker kill → SIGKILL) — the
+// simulated crash the real-node-death campaigns need, distinct from StopNode's
+// graceful shutdown.
+func KillNode(t *testing.T, service string) { dockerNode(t, "kill", service) }
+
+// dockerNode runs `docker <action> warren-<service>` and fails the test with the
+// combined output on a non-zero exit. exec.Command(...).CombinedOutput() is
+// synchronous, so it leaves no goroutine behind for goleak.
+func dockerNode(t *testing.T, action, service string) {
+	t.Helper()
+	container := nodeContainer(service)
+	out, err := exec.Command("docker", dockerNodeArgs(action, container)...).CombinedOutput() //nolint:gosec // fixed argv, test-only
+	if err != nil {
+		t.Fatalf("docker %s %s: %v: %s", action, container, err, strings.TrimSpace(string(out)))
+	}
+}
+
+// NewToxiproxy returns a Toxiproxy control client bound to WARREN_TOXIPROXY_URL,
+// for cutting/healing a node's AMQP port in the partition campaigns.
+func NewToxiproxy(t *testing.T) *ToxiproxyClient {
+	t.Helper()
+	return NewToxiproxyClient(ToxiproxyURL(t))
 }
