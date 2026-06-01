@@ -115,7 +115,25 @@ type Connection struct {
 	topoKeys   []*Topology             // registration order (for deterministic redeclare)
 	topoSnaps  map[*Topology]*Topology // original ptr → deep-expanded snapshot
 	topoHooked bool                    // true once the redeclare hook has been registered
+
+	// Topology-redeclare de-amplification (T62 / DS-09 / SRE-06). The redeclare
+	// hook is registered on every managed connection (preserving the per-consumer
+	// ordering guarantee: topology is ensured before each consumer's basic.consume),
+	// but the actual broker declares are coalesced to once per recovery wave so a
+	// pool-wide reconnect (broker restart) does not fire N×pool queue.declares at a
+	// just-recovered, fragile broker.
+	topoRedeclareMu   sync.Mutex
+	topoRedeclareWait chan struct{} // non-nil while a redeclare is in flight; closed on completion
+	topoLastDeclare   time.Time     // last successful redeclare (coalesce-window anchor)
 }
+
+// topoRedeclareCoalesceWindow coalesces the redeclare frames from a pool-wide
+// reconnect wave (a broker restart closes every socket at once, and each socket's
+// barrier fires the topology hook) into a single set of declares: a barrier whose
+// redeclare falls within this window of a prior success skips and relies on it
+// (topology is broker-global and idempotent). Independent reconnects spaced wider
+// than the window each redeclare, so a genuinely new recovery is never skipped.
+const topoRedeclareCoalesceWindow = 10 * time.Second
 
 // Dial establishes a supervised pool of AMQP connections and returns the
 // Connection.  It opens WithPublisherConnections + WithConsumerConnections TCP

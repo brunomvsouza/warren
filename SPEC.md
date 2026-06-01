@@ -578,9 +578,22 @@ internally via `Concurrency(n)`.
   1. Re-open the AMQP channel(s) needed by the connection's role
      (publisher channel pool, or consumer's single channel).
   2. Run every registered `Topology.AttachTo` redeclare against a
-     temporary channel (in the order they were registered).
+     temporary channel (in the order they were registered). The
+     redeclare is **de-amplified to once per recovery wave** at the
+     `*Connection` level (not once per pooled connection): a broker
+     restart closes every socket at once, and firing N×pool×fleet
+     `queue.declare`s at a just-recovered, fragile broker compounds with
+     the `WithAddrs` rotation (DS-10/T66) into a self-amplifying
+     **recovery storm**. The first reconnecting barrier in a wave
+     performs the declares and anchors a short coalesce window;
+     concurrent or window-local barriers wait for it and skip, so each
+     consumer still sees topology restored before its `basic.consume`
+     (step 3) while the broker sees the topology declared once
+     (DS-09/SRE-06).
   3. For consumer connections, re-apply `basic.qos` and re-issue
-     `basic.consume` on the consumer's channel.
+     `basic.consume` on the consumer's channel (this stays **per
+     consumer connection** — only the broker-global topology declare is
+     coalesced).
   4. Fire any `WithOnReconnect(func())` user callback last; by the
      time it runs the application sees a topology-restored,
      consumer-resubscribed state.
