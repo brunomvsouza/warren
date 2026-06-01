@@ -68,7 +68,11 @@ const confirmLatencyConfirmTimeout = 30 * time.Second
 // d.Seconds()). The low end has fine resolution for healthy quorum commits
 // (sub-millisecond to tens of milliseconds); the high end extends to 35 s — PAST
 // the 30 s ConfirmTimeout — so even a worst-case confirm lands in a finite bucket
-// instead of the implicit +Inf overflow. The default buckets top out far below
+// instead of the implicit +Inf overflow. The 5 s of headroom over the timeout
+// absorbs channel-pool acquisition + goroutine scheduling under the concurrent
+// load (a confirmed publish's recorded latency is time.Since(start), spanning
+// both, not just the confirm wait); on a healthy cluster this is comfortable
+// (observed p999 ≈ tens of ms). The default buckets top out far below
 // this in seconds terms (their largest boundary is meant as 5000 ms = 5 s), which
 // is exactly the tail clip LT-07 flags; this list fixes it for the measurement.
 var confirmLatencyBucketsSeconds = []float64{
@@ -160,11 +164,14 @@ func TestClusterQuorumConfirmLatency_TailNotClipped_cluster(t *testing.T) {
 	// single quiescent round-trip. Each confirmed (nil) publish is one histogram
 	// observation under outcome="success".
 	const (
-		loadPublishers   = 6
-		perPublisher     = 300 // 1800 attempted; the success floor below stays well under this
-		successFloor     = 1000
-		quantileTopGuard = 35.0 // == top finite bucket; p999 must be strictly below it
+		loadPublishers = 6
+		perPublisher   = 300 // 1800 attempted; the success floor below stays well under this
+		successFloor   = 1000
 	)
+	// quantileTopGuard is the top finite bucket boundary; p50/p99/p999 must fall
+	// strictly below it (a clipped histogram pushes the high quantiles to +Inf).
+	// Derived from the bucket list so it can never drift from the configured top.
+	quantileTopGuard := confirmLatencyBucketsSeconds[len(confirmLatencyBucketsSeconds)-1]
 
 	var (
 		mu         sync.Mutex
@@ -263,6 +270,11 @@ func publishLatencyBuckets(t *testing.T, reg *prometheus.Registry, outcome strin
 	t.Helper()
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
+	var (
+		result      []cumulativeBucket
+		sampleCount uint64
+		matched     int
+	)
 	for _, mf := range mfs {
 		if mf.GetName() != "publisher_publish_seconds" {
 			continue
@@ -272,11 +284,13 @@ func publishLatencyBuckets(t *testing.T, reg *prometheus.Registry, outcome strin
 			for _, lp := range m.GetLabel() {
 				if lp.GetName() == "outcome" && lp.GetValue() == outcome {
 					matches = true
+					break
 				}
 			}
 			if !matches {
 				continue
 			}
+			matched++
 			h := m.GetHistogram()
 			out := make([]cumulativeBucket, 0, len(h.GetBucket()))
 			for _, b := range h.GetBucket() {
@@ -285,10 +299,16 @@ func publishLatencyBuckets(t *testing.T, reg *prometheus.Registry, outcome strin
 			// Prometheus emits buckets ascending, but sort defensively so the quantile
 			// walk and the "largest finite bucket" read do not depend on emission order.
 			sort.Slice(out, func(i, j int) bool { return out[i].upperBound < out[j].upperBound })
-			return out, h.GetSampleCount()
+			result, sampleCount = out, h.GetSampleCount()
 		}
 	}
-	return nil, 0
+	// Exactly one series is expected for a given outcome; more than one means an
+	// unanticipated label dimension was added and the readback would silently pick
+	// just one of them. Zero is allowed (callers handle the absent-series case).
+	require.LessOrEqualf(t, matched, 1,
+		"expected at most one publisher_publish_seconds series for outcome=%q, got %d (unexpected label dimensions?)",
+		outcome, matched)
+	return result, sampleCount
 }
 
 // quantileFromBuckets estimates the q-quantile (q in [0,1]) from cumulative
