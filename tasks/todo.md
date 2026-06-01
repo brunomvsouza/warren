@@ -1492,12 +1492,12 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `topology.go`, `topology_test.go`, `topology_integration_test.go`.
 - **Deps:** T14, T15. **(R10-13, P2.4)** — *pulled into Phase 15 (v0.1).*
 
-### [ ] T69 — Exchange-to-exchange bindings [P2] · S
+### [x] T69 — Exchange-to-exchange bindings [P2] · S
 - **Acceptance:**
-  - [ ] `Binding` (or a typed variant) supports an exchange destination (`exchange.bind`) for layered fan-out.
-  - [ ] **Lens-04 (EDA-03):** ingest→per-domain layered fan-out is declarable without flattening the topology; the declare-once/deep-snapshot semantics stay intact.
-  - [ ] **Lens-06 (GA-05):** the destination-exchange shape is **pinned by T124** to a **separate `Topology.ExchangeBindings []ExchangeBinding{Source, Destination, RoutingKey, NoWait, Args}`** — `Binding` is **not** reshaped (no `Source`/`Destination` rename, no exported `Binding` field renamed or removed); the declare-once/deep-snapshot semantics extend to `ExchangeBindings`.
-- **Verify:** Integration: bind exchange→exchange, publish to source, assert delivery via the destination exchange's bound queue (`rabbitmqctl list_bindings`).
+  - [x] Separate `Topology.ExchangeBindings []ExchangeBinding{Source, Destination, RoutingKey, NoWait, Args}` declared via `exchange.bind` (after queue bindings); `Binding` is NOT reshaped (GA-05).
+  - [x] **Lens-04 (EDA-03):** ingest→per-domain layered fan-out declarable without flattening; declare-once/deep-snapshot semantics extend to `ExchangeBindings` (`expand` deep-copies them; AttachTo snapshot test).
+  - [x] **Lens-06 (GA-05):** separate slice, no `Binding` field renamed/removed; `topologyChannel` gains `ExchangeBind`.
+- **Verify:** Unit `TestTopology_declareOnChannel_exchangeBindings`, `TestTopology_validate_exchangeBindings`, `TestTopology_expand_exchangeBindingsDeepCopied`. Integration `TestExchangeBinding_layeredFanout_integration` (publish to source → reaches destination's queue via the e2e binding).
 - **Files:** `topology.go`, `topology_test.go`, `topology_integration_test.go`.
 - **Deps:** T14, T15. **(R10-14, P2.3)** — *pulled into Phase 15 (v0.1).*
 

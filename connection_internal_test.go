@@ -316,7 +316,8 @@ func (h *healthChan) QueueDeclare(name string, _, _, _, _ bool, _ amqp091.Table)
 	return amqp091.Queue{Name: name}, nil
 }
 
-func (h *healthChan) QueueBind(_, _, _ string, _ bool, _ amqp091.Table) error { return nil }
+func (h *healthChan) QueueBind(_, _, _ string, _ bool, _ amqp091.Table) error    { return nil }
+func (h *healthChan) ExchangeBind(_, _, _ string, _ bool, _ amqp091.Table) error { return nil }
 
 func (h *healthChan) Close() error {
 	h.closed = true

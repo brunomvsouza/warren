@@ -33,6 +33,11 @@ func (c countingDeclareChannel) QueueBind(_, _, _ string, _ bool, _ amqp091.Tabl
 	return nil
 }
 
+func (c countingDeclareChannel) ExchangeBind(_, _, _ string, _ bool, _ amqp091.Table) error {
+	c.declares.Add(1)
+	return nil
+}
+
 func (countingDeclareChannel) Close() error { return nil }
 
 // TestTopologyRedeclare_deAmplified_oncePerRecovery proves that a pool-wide

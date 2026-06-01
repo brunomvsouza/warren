@@ -1835,10 +1835,25 @@ value `1`.
 
 ```go
 type Topology struct {
-    Exchanges   []Exchange
-    Queues      []Queue
-    Bindings    []Binding
-    DeadLetters []DeadLetter
+    Exchanges        []Exchange
+    Queues           []Queue
+    Bindings         []Binding          // exchange→queue bindings (queue.bind)
+    DeadLetters      []DeadLetter
+    ExchangeBindings []ExchangeBinding   // exchange→exchange bindings (exchange.bind), T69
+}
+
+// ExchangeBinding declares an exchange-to-exchange binding (exchange.bind) for
+// layered ingest→per-domain fan-out (T69 / EDA-03). It is a SEPARATE slice —
+// Binding (exchange→queue) is intentionally NOT reshaped (GA-05): no Source/
+// Destination rename, no exported Binding field renamed/removed. The declare-once
+// / deep-snapshot (AttachTo) semantics extend to ExchangeBindings, and they are
+// declared after queue bindings in the declare pipeline.
+type ExchangeBinding struct {
+    Source      string         // upstream exchange
+    Destination string         // downstream exchange that receives matching messages
+    RoutingKey  string         // matched per Source's kind
+    NoWait      bool
+    Args        map[string]any
 }
 
 type Exchange struct {
@@ -2033,6 +2048,8 @@ Behaviour:
     ignored by the broker).
   - `Binding.RoutingKey` non-empty on a binding to a fanout exchange
     (silently ignored by the broker, but flag for clarity).
+  - `ExchangeBinding.Source` or `ExchangeBinding.Destination` empty
+    (T69 — an exchange→exchange binding needs both endpoints).
   - `Exchange.Kind=ExchangeDelayed` without `Args["x-delayed-type"]`
     set to a valid kind (`direct|fanout|topic|headers`).
   - Duplicate names within a slice (two `Queue{Name: "orders"}`).
