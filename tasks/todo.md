@@ -1407,12 +1407,12 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `internal/confirms/tracker_test.go`, `publisher_test.go`, `go.mod`.
 - **Deps:** T11, T13. **(R10-3, P0.3)**
 
-### [ ] T60 — Single-delivery double-verdict idempotency guard [P0] · S
+### [x] T60 — Single-delivery double-verdict idempotency guard [P0] · S
 - **Acceptance:**
-  - [ ] `Delivery[M]` has a resolved-once guard (mirrors `Batch[M]`): the second of any `Ack`/`Nack`/`AckIf`, or a handler-timeout verdict followed by a late handler verdict, is a no-op returning a sentinel (e.g. `ErrAlreadyClosed`-class), never a wire frame.
-  - [ ] Channel stays open after the double call.
-  - [ ] **Lens-02 (DS-04):** SPEC §6.3 documents the double verdict (incl. a late verdict after `HandlerTimeout`, esp. via `ConsumeRaw`) as a no-op, and states that **pre-fix** it channel-closes (406/`PRECONDITION_FAILED`), taking out *every* in-flight handler on that channel — collateral loss, not just a duplicate.
-  - [ ] **Lens-08 (CR-04, High):** the resolved-once guard on `Delivery[M]` is a **single atomic CAS** (only the winner emits a frame; the loser is a no-op), explicitly **not** a check-then-act — today `Delivery.Ack/Nack` only test `d.done` (`delivery.go:79-115`), a window in which a timeout-verdict goroutine and a handler-`Ack` goroutine both emit → `PRECONDITION_FAILED` → channel close → every in-flight handler on that channel dies; unify with the `Batch[M]` guard and add a **race + behavioural** test (timeout vs handler-`Ack`) asserting exactly one frame and the late call a no-op. *dep T143 (CG-3).*
+  - [x] `Delivery[M]` has a resolved-once guard: the second of any `Ack`/`Nack`/`AckIf`, or a handler-timeout verdict followed by a late handler verdict, is a no-op returning the new `ErrAlreadyResolved` sentinel, never a wire frame.
+  - [x] Channel stays open after the double call (integration: `TestDeliveryDoubleVerdict_lateAckAfterTimeout_channelSurvives_integration` consumes a second message after the late ack).
+  - [x] **Lens-02 (DS-04):** SPEC §6.3 documents the double verdict (incl. a late verdict after `HandlerTimeout`, esp. via `ConsumeRaw`) as a no-op, and states that **pre-fix** it channel-closes (406/`PRECONDITION_FAILED`), taking out *every* in-flight handler on that channel.
+  - [x] **Lens-08 (CR-04, High):** the resolved-once guard is a **single atomic CAS** (`resolved atomic.Bool`, CompareAndSwap) — not a check-then-act; the timeout verdict is routed through the same guard (`nackOnTimeout`) so a timeout-verdict goroutine and a handler-`Ack` goroutine race produce exactly one frame (race test `TestDelivery_concurrentTimeoutVerdictVsHandlerAck_exactlyOneFrame`, 500 iters under `-race`). *T143 (CG-3) infra-goroutine recover is a separate concern, not required by this guard.*
 - **Verify:** Integration test: `HandlerTimeout` fires, handler later returns `nil`; assert no second frame, channel not closed, no `PRECONDITION_FAILED`. Unit test: double `Delivery.Ack` via `ConsumeRaw` is a no-op.
 - **Files:** `delivery.go`, `consumer.go`, `delivery_test.go`, `consumer_test.go`, SPEC §6.3.
 - **Deps:** T18, T19. **(R10-5, P0.4)** — *pulled into Phase 12; Lens-02 adds the §6.3 wording.*

@@ -17,6 +17,14 @@ var (
 	// has already been closed — either a Connection closed twice, or Ack/Nack/AckIf
 	// called on a Delivery whose owning Consumer was shut down via Close(ctx).
 	ErrAlreadyClosed = errors.New("warren: already closed")
+	// ErrAlreadyResolved is returned by the second (and any later) Ack/Nack/AckIf
+	// on a Delivery[M] that has already emitted its verdict frame — including a
+	// late handler verdict after a HandlerTimeout fired. The resolved-once guard
+	// is a single atomic CAS: only the winner emits a frame; losers are no-ops
+	// returning this sentinel. It prevents a second basic.ack/nack frame that
+	// would channel-close with PRECONDITION_FAILED (406) and take out every
+	// in-flight handler on that channel. See SPEC §6.3.
+	ErrAlreadyResolved = errors.New("warren: delivery already resolved")
 	// ErrShutdown is returned when an operation is attempted while the connection is shutting down.
 	ErrShutdown = errors.New("warren: client is shutting down")
 	// ErrChannelClosed is returned when the broker closes the channel (e.g. after a protocol error).

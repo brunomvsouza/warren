@@ -1405,10 +1405,10 @@ func (c *Consumer[M]) dispatch(ctx context.Context, chanDone <-chan struct{}, ra
 				c.recordHandler("timeout_nack_no_requeue", elapsed)
 			case c.timeoutVerdict == TimeoutNackRequeue:
 				c.recordHandler("timeout_nack_requeue", elapsed)
-				_ = raw.Nack(false, true)
+				d.nackOnTimeout(true)
 			default:
 				c.recordHandler("timeout_nack_no_requeue", elapsed)
-				_ = raw.Nack(false, false)
+				d.nackOnTimeout(false)
 			}
 			finishConsumeSpan(span, outcomeTimeout, context.DeadlineExceeded)
 		default:
