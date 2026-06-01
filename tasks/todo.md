@@ -1436,13 +1436,13 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `connection.go`, `topology.go`, `connection_internal_test.go`.
 - **Deps:** T07, T16, T84 (chaos lane). **(R10-7, P1.2)** — sequence with T61/T63; *pulled into Phase 13 (v0.1).*
 
-### [ ] T63 — Reconnect barrier max-duration cap [P1] · S
+### [x] T63 — Reconnect barrier max-duration cap [P1] · S
 - **Acceptance:**
-  - [ ] The synchronous redeclare barrier is bounded by a configurable max duration; on cap, blocked `Publish` calls return `ErrReconnecting` rather than stalling indefinitely.
-  - [ ] **Lens-01 (RMQ-17):** the cap covers **Khepri (4.1 default)**, where `queue.declare` is a Raft-quorum op that can block during partition recovery.
-  - [ ] **Lens-02 (DS-02):** SPEC names the cap option, its default, and the post-cap connection state (force-reconnect vs degraded), and states explicitly that `ConfirmTimeout` does **not** cover the barrier (the frame is still unwritten) — the cap is a distinct mechanism.
-  - [ ] **Lens-05 (SRE-02):** the barrier-cap default must be **≤ the new default histogram top bucket** (SRE-11/T113) so a capped stall is *visible* in `publisher_publish_seconds`, not collapsed into `+Inf`.
-- **Verify:** Unit test with a mock channel whose redeclare blocks longer than the cap asserts `Publish` returns `ErrReconnecting` at the cap (with `PublishTimeout=0` + `context.Background()`). Chaos: a half-alive-broker proxy (accepts the socket, stalls `queue.declare`) asserts the same on a real broker; `goleak` clean.
+  - [x] The synchronous redeclare barrier is bounded by a configurable max duration (`WithReconnectBarrierTimeout`, default 15 s); on cap, blocked `Publish` calls return `ErrReconnecting` (wait-side cap in `waitBarrier`) rather than stalling indefinitely, and the barrier execution force-reconnects (`runBarrier` cap).
+  - [x] **Lens-01 (RMQ-17):** the cap covers **Khepri**, where `queue.declare` is a Raft-quorum op that can block during partition recovery (documented in SPEC §6.1).
+  - [x] **Lens-02 (DS-02):** SPEC §6.1 names the cap option, its default (15 s), and the post-cap state (**force-reconnect**, explicitly not degraded), and states that `ConfirmTimeout` does **not** cover the barrier (frame still unwritten) — distinct mechanism.
+  - [x] **Lens-05 (SRE-02):** default 15 s < ConfirmTimeout 30 s; SPEC notes SRE-11/T113 must set the histogram top bucket ≥ this cap so a capped stall is visible, not collapsed to `+Inf`.
+- **Verify:** Unit `TestWaitBarrier_capReturnsErrReconnecting` (blocked Publish returns `ErrReconnecting` at the cap with `PublishTimeout=0` + `context.Background()`), `TestWaitBarrier_clearsBeforeCap` (cap is a ceiling not a delay), `TestRunBarrier_capForceReconnects` (stalled hook → barrier returns at cap, force-reconnects, `goleak`-clean). Half-alive-broker proxy assertion rides the chaos lane (T84, Phase 13).
 - **Files:** `connection.go`, `options_connection.go`, `connection_internal_test.go`, SPEC §6.1/§6.2.
 - **Deps:** T07, T62, T84 (half-alive proxy). **(R10-8, P1.6)** — sequence with T61/T62; *pulled into Phase 13 (v0.1).*
 
