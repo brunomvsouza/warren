@@ -500,7 +500,7 @@ const (
 | `WithConsumerConnections(n int)`        | 2 (one socket cannot bound dispatch under broker restart)   |
 | `WithChannelPoolSize(n int)`            | 8 (per publisher connection)     |
 | `WithConnectDelay(d)`                   | 1s                               |
-| `WithReconnectBackoff(p RetryPolicy)`   | exponential + jitter             |
+| `WithReconnectBackoff(p RetryPolicy)`   | exponential + full jitter (default; configurable via `RetryPolicy.Jitter`) |
 | `WithOnReconnect(func())`               | nil                              |
 | `WithOnBlocked(func(reason string))`    | nil                              |
 | `WithOnResubscribe(func(queue string))` | nil                              |

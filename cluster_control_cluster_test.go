@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	amqp091 "github.com/rabbitmq/amqp091-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -91,42 +90,6 @@ func TestClusterControl_quorumLeaderFailover_cluster(t *testing.T) {
 	// reports the new leader. Poll until it changes (re-election is not instant).
 	after := awaitNewLeaderCluster(t, queue, originalLeader, 60*time.Second)
 	assert.NotEqual(t, originalLeader, after.Leader, "a new leader must be elected after the old one is killed")
-	assert.Contains(t, []string{"rabbit@rmq0", "rabbit@rmq2"}, after.Leader,
+	assert.Contains(t, survivingClusterLeaders(originalLeader), after.Leader,
 		"the new leader must be one of the surviving nodes")
-}
-
-// awaitNewLeaderCluster polls the management API until the quorum queue's leader
-// differs from oldLeader (and is non-empty), or the timeout elapses. Re-election
-// takes a few seconds, and the API may briefly report a stale or empty leader
-// mid-election, so a poll — not a single read — is required.
-func awaitNewLeaderCluster(t *testing.T, queue, oldLeader string, timeout time.Duration) amqptest.QuorumQueueState {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	var last amqptest.QuorumQueueState
-	for time.Now().Before(deadline) {
-		last = amqptest.QuorumLeader(t, queue)
-		if last.Leader != "" && last.Leader != oldLeader {
-			return last
-		}
-		time.Sleep(1 * time.Second)
-	}
-	t.Fatalf("no new leader elected for %q within %s (still %q)", queue, timeout, last.Leader)
-	return last // unreachable
-}
-
-// deleteQuorumQueueCluster best-effort deletes a durable quorum queue via a raw
-// amqp091 connection to a surviving node, so reruns start from a clean slate.
-// Failures are ignored — the node may be momentarily unavailable mid-test.
-func deleteQuorumQueueCluster(addr, queue string) {
-	rawConn, err := amqp091.Dial(addr)
-	if err != nil {
-		return
-	}
-	defer rawConn.Close() //nolint:errcheck
-	ch, err := rawConn.Channel()
-	if err != nil {
-		return
-	}
-	defer ch.Close() //nolint:errcheck
-	_, _ = ch.QueueDelete(queue, false, false, false)
 }

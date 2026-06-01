@@ -127,7 +127,7 @@ func TestDial_WithAddrs_allAddrsDown_returnsRedactedError_triesEach(t *testing.T
 		warren.WithPublisherConnections(1),
 		warren.WithConsumerConnections(1),
 		warren.WithReconnectBackoff(warren.RetryPolicy{
-			Min: time.Millisecond, Max: 2 * time.Millisecond, Retries: 6, WithoutJitter: true,
+			Min: time.Millisecond, Max: 2 * time.Millisecond, Retries: 6, Jitter: warren.JitterNone,
 		}),
 		warren.WithDialer(func(_, addr string) (net.Conn, error) {
 			mu.Lock()

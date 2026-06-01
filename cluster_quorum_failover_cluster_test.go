@@ -52,22 +52,23 @@ type clusterFailoverMsg struct {
 
 // clusterFastBackoff keeps the reconnect retry tight so the rmq1-pinned
 // connections rotate to a surviving node promptly after the leader is killed,
-// instead of paying the 1 s default backoff while the cursor advances.
+// instead of paying the 1 s default backoff while the cursor advances. Jitter is
+// left at the default (full) so the pool's connections re-dial spread out rather
+// than in lockstep — exactly the herd behaviour the cluster claim must survive.
 var clusterFastBackoff = warren.RetryPolicy{
-	Min:           20 * time.Millisecond,
-	Max:           200 * time.Millisecond,
-	WithoutJitter: true,
+	Min: 20 * time.Millisecond,
+	Max: 200 * time.Millisecond,
 }
 
 // clusterPublishRetry retries a publish that hits the reconnect barrier or a
 // transient confirm gap during the Raft re-election, so a confirmed publish stays
-// durable across the leader's death; jitter off for deterministic timing.
+// durable across the leader's death. Jitter is left at the default (full); the
+// bounded [Min, Max] keeps the retry prompt while spreading it like production.
 var clusterPublishRetry = warren.RetryPolicy{
-	Min:           20 * time.Millisecond,
-	Max:           500 * time.Millisecond,
-	Factor:        2.0,
-	Retries:       8,
-	WithoutJitter: true,
+	Min:     20 * time.Millisecond,
+	Max:     500 * time.Millisecond,
+	Factor:  2.0,
+	Retries: 8,
 }
 
 // isTolerableFailoverErr reports whether a publish error is an expected
@@ -163,7 +164,7 @@ func TestClusterQuorumFailover_ZeroLoss_cluster(t *testing.T) {
 	before := amqptest.QuorumLeader(t, queue)
 	require.Equal(t, "quorum", before.Type)
 	require.Len(t, before.Members, 3, "quorum queue must span all three cluster nodes")
-	require.Contains(t, []string{"rabbit@rmq1", "rabbit@rmq2"}, before.Leader,
+	require.Contains(t, clusterKillableLeaders, before.Leader,
 		"leader must land on a killable non-management node (rmq0 hosts the management API and is dialed last)")
 	originalLeader := before.Leader
 	killService := amqptest.NodeService(originalLeader) // "rmq1" or "rmq2"
@@ -218,6 +219,12 @@ func TestClusterQuorumFailover_ZeroLoss_cluster(t *testing.T) {
 		for {
 			select {
 			case <-pubDone:
+				return
+			case <-ctx.Done():
+				// A failed require before close(pubDone) cancels ctx as it unwinds;
+				// exit cleanly here so the publisher never spins on a canceled context
+				// (which would leak into the deferred goleak check and bury the real
+				// failure under leak noise).
 				return
 			default:
 			}
@@ -324,17 +331,4 @@ func TestClusterQuorumFailover_ZeroLoss_cluster(t *testing.T) {
 		"zero message loss across quorum failover: %d confirmed, %d consumed-distinct, lost=%v", nPub, nCon, lost)
 	t.Logf("cluster quorum failover zero-loss: confirmed=%d consumed-distinct=%d (duplicates tolerated), leader %s -> %s",
 		nPub, nCon, originalLeader, after.Leader)
-}
-
-// survivingClusterLeaders returns the two cluster node names (rabbit@rmqN) that are
-// NOT the killed leader — the candidates the re-elected leader must come from.
-func survivingClusterLeaders(killed string) []string {
-	all := []string{"rabbit@rmq0", "rabbit@rmq1", "rabbit@rmq2"}
-	out := make([]string, 0, len(all)-1)
-	for _, n := range all {
-		if n != killed {
-			out = append(out, n)
-		}
-	}
-	return out
 }
