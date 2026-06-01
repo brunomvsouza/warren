@@ -38,9 +38,12 @@ name: warren-cluster
 
 x-rabbitmq: &rabbitmq-base
   # Pinned to a specific 3.13 patch (not the floating 3.13-management tag) so the
-  # cluster lane is reproducible; T166g adds a 4.x member for the rolling-upgrade
-  # campaign.
-  image: rabbitmq:3.13.7-management
+  # cluster lane is reproducible. Overridable via WARREN_RMQ_IMAGE to pin a different
+  # patch (or 4.x) across ALL nodes; rmq2 additionally honours WARREN_RMQ2_IMAGE so a
+  # SINGLE member can run a different version — the mixed-version (3.13 + 4.x) cluster
+  # the T166g rolling-upgrade campaign asserts continuity across. Default: homogeneous
+  # 3.13.7 on every node, so the other eight campaigns run unchanged.
+  image: ${WARREN_RMQ_IMAGE:-rabbitmq:3.13.7-management}
   environment:
     # A shared Erlang cookie is what lets the three nodes authenticate to each
     # other and form a cluster. Fixed value — this is a throwaway test cluster.
@@ -76,6 +79,12 @@ services:
 
   rmq2:
     <<: *rabbitmq-base
+    # rmq2 is the swappable member: set WARREN_RMQ2_IMAGE to a 4.x image (e.g.
+    # rabbitmq:4.0.9-management) before `make cluster-up` to form the mixed-version
+    # cluster the rolling-upgrade campaign asserts continuity across. The explicit key
+    # overrides the merged anchor image; unset, it falls back to WARREN_RMQ_IMAGE and
+    # then the homogeneous 3.13.7 default.
+    image: ${WARREN_RMQ2_IMAGE:-${WARREN_RMQ_IMAGE:-rabbitmq:3.13.7-management}}
     hostname: rmq2
     container_name: warren-rmq2
 
