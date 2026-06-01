@@ -2814,6 +2814,16 @@ Reliability (billions/day bar):
 - [ ] Reconnect chaos test: zero message loss over a **5-minute outage
       at 10k msg/s** with confirms (was 60s @ 1k msg/s in earlier
       revisions). Run nightly; flaky-rate <1% over 50 runs.
+- [ ] **Return/ack ordering invariant (T59, R10-3/RMQ-16/TV-02).** The
+      `basic.return`-before-`basic.ack` ordering that `ErrUnroutable`
+      depends on is locked deterministically by a unit test
+      (`startConfirmDemux` registers an **unbuffered** return channel and
+      a single demux goroutine). The real-broker assertion —
+      concurrent unroutable-mandatory publishes during confirm load — is
+      **flaky-prone by design** (it exercises a ~50%-under-load timing
+      race against amqp091-go's two-channel notify dispatch that a mock
+      tracker cannot reproduce) and runs on the **nightly trigger**
+      (T151) at high iteration/concurrency, **not** as a per-PR gate.
 - [ ] Poison-loop test (classic queue, counter B): a perpetually-failing
       handler returning wrapped `ErrRequeue` causes at most
       `MaxRedeliveries + 1` deliveries before `Nack(requeue=false)` +

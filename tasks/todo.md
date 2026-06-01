@@ -1397,12 +1397,12 @@ bar); their definitions remain here. T58, T59, T63, T64 are extended below.
 - **Files:** `topology.go`, `connection.go` (broker-version helper), `topology_test.go`.
 - **Deps:** T14, T15, T20. **(R10-2, P0.2)** — coordinate with T64 (same `validate()`); dep gate G3/T74.
 
-### [ ] T59 — Return/ack ordering invariant regression test [P0] · S
+### [x] T59 — Return/ack ordering invariant regression test [P0] · S
 - **Acceptance:**
-  - [ ] Test fails if the `basic.return` notify channel is made buffered, or if confirm/return demux is split across two goroutines.
-  - [ ] Under concurrent mandatory-unroutable publishes, every publish resolves `ErrUnroutable` (zero false successes); asserts `MarkReturned` precedes the ack resolution.
-  - [ ] **Lens-01 (RMQ-16):** a real-broker assertion (not just the mock tracker) covers the same path; `amqp091-go` is pinned in `go.mod`; a comment records the dependency on amqp091-go's single synchronous reader goroutine (a buffered/worker-pool dispatcher upstream would silently break the invariant).
-  - [ ] **Lens-10 (TV-02):** the real-broker assertion runs **many iterations** under **concurrent unroutable-mandatory publishes during confirm load** to actually trip the ~50%-under-load race against amqp091-go's two-channel notify dispatch (a mock tracker cannot reproduce the dispatch timing → a green mock proves nothing about the race it exists to lock); a §7 note records that this contract is **flaky-prone by design** and belongs on the nightly trigger (T151), not a single PR run. dep VG-4.
+  - [x] Test fails if the `basic.return` notify channel is made buffered, or if confirm/return demux is split across two goroutines. (Demux extracted to `startConfirmDemux`; `TestConfirmDemux_returnChannelUnbuffered` asserts `cap(returnCh)==0` — red the instant it is buffered. `wireFakePool` now drives the production demux so every unroutable test exercises the real invariant.)
+  - [x] Under concurrent mandatory-unroutable publishes, every publish resolves `ErrUnroutable` (zero false successes); asserts `MarkReturned` precedes the ack resolution. (Unit: `TestConfirmDemux_everyUnroutablePublishResolvesErrUnroutable`, 200 iterations through the production demux. Real concurrency: the integration test below.)
+  - [x] **Lens-01 (RMQ-16):** a real-broker assertion (not just the mock tracker) covers the same path (`publisher_return_ordering_integration_test.go`); `amqp091-go` is pinned in `go.mod` with a comment recording the dependency on amqp091-go's single synchronous reader goroutine (a buffered/worker-pool dispatcher upstream would silently break the invariant) — also documented in `startConfirmDemux`.
+  - [x] **Lens-10 (TV-02):** the real-broker assertion runs **many iterations** (8 workers × 250) under **concurrent unroutable-mandatory publishes**; a §7 note records that this contract is **flaky-prone by design** and belongs on the nightly trigger (T151), not a single PR run. dep VG-4.
 - **Verify:** Run with `-race -count=100`; a deliberately-buffered return channel variant in the test makes it red. Real-broker variant on the integration lane.
 - **Files:** `internal/confirms/tracker_test.go`, `publisher_test.go`, `go.mod`.
 - **Deps:** T11, T13. **(R10-3, P0.3)**
