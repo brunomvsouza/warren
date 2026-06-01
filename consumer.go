@@ -120,6 +120,24 @@ type Handler[M any] func(ctx context.Context, msg M) error
 // The Delivery carries the decoded body plus all AMQP envelope fields.
 type RawHandler[M any] func(ctx context.Context, d *Delivery[M]) error
 
+// DedupeStore is the backing store for the WithDedupe consumer middleware (T55).
+// Implementations may be an in-memory LRU, Redis, or any TTL cache; they must be
+// safe for concurrent use.
+//
+// The middleware fails OPEN: any error returned from Seen or Mark causes the
+// message to be processed anyway (with a logged warning), so a store outage
+// degrades to plain at-least-once rather than dropping or stalling deliveries.
+// See ConsumerBuilder.WithDedupe and SPEC §6.2.1.
+type DedupeStore interface {
+	// Seen reports whether id was already recorded via Mark and is still within
+	// its retention window. A true result acks the delivery without invoking the
+	// handler.
+	Seen(ctx context.Context, id string) (bool, error)
+	// Mark records id as processed, retaining it for at least ttl. It is called
+	// only after the handler returns nil (success).
+	Mark(ctx context.Context, id string, ttl time.Duration) error
+}
+
 // deliverySub pairs a delivery channel with a signal that closes when the
 // underlying AMQP channel physically closes (not when the consumer ctx is cancelled).
 // dispatch goroutines watch done to cancel in-flight handler contexts.
@@ -270,6 +288,13 @@ type Consumer[M any] struct {
 	// counterState holds the per-channel in-process counter B map.
 	// Replaced atomically on every channel open so "channel close resets counter B".
 	counterState atomic.Pointer[redeliveryCounter]
+
+	// dedupeStore + dedupeTTL back the WithDedupe middleware (T55); nil store
+	// disables it. dedupeErrLog rate-limits the fail-open warning so a persistently
+	// failing store cannot flood the logs.
+	dedupeStore  DedupeStore
+	dedupeTTL    time.Duration
+	dedupeErrLog dropSampler
 
 	codec      codec.Codec
 	cm         metrics.ConsumerMetrics
@@ -425,6 +450,8 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 		depthSampleInterval: b.depthSampleInterval,
 		maxRedeliveries:     b.maxRedeliveries,
 		counterBDisabled:    b.counterBDisabled,
+		dedupeStore:         b.dedupeStore,
+		dedupeTTL:           b.dedupeTTL,
 		codec:               b.c,
 		cm:                  b.cm,
 		tracer:              b.tracer,
@@ -439,6 +466,7 @@ func newConsumer[M any](b *ConsumerBuilder[M], tag string) *Consumer[M] {
 	// Set the sampler interval in place (not via a struct literal) so the embedded
 	// atomic counter is never copied.
 	c.autoAckDropLog.every = defaultAutoAckLogEvery
+	c.dedupeErrLog.every = defaultDedupeErrLogEvery
 	return c
 }
 
@@ -790,10 +818,62 @@ func surfaceBrokerCancel(onCancel func(string), logger log.Logger, cm metrics.Co
 // to bound shutdown latency when handlers may block indefinitely.
 func (c *Consumer[M]) Consume(ctx context.Context, h Handler[M]) error {
 	// Wrap the typed handler so dispatch can auto-ack based on the return value.
-	wrapped := func(innerCtx context.Context, d *Delivery[M]) error {
+	var wrapped RawHandler[M] = func(innerCtx context.Context, d *Delivery[M]) error {
 		return h(innerCtx, *d.Body())
 	}
+	if c.dedupeStore != nil {
+		wrapped = c.wrapDedupe(wrapped)
+	}
 	return c.runConsume(ctx, wrapped, true /* autoAck */)
+}
+
+// wrapDedupe layers the WithDedupe middleware (T55) over next on the Consume path:
+//
+//   - empty MessageID         → process normally (cannot dedupe without a key)
+//   - Seen returns true       → ack without invoking next (return nil)
+//   - Seen/Mark returns error → fail OPEN: log a sampled warning and process anyway
+//   - next returns an error   → propagate it (nack); do NOT Mark, so a redelivery reprocesses
+//   - next returns nil        → Mark(id, ttl) then ack
+//
+// Returning nil here lets settleVerdict ack the delivery; returning next's error
+// lets it nack — so the dedupe decision rides the existing verdict path unchanged.
+func (c *Consumer[M]) wrapDedupe(next RawHandler[M]) RawHandler[M] {
+	return func(ctx context.Context, d *Delivery[M]) error {
+		id := d.MessageID()
+		if id == "" {
+			return next(ctx, d)
+		}
+		seen, err := c.dedupeStore.Seen(ctx, id)
+		if err != nil {
+			c.logDedupeFailOpen("Seen", err)
+			return next(ctx, d)
+		}
+		if seen {
+			return nil // already processed — ack, skip the handler
+		}
+		if err := next(ctx, d); err != nil {
+			return err // handler failed — nack and reprocess on redelivery; do not Mark
+		}
+		if err := c.dedupeStore.Mark(ctx, id, c.dedupeTTL); err != nil {
+			// The handler already succeeded; failing to record the id only risks a
+			// future duplicate, so still ack (return nil) and warn.
+			c.logDedupeFailOpen("Mark", err)
+		}
+		return nil
+	}
+}
+
+// logDedupeFailOpen emits a rate-limited warning that a DedupeStore call failed and
+// the middleware fell back to processing the message. The MessageID is never logged
+// (it may be a user-supplied identifier) and the store error is reported by type
+// only, so a custom store that embeds payload in its error cannot leak it (SPEC §8).
+func (c *Consumer[M]) logDedupeFailOpen(op string, err error) {
+	if emit, total := c.dedupeErrLog.sample(); emit {
+		c.mc.opts.logger.Warningf(
+			"warren: dedupe store %s failed for queue %q (%T); processing message without dedupe — failing open (total: %d)",
+			op, c.queue, err, total,
+		)
+	}
 }
 
 // ConsumeRaw starts consuming, passing the full Delivery envelope to h.
@@ -1467,6 +1547,11 @@ func (c *Consumer[M]) settleVerdict(d *Delivery[M], span otel.Span, cs *redelive
 // warning: the first drop logs, then one in every defaultAutoAckLogEvery, so a
 // high-volume no-ack stream of failing handlers cannot flood the logs.
 const defaultAutoAckLogEvery uint64 = 100
+
+// defaultDedupeErrLogEvery is the sampling interval for the WithDedupe fail-open
+// warning: the first store error logs, then one in every defaultDedupeErrLogEvery,
+// so a persistently unreachable dedupe store cannot flood the logs.
+const defaultDedupeErrLogEvery uint64 = 100
 
 // logAutoAckDrop emits a rate-limited warning that a message was silently dropped
 // under brokerAutoAck (handler error or decode failure). The error is reported by
