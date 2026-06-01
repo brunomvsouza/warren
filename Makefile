@@ -73,11 +73,19 @@ cluster-down: ## Stop and remove the local RabbitMQ cluster + Toxiproxy.
 # WARREN_CLUSTER_* vars are unset, so this guards the regression where a test
 # starts to t.Skip instead. The go test exit status is preserved through the log
 # capture (no pipefail dependency, so it stays /bin/sh-portable).
+#
+# -count=1 disables Go's test result cache: the cluster these tests assert against
+# is EXTERNAL state (a live compose cluster, its broker version, its partition
+# history) that is NOT part of Go's cache key — which keys only on the test binary
+# and the env vars the tests read (WARREN_CLUSTER_* are unchanged run to run). Without
+# it, re-running `make test-cluster` against a DIFFERENT cluster (e.g. a 4.x image via
+# WARREN_RMQ_IMAGE) silently returns the previous run's cached result — a green that
+# certifies a cluster it never touched. The same applies to the version matrix lane.
 test-cluster: ## Run cluster tests (requires the compose cluster; 'make cluster-up' starts it) + zero-run guard.
 	@WARREN_CLUSTER_NODES="$(WARREN_CLUSTER_NODES)" \
 	WARREN_CLUSTER_MGMT="$(WARREN_CLUSTER_MGMT)" \
 	WARREN_TOXIPROXY_URL="$(WARREN_TOXIPROXY_URL)" \
-	$(GO) test -race -v -tags=cluster $(PKG) > cluster.log 2>&1; status=$$?; \
+	$(GO) test -race -v -count=1 -tags=cluster $(PKG) > cluster.log 2>&1; status=$$?; \
 	cat cluster.log; \
 	ran=$$(grep -cE '^[[:space:]]*--- (PASS|FAIL): Test[A-Za-z0-9_/]*_cluster' cluster.log) || true; \
 	echo "cluster tests executed: $${ran}"; \
