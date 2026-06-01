@@ -326,6 +326,18 @@ type Consumer[M any] struct {
 	// already pending" inner-select branch without a fixed sleep.
 	testHookChannelClosed func()
 
+	// testHookAfterDeliveryClose, when non-nil, is invoked inside startPump's
+	// delivery-closed (!ok) branch the instant the pump commits to it, before the
+	// non-blocking closeCh/cancelCh death drains run. It is a test-only seam (nil in
+	// production, a no-op). Because the inner drains exist precisely for the race where
+	// the !ok arm wins while a death signal is also pending — a race a black-box test
+	// cannot otherwise force, since the top-level select would equally pick the main
+	// closeCh/cancelCh arm — a test buffers the death signal here, AFTER the !ok arm is
+	// chosen, so the drain (not the main arm) is the only path that can produce the
+	// outcome. This makes the "death while paused still closes channelDone" guards
+	// deterministic and mutation-resistant instead of passing ~half the time on select luck.
+	testHookAfterDeliveryClose func()
+
 	// closedCh is closed when Close is called; signals Delivery.Ack/Nack to refuse.
 	closedCh  chan struct{}
 	closeOnce sync.Once
@@ -1075,6 +1087,9 @@ func (c *Consumer[M]) startPump(ctx context.Context, deliveries <-chan amqp091.D
 					// future amqp091-go bump reordered that, this drain could miss a real
 					// death and skip closeChannelDone — TestStartPump_ChannelDeath_*
 					// guards against it.
+					if c.testHookAfterDeliveryClose != nil {
+						c.testHookAfterDeliveryClose()
+					}
 					death := false
 					select {
 					case <-closeCh:

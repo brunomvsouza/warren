@@ -107,6 +107,37 @@ func TestConsumer_Pause_CancelError_RollsBackPausedState(t *testing.T) {
 	assert.False(t, c.paused.Load(), "a failed Cancel must not leave the consumer marked paused")
 }
 
+func TestConsumer_Pause_CtxAlreadyCancelled_ReturnsCtxErr(t *testing.T) {
+	// The top guard short-circuits on an already-cancelled ctx before touching the
+	// broker, so a cancelled preStop ctx cannot issue a half basic.cancel (T53).
+	fake := &fakeSubChannel{}
+	c := pausableConsumer(t, fake)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := c.Pause(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, fake.cancels(), "Pause with a cancelled ctx must issue no basic.cancel")
+	assert.False(t, c.paused.Load(), "Pause with a cancelled ctx must not mark the consumer paused")
+}
+
+func TestConsumer_Resume_CtxAlreadyCancelled_ReturnsCtxErr(t *testing.T) {
+	// Symmetric to Pause: the top guard rejects an already-cancelled ctx before issuing
+	// basic.consume, leaving the consumer paused for a clean later retry (T53).
+	fake := &fakeSubChannel{}
+	c := pausableConsumer(t, fake)
+	c.paused.Store(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := c.Resume(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, fake.consumes(), "Resume with a cancelled ctx must issue no basic.consume")
+	assert.True(t, c.paused.Load(), "Resume with a cancelled ctx must leave the consumer paused")
+}
+
 func TestConsumer_Resume_ReissuesConsume_AndClearsPaused(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -420,6 +451,15 @@ func TestStartPump_GracefulLocalCancel_KeepsChannelDoneOpen(t *testing.T) {
 // review flagged: a genuine channel death (closeCh fires) during the Pause
 // handshake must still close channelDone so in-flight handler contexts are
 // cancelled — the death signal, not the paused flag, decides (T53).
+//
+// This deterministically exercises the closeCh arm of the pump's !ok drain (lines
+// ~1080-1083 of consumer.go), not the main closeCh select arm. The pump blocks while
+// deliveries/closeCh are both empty; closing deliveries makes the !ok arm the ONLY
+// ready arm, so the pump commits to it; the testHookAfterDeliveryClose seam then
+// buffers the NotifyClose AFTER that commit, so the inner drain is the sole path that
+// can observe the death. Dropping the closeCh drain would leave channelDone open here —
+// a guard that, unlike a "buffer-then-close-and-hope-select-picks-the-right-arm" test,
+// fails reliably rather than ~half the time.
 func TestStartPump_ChannelDeath_ClosesChannelDone_EvenWhenPaused(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -431,12 +471,14 @@ func TestStartPump_ChannelDeath_ClosesChannelDone_EvenWhenPaused(t *testing.T) {
 	deliveries := make(chan amqp091.Delivery)
 	closeCh := make(chan *amqp091.Error, 1)
 	cancelCh := make(chan string, 1)
+	// Force the !ok drain to win: closeCh is empty when deliveries closes (so the !ok
+	// arm is the only ready arm), and the death signal is injected only AFTER the pump
+	// has committed to the !ok branch — making the inner closeCh drain the sole path to
+	// the death verdict.
+	c.testHookAfterDeliveryClose = func() { closeCh <- &amqp091.Error{Code: 504, Reason: "channel closed"} }
 	var doneClosed atomic.Bool
 	out := c.startPump(context.Background(), deliveries, closeCh, cancelCh, func() { doneClosed.Store(true) })
 
-	// NotifyClose signals AND the delivery stream closes: whichever case the pump
-	// wins, channelDone must close.
-	closeCh <- &amqp091.Error{Code: 504, Reason: "channel closed"}
 	close(deliveries)
 
 	_, ok := <-out
@@ -446,11 +488,18 @@ func TestStartPump_ChannelDeath_ClosesChannelDone_EvenWhenPaused(t *testing.T) {
 
 // TestStartPump_CancelChDeath_ClosesChannelDone_EvenWhenPaused covers the symmetric
 // cancelCh arm of the pump's !ok drain (LATER-83): when the delivery stream closes
-// while paused AND a broker basic.cancel is buffered on cancelCh, the pump must treat
+// while paused AND a broker basic.cancel is pending on cancelCh, the pump must treat
 // it as a genuine death — forward the cancel reason to cancelReasonCh and close
 // channelDone — not mistake it for a graceful local Pause. A regression that dropped
-// the cancelCh drain (checking only closeCh) would pass the other startPump tests yet
-// leak in-flight handler contexts on a real basic.cancel racing a Pause (T53).
+// the cancelCh drain (checking only closeCh) would leak in-flight handler contexts on a
+// real basic.cancel racing a Pause (T53).
+//
+// Like its closeCh sibling, this forces the !ok-drain arm deterministically: cancelCh is
+// empty when deliveries closes, and the basic.cancel is injected via
+// testHookAfterDeliveryClose AFTER the pump commits to the !ok branch — so the inner
+// cancelCh drain (consumer.go ~1085-1091), not the main cancelCh select arm, is the only
+// path that can forward the reason and mark death. Dropping that drain fails the test
+// reliably (channelDone stays open, reason never forwarded), rather than ~56% of runs.
 func TestStartPump_CancelChDeath_ClosesChannelDone_EvenWhenPaused(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
@@ -463,13 +512,10 @@ func TestStartPump_CancelChDeath_ClosesChannelDone_EvenWhenPaused(t *testing.T) 
 	deliveries := make(chan amqp091.Delivery)
 	closeCh := make(chan *amqp091.Error, 1)
 	cancelCh := make(chan string, 1)
+	c.testHookAfterDeliveryClose = func() { cancelCh <- "ctag-x" }
 	var doneClosed atomic.Bool
 	out := c.startPump(context.Background(), deliveries, closeCh, cancelCh, func() { doneClosed.Store(true) })
 
-	// A broker basic.cancel is buffered, then the delivery stream closes: whichever arm
-	// the pump wins (the main cancelCh case or the !ok drain), the outcome must be the
-	// same — the reason is forwarded and channelDone closes.
-	cancelCh <- "ctag-x"
 	close(deliveries)
 
 	_, ok := <-out
@@ -483,14 +529,20 @@ func TestStartPump_CancelChDeath_ClosesChannelDone_EvenWhenPaused(t *testing.T) 
 	}
 }
 
-// TestConsumer_Resume_RacesReconnect_NoDuplicateSubscribe drives a reconnect
+// TestConsumer_Resume_RacesReconnect_NeverActiveAndPaused drives a reconnect
 // re-subscribe (openDeliveryCh's override path, which clears the pause under pauseMu —
 // the same critical section that publishes the fresh c.live) concurrently with
 // Pause/Resume and a snapshot reader, under -race (LATER-84). It guards that the
 // (paused, live) handoff on the size-1 resubCh never panics and never lands in the
 // forbidden "paused alongside a half-replaced channel" state — snapshot must never
 // report Active && Paused both true (T53).
-func TestConsumer_Resume_RacesReconnect_NoDuplicateSubscribe(t *testing.T) {
+//
+// The test asserts the snapshot-consistency invariant, not a basic.consume call count:
+// across 200 Pause/Resume pairs the design legitimately issues many subscribes, so a
+// "duplicate" is not directly countable here. The post-race NotEmpty assertions guard
+// against the invariant going trivially true — they prove the Pause and Resume paths
+// actually executed during the race rather than short-circuiting to a no-op.
+func TestConsumer_Resume_RacesReconnect_NeverActiveAndPaused(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	fake := &fakeSubChannel{deliveries: make(chan amqp091.Delivery)}
@@ -540,6 +592,11 @@ func TestConsumer_Resume_RacesReconnect_NoDuplicateSubscribe(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+
+	// Anti-tautology: the invariant above is vacuously true if Pause/Resume never ran.
+	// Confirm the race actually exercised both broker paths.
+	assert.NotEmpty(t, fake.consumes(), "the Resume path must have issued at least one basic.consume during the race")
+	assert.NotEmpty(t, fake.cancels(), "the Pause path must have issued at least one basic.cancel during the race")
 
 	cancelRun()
 	<-drainDone
