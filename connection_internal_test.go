@@ -805,3 +805,25 @@ func TestConnectOnce_ctxCancelled_returnsCtxErr(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled,
 		"a ctx cancelled before any successful dial must surface ctx.Err(), not a redacted dial error")
 }
+
+// TestOpenPool_allFailInRole_failsFastNoLeak covers the failure boundary of the
+// T67 partial-pool-connect policy: the policy tolerates SOME sockets failing at
+// boot (≥1 live per role → degraded success), but a role where EVERY socket fails
+// must fail-fast — a Connection with zero live sockets for a role cannot serve it.
+// The integration test covers the ≥1-survives success path; this unit test pins the
+// connected==0 edge and asserts no supervisor goroutine is spawned on the fail-fast
+// path (goleak), so a regression loosening the per-role floor would not slip by.
+func TestOpenPool_allFailInRole_failsFastNoLeak(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	opts := &connOptions{}
+	applyConnDefaults(opts)
+	opts.addr = "amqp://h:5672/"
+	opts.dialer = func(_, _ string) (net.Conn, error) { return nil, errors.New("no broker") }
+	opts.reconnectBackoff = RetryPolicy{Min: time.Millisecond, Max: time.Millisecond, Retries: 1}
+
+	pool, err := openPool(context.Background(), "publisher", 2, opts)
+	require.Error(t, err, "a role with zero live sockets must fail Dial, not boot at reduced capacity")
+	assert.Nil(t, pool)
+	assert.Contains(t, err.Error(), "no connection could be established")
+}

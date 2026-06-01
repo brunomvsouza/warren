@@ -8,6 +8,7 @@ import (
 	amqp091 "github.com/rabbitmq/amqp091-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 // T60 (R10-5 / DS-04 / CR-04): the resolved-once guard on Delivery[M] is a
@@ -63,6 +64,7 @@ func TestDelivery_doubleAckIf_isNoOp(t *testing.T) {
 // handler-Ack goroutine race on the same Delivery. Exactly one frame must be
 // emitted; run with -race.
 func TestDelivery_concurrentTimeoutVerdictVsHandlerAck_exactlyOneFrame(t *testing.T) {
+	defer goleak.VerifyNone(t)
 	for i := 0; i < 500; i++ {
 		fa := &fakeAcker{}
 		d := makeTestDelivery[string](nil, "q", amqp091.Delivery{Acknowledger: fa, DeliveryTag: 1})

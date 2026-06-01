@@ -1,6 +1,7 @@
 package warren
 
 import (
+	"errors"
 	"sync/atomic"
 	"testing"
 
@@ -65,4 +66,30 @@ func TestRequeueUndispatched_stopsOnClosedChannel(t *testing.T) {
 	requeueUndispatched(ch, false, cm, "orders")
 	require.True(t, a.nacked)
 	assert.Equal(t, int64(1), cm.requeued.Load())
+}
+
+// TestRequeueUndispatched_nackErrorStopsDrain locks the documented contract when a
+// shutdown-time Nack errors: the drain STOPS rather than continuing. This is
+// deliberate and is NOT a silent drop — a nack error means the channel is already
+// gone, and the broker requeues every unacked delivery on channel close, so the
+// remaining buffered deliveries are still redelivered (at-least-once, §6.2.1). The
+// counter therefore reflects only confirmed requeues (a lower bound). A naive
+// "keep draining past the error" change would be wrong: nacking on a dead channel
+// would error on every remaining delivery and the broker handles them anyway.
+func TestRequeueUndispatched_nackErrorStopsDrain(t *testing.T) {
+	cm := &shutdownSpyMetrics{}
+	dead := &fakeAcker{failWith: errors.New("channel/connection is not open")}
+	live := &fakeAcker{}
+	ch := make(chan amqp091.Delivery, 3)
+	ch <- amqp091.Delivery{Acknowledger: dead, DeliveryTag: 1} // first nack errors
+	ch <- amqp091.Delivery{Acknowledger: live, DeliveryTag: 2} // must be left for broker requeue-on-close
+
+	requeueUndispatched(ch, false /* brokerAutoAck */, cm, "orders")
+
+	assert.False(t, live.nacked,
+		"drain must stop on the first nack error — the second delivery is left for the broker's requeue-on-close")
+	assert.Equal(t, 1, len(ch),
+		"the undrained delivery must remain buffered (requeued by the broker on close), not silently dropped")
+	assert.Equal(t, int64(0), cm.requeued.Load(),
+		"only successful requeues are counted; the errored nack is not")
 }
