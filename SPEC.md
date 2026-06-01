@@ -1898,6 +1898,17 @@ type DeadLetter struct {
     MaxLength      int             // x-max-length on source (message count)
     MaxLengthBytes int             // x-max-length-bytes on source (byte cap)
     Overflow       OverflowPolicy  // x-overflow on source; empty = broker default (drop-head)
+
+    // Auto-declared <Source>.dlq bounds (T65). The auto-DLQ is Durable AND
+    // bounded BY DEFAULT — an unbounded DLQ fills disk and trips a broker-wide
+    // connection.blocked alarm (one service's poison storm → cluster outage,
+    // SRE-03/ST-08), and dead-lettered personal data must have a finite life
+    // (GDPR 5(1)(e), DP-03). Defaults: x-max-length=100000, x-overflow=drop-head,
+    // x-message-ttl=7d. No effect when <Source>.dlq is declared explicitly.
+    DLQMaxLength   int             // x-max-length on the auto-DLQ; 0 → default 100000
+    DLQMessageTTL  time.Duration   // x-message-ttl on the auto-DLQ; 0 → default 7d
+    DLQOverflow    OverflowPolicy  // x-overflow on the auto-DLQ; empty → drop-head
+    DLQUnbounded   bool            // opt OUT of all auto-DLQ bounds (use an external retention policy)
 }
 
 // OverflowPolicy is a RabbitMQ extension via the x-overflow queue argument.
@@ -1922,7 +1933,13 @@ Behaviour:
        `x-dead-letter-exchange`, `x-dead-letter-routing-key`,
        `x-message-ttl`, `x-max-length`, `x-max-length-bytes`,
        `x-overflow`. Any DLX exchange or `<Source>.dlq` queue not
-       already present in `Exchanges` / `Queues` is appended.
+       already present in `Exchanges` / `Queues` is appended. The
+       auto-declared `<Source>.dlq` is **`Durable` and bounded by
+       default** (`x-max-length`, `x-overflow=drop-head`, and a finite
+       `x-message-ttl`) so a poison flood cannot fill disk and trip a
+       broker-wide `connection.blocked` (T65); override via the
+       `DeadLetter.DLQ*` fields, opt out with `DLQUnbounded`, or declare
+       `<Source>.dlq` explicitly.
      - For every queue with `DeliveryLimit > 0`: `x-delivery-limit`.
        Validation rejects `DeliveryLimit > 0` on a non-quorum queue
        with `ErrInvalidOptions` (broker silently ignores it on
@@ -2117,6 +2134,15 @@ user.
   out of scope: it requires an extra round-trip, fails closed if the
   plugin is disabled, and adds a runtime dependency the library does
   not otherwise need.
+- **`Consumer` mirrors this missing-DLX check (T65).** When a
+  `Consumer` is built with `MaxRedeliveries > 0` and a `*Topology`
+  wired via `(*ConsumerBuilder).Topology(t)` that has no `DeadLetter`
+  for the source queue, `Build` **warns** (it does not fail, unlike the
+  Replier) unless `(*ConsumerBuilder).AllowMissingDLX()` is set, and the
+  mandatory metric `consumer_drop_no_dlx_total{queue}` increments every
+  time a poison message exceeds `MaxRedeliveries` and is `Nack(false)`'d
+  without a known DLX — the consumer-side parity of
+  `replier_drop_no_dlx_total`, so poison drops are never invisible.
 
 ### 6.8 Errors
 

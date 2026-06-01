@@ -40,6 +40,7 @@ func (s *spyConsumerMetrics) RecordHandler(_ string, _ string, outcome string, _
 	s.handlerOutcomes = append(s.handlerOutcomes, outcome)
 }
 func (s *spyConsumerMetrics) RecordReplierDropNoDLX(_ string)    {}
+func (s *spyConsumerMetrics) RecordConsumerDropNoDLX(_ string)   {}
 func (s *spyConsumerMetrics) RecordCancelled(_, _ string)        {}
 func (s *spyConsumerMetrics) RecordMaxRedeliveries(_, _ string)  {}
 func (s *spyConsumerMetrics) InFlightBytesAdd(_ string, _ int64) {}

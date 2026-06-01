@@ -119,6 +119,29 @@ type DeadLetter struct {
 	MaxLengthBytes int
 	// Overflow controls what happens when the queue is full (x-overflow).
 	Overflow OverflowPolicy
+
+	// The fields below bound the AUTO-declared <Source>.dlq itself (not the
+	// source queue). They have no effect when the DLQ is declared explicitly
+	// (declare <Source>.dlq yourself for full control). An unbounded DLQ is a
+	// disk-fill / broker-wide connection.blocked hazard: one service's poison
+	// storm can take out the whole cluster (T65 / SRE-03 / ST-08), so the
+	// auto-DLQ is bounded by default.
+
+	// DLQMaxLength caps the auto-declared <Source>.dlq by message count
+	// (x-max-length). Zero applies defaultDLQMaxLength unless DLQUnbounded.
+	DLQMaxLength int
+	// DLQMessageTTL caps the auto-declared <Source>.dlq message lifetime
+	// (x-message-ttl) — the personal-data retention control (GDPR 5(1)(e) /
+	// LGPD Art. 16). Zero applies defaultDLQMessageTTL unless DLQUnbounded.
+	DLQMessageTTL time.Duration
+	// DLQOverflow sets x-overflow on the auto-declared DLQ. Empty defaults to
+	// OverflowDropHead (keep the most recent failures when full).
+	DLQOverflow OverflowPolicy
+	// DLQUnbounded opts the auto-declared <Source>.dlq OUT of all default bounds
+	// (no x-max-length, no x-message-ttl, no x-overflow). Use ONLY when an
+	// external retention policy manages the DLQ — an unbounded DLQ can fill disk
+	// and trip a broker-wide connection.blocked alarm (SRE-03 / ST-08).
+	DLQUnbounded bool
 }
 
 // AttachTo registers a deep snapshot of t as a reconnect redeclare callback on
@@ -362,6 +385,45 @@ func parseBrokerMajor(version string) (int, bool) {
 	return major, true
 }
 
+// Auto-DLQ default bounds (T65 / SRE-03 / ST-08 / DP-03). The auto-declared
+// <source>.dlq is bounded by default so a poison flood cannot fill disk and trip
+// a broker-wide connection.blocked alarm, and so dead-lettered personal data has
+// a finite life. Override via the DeadLetter.DLQ* fields, opt out with
+// DLQUnbounded, or declare <source>.dlq explicitly for full control.
+const (
+	defaultDLQMaxLength  = 100_000
+	defaultDLQMessageTTL = 7 * 24 * time.Hour
+)
+
+// autoDLQArgs builds the x-* argument table for the auto-declared <source>.dlq
+// from a DeadLetter, applying the safe defaults unless DLQUnbounded is set.
+func autoDLQArgs(dl DeadLetter) map[string]any {
+	if dl.DLQUnbounded {
+		return nil
+	}
+	args := make(map[string]any, 3)
+
+	maxLen := int64(dl.DLQMaxLength)
+	if maxLen == 0 {
+		maxLen = defaultDLQMaxLength
+	}
+	args["x-max-length"] = maxLen
+
+	ttl := dl.DLQMessageTTL
+	if ttl == 0 {
+		ttl = defaultDLQMessageTTL
+	}
+	args["x-message-ttl"] = ttl.Milliseconds()
+
+	overflow := dl.DLQOverflow
+	if overflow == "" {
+		overflow = OverflowDropHead
+	}
+	args["x-overflow"] = string(overflow)
+
+	return args
+}
+
 // expand returns a deep copy of t with all in-memory pre-pass mutations applied:
 //   - DeadLetter entries merge x-dead-letter-* args into source Queue.Args and
 //     append the DLX exchange and DLQ queue if not already present.
@@ -469,6 +531,7 @@ func (t *Topology) expand() *Topology {
 			out.Queues = append(out.Queues, Queue{
 				Name:    dlqName,
 				Durable: true,
+				Args:    autoDLQArgs(dl),
 			})
 			queueNames[dlqName] = struct{}{}
 		}

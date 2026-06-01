@@ -117,6 +117,11 @@ type ConsumerMetrics interface {
 	// RecordReplierDropNoDLX increments the counter for Replier messages dropped
 	// because the request queue has no dead-letter exchange configured.
 	RecordReplierDropNoDLX(queue string)
+	// RecordConsumerDropNoDLX increments the counter for Consumer poison messages
+	// dropped (Nack(false)) after MaxRedeliveries when no dead-letter exchange is
+	// known for the source queue — the consumer-side parity of
+	// RecordReplierDropNoDLX, so a silent poison drop stays observable (T65).
+	RecordConsumerDropNoDLX(queue string)
 	// InFlightBytesAdd adjusts the consumer_inflight_bytes gauge by delta (the
 	// in-flight memory guardrail, T50): +len(body) when a delivery is dispatched,
 	// -len(body) when its handler returns.

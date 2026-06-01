@@ -190,6 +190,7 @@ func (m *PrometheusPublisherMetrics) RecordRateLimited(exchange string) {
 //   - consumer_cancelled_total{queue,reason}
 //   - consumer_max_redeliveries_total{queue,cause}
 //   - replier_drop_no_dlx_total{queue}
+//   - consumer_drop_no_dlx_total{queue}
 //   - consumer_inflight_bytes{queue}
 //   - queue_depth{queue}
 //   - dlq_depth{dlq}
@@ -201,6 +202,7 @@ type PrometheusConsumerMetrics struct {
 	cancelledTotal       *prometheus.CounterVec
 	maxRedeliveriesTotal *prometheus.CounterVec
 	replierDropNoDLX     *prometheus.CounterVec
+	consumerDropNoDLX    *prometheus.CounterVec
 	inFlightBytes        *prometheus.GaugeVec
 	queueDepth           *prometheus.GaugeVec
 	dlqDepth             *prometheus.GaugeVec
@@ -271,6 +273,10 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64, 
 			Name: "replier_drop_no_dlx_total",
 			Help: "Total number of Replier messages dropped due to missing dead-letter exchange.",
 		}, []string{"queue"}),
+		consumerDropNoDLX: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "consumer_drop_no_dlx_total",
+			Help: "Total number of Consumer poison messages dropped after MaxRedeliveries with no known dead-letter exchange.",
+		}, []string{"queue"}),
 		inFlightBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "consumer_inflight_bytes",
 			Help: "Current sum of in-flight message body sizes held by running handlers.",
@@ -292,6 +298,7 @@ func NewPrometheusConsumerMetrics(reg prometheus.Registerer, buckets []float64, 
 		m.cancelledTotal,
 		m.maxRedeliveriesTotal,
 		m.replierDropNoDLX,
+		m.consumerDropNoDLX,
 		m.inFlightBytes,
 		m.queueDepth,
 		m.dlqDepth,
@@ -345,6 +352,11 @@ func (m *PrometheusConsumerMetrics) RecordMaxRedeliveries(queue, cause string) {
 // RecordReplierDropNoDLX increments replier_drop_no_dlx_total for the given queue.
 func (m *PrometheusConsumerMetrics) RecordReplierDropNoDLX(queue string) {
 	m.replierDropNoDLX.WithLabelValues(queue).Inc()
+}
+
+// RecordConsumerDropNoDLX increments consumer_drop_no_dlx_total for the given queue.
+func (m *PrometheusConsumerMetrics) RecordConsumerDropNoDLX(queue string) {
+	m.consumerDropNoDLX.WithLabelValues(queue).Inc()
 }
 
 // InFlightBytesAdd adjusts the consumer_inflight_bytes gauge for the given queue by delta.
