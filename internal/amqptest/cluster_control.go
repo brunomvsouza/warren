@@ -92,6 +92,71 @@ func fetchQuorumQueueState(client *http.Client, mgmtBase, vhost, queue string) (
 	return parseQuorumQueueState(body)
 }
 
+// clusterNodeState is the subset of a management-API /api/nodes entry the cluster
+// lane reads to gate on full-cluster readiness: each node's name and whether it is
+// currently running. After a kill/restart, `docker start` returns before RabbitMQ
+// has rebooted and rejoined, during which the node is listed but running=false.
+type clusterNodeState struct {
+	Name    string `json:"name"`
+	Running bool   `json:"running"`
+}
+
+// parseRunningNodes decodes an /api/nodes payload and returns how many nodes report
+// running plus the total listed, so a readiness gate can wait for every member to
+// be back after a kill/restart. Kept separate from the HTTP round-trip so the
+// counting rule is unit-testable without a server.
+func parseRunningNodes(body []byte) (running, total int, err error) {
+	var nodes []clusterNodeState
+	if err := json.Unmarshal(body, &nodes); err != nil {
+		return 0, 0, fmt.Errorf("decode nodes state: %w", err)
+	}
+	for _, n := range nodes {
+		if n.Running {
+			running++
+		}
+	}
+	return running, len(nodes), nil
+}
+
+// fetchRunningNodes reads /api/nodes from the management API at mgmtBase and
+// returns the running/total node counts. Credentials in the userinfo ride the
+// Authorization header — never the request URL — mirroring fetchQuorumQueueState.
+// A non-200 status is an error.
+func fetchRunningNodes(client *http.Client, mgmtBase string) (running, total int, err error) {
+	base, err := url.Parse(mgmtBase)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse management URL: %w", err)
+	}
+	if base.Host == "" {
+		return 0, 0, fmt.Errorf("management URL has no host:port")
+	}
+
+	apiURL := fmt.Sprintf("%s://%s/api/nodes", base.Scheme, base.Host)
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	if base.User != nil {
+		pass, _ := base.User.Password()
+		req.SetBasicAuth(base.User.Username(), pass)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, 0, fmt.Errorf("management GET %s://%s/api/nodes: %w", base.Scheme, base.Host, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, 0, fmt.Errorf("management GET %s returned %d: %s",
+			apiURL, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return parseRunningNodes(body)
+}
+
 // ToxiproxyClient is a thin client for the Toxiproxy v2 control API (the
 // unauthenticated HTTP API the cluster's toxiproxy sidecar exposes on
 // WARREN_TOXIPROXY_URL). It cuts a node's AMQP connectivity by disabling that
