@@ -53,6 +53,7 @@ func TestNoOpPublisherMetrics_zeroAllocs(t *testing.T) {
 		m.RecordPublish("events", "", "", "ack", 5*time.Millisecond)
 		m.RecordRetry("events", "nacked")
 		m.RecordRateLimited("events")
+		m.RecordChannelPoolWait("events", 2*time.Millisecond)
 		m.InFlightAdd("events", -1)
 	}))
 }
@@ -65,6 +66,11 @@ func TestNoOpConsumerMetrics_zeroAllocs(t *testing.T) {
 		m.RecordHandlerTimeout("orders")
 		m.RecordHandler("orders", "", "ack", 3*time.Millisecond)
 		m.RecordReplierDropNoDLX("orders")
+		m.RecordConsumerDropNoDLX("orders")
+		m.RecordShutdownRequeued("orders")
+		m.RecordRedelivered("orders")
+		m.ConsumerInFlightAdd("orders", 1)
+		m.ConsumerInFlightAdd("orders", -1)
 		m.RecordCancelled("orders", "broker_initiated")
 		m.RecordMaxRedeliveries("orders", "x-death")
 	}))
@@ -145,6 +151,7 @@ func TestPrometheusPublisherMetrics_mandatoryMetrics(t *testing.T) {
 	m.RecordPublish("events", "", "", "ack", 10*time.Millisecond)
 	m.RecordRetry("events", "nacked")
 	m.RecordRateLimited("events")
+	m.RecordChannelPoolWait("events", 2*time.Millisecond)
 	m.InFlightAdd("events", -3)
 
 	names := gatherNames(t, reg)
@@ -152,6 +159,7 @@ func TestPrometheusPublisherMetrics_mandatoryMetrics(t *testing.T) {
 	assert.Contains(t, names, "publisher_publish_seconds")
 	assert.Contains(t, names, "publisher_retry_total")
 	assert.Contains(t, names, "publisher_rate_limited_total")
+	assert.Contains(t, names, "publisher_channel_pool_wait_seconds")
 }
 
 func TestPrometheusPublisherMetrics_inFlightGauge(t *testing.T) {
@@ -303,6 +311,11 @@ func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
 	m.RecordHandlerTimeout("orders")
 	m.RecordHandler("orders", "", "ack", 5*time.Millisecond)
 	m.RecordReplierDropNoDLX("requests")
+	m.RecordConsumerDropNoDLX("orders")
+	m.RecordShutdownRequeued("orders")
+	m.RecordRedelivered("orders")
+	m.ConsumerInFlightAdd("orders", 1)
+	m.ConsumerInFlightAdd("orders", -1)
 	m.RecordCancelled("orders", "queue_deleted")
 	m.RecordMaxRedeliveries("orders", "x-death")
 	m.InFlightBytesAdd("orders", 4096)
@@ -315,6 +328,10 @@ func TestPrometheusConsumerMetrics_mandatoryMetrics(t *testing.T) {
 	assert.Contains(t, names, "consumer_handler_timeout_total")
 	assert.Contains(t, names, "consumer_handler_seconds")
 	assert.Contains(t, names, "replier_drop_no_dlx_total")
+	assert.Contains(t, names, "consumer_drop_no_dlx_total")
+	assert.Contains(t, names, "consumer_shutdown_requeued_total")
+	assert.Contains(t, names, "consumer_redelivered_total")
+	assert.Contains(t, names, "consumer_in_flight")
 	assert.Contains(t, names, "consumer_cancelled_total")
 	assert.Contains(t, names, "consumer_max_redeliveries_total")
 	assert.Contains(t, names, "consumer_inflight_bytes")
@@ -533,6 +550,7 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		pm.InFlightAdd("events", 1)
 		pm.RecordPublish("events", "", "", "ack", time.Duration(i+1)*time.Millisecond)
 		pm.RecordRetry("events", "nacked")
+		pm.RecordChannelPoolWait("events", time.Duration(i+1)*time.Millisecond)
 		pm.InFlightAdd("events", -1)
 
 		conm.RecordResubscribed("orders")
@@ -540,6 +558,11 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		conm.RecordHandlerTimeout("orders")
 		conm.RecordHandler("orders", "", "ack", time.Duration(i+1)*time.Millisecond)
 		conm.RecordReplierDropNoDLX("requests")
+		conm.RecordConsumerDropNoDLX("orders")
+		conm.RecordShutdownRequeued("orders")
+		conm.RecordRedelivered("orders")
+		conm.ConsumerInFlightAdd("orders", 1)
+		conm.ConsumerInFlightAdd("orders", -1)
 		conm.RecordCancelled("orders", "queue_deleted")
 		conm.RecordMaxRedeliveries("orders", "x-death")
 		conm.InFlightBytesAdd("orders", int64(i))
@@ -557,11 +580,16 @@ func TestPrometheus_integrationWorkload(t *testing.T) {
 		"publisher_in_flight",
 		"publisher_publish_seconds",
 		"publisher_retry_total",
+		"publisher_channel_pool_wait_seconds",
 		"consumer_resubscribed_total",
 		"consumer_handler_aborted_channel_closed_total",
 		"consumer_handler_timeout_total",
 		"consumer_handler_seconds",
 		"replier_drop_no_dlx_total",
+		"consumer_drop_no_dlx_total",
+		"consumer_shutdown_requeued_total",
+		"consumer_redelivered_total",
+		"consumer_in_flight",
 		"consumer_cancelled_total",
 		"consumer_max_redeliveries_total",
 		"consumer_inflight_bytes",

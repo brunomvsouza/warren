@@ -401,12 +401,14 @@ func (b *ConsumerBuilder[M]) Build() (*Consumer[M], error) {
 	// message that exceeds the cap is Nack(false)'d. Without a DLX the broker
 	// silently drops it. If a Topology is wired and has no DLX for the source
 	// queue, warn at Build (unless AllowMissingDLX). knownHasDLX is conservative:
-	// only true when a wired Topology proves a DLX exists; otherwise the drop
-	// metric counts every poison drop so the silent drop stays observable.
+	// only true when a wired Topology proves a DLX exists — either a DeadLetter
+	// entry or a manual x-dead-letter-exchange arg (topologyHasDLX checks both);
+	// otherwise the drop metric counts every poison drop so it stays observable.
 	cfg.knownHasDLX = cfg.topology != nil && topologyHasDLX(cfg.topology, cfg.queue)
 	if cfg.maxRedeliveries > 0 && cfg.topology != nil && !cfg.knownHasDLX && !cfg.allowMissingDLX {
 		b.conn.opts.logger.Warningf(
-			"warren: consumer queue %q has MaxRedeliveries=%d but no DeadLetter entry in the wired Topology; "+
+			"warren: consumer queue %q has MaxRedeliveries=%d but no dead-letter exchange in the wired Topology "+
+				"(neither a DeadLetter entry nor an x-dead-letter-exchange arg); "+
 				"poison messages will be Nack(false)'d and silently dropped by the broker "+
 				"(counted by consumer_drop_no_dlx_total). Add a DeadLetter or call AllowMissingDLX() to acknowledge.",
 			cfg.queue, cfg.maxRedeliveries,

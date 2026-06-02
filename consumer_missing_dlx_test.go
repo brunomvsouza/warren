@@ -28,10 +28,17 @@ func TestConsumer_missingDLX_warnsAtBuild(t *testing.T) {
 		Queues:      []Queue{{Name: "orders", Durable: true}},
 		DeadLetters: []DeadLetter{{Source: "orders"}},
 	}
+	// A DLX wired manually via Args (no DeadLetter entry) is a real DLX — the
+	// missing-DLX check must recognise it (parity with the Replier check).
+	withManualDLX := &Topology{
+		Queues: []Queue{{Name: "orders", Durable: true, Args: map[string]any{
+			"x-dead-letter-exchange": "orders.dlx",
+		}}},
+	}
 
 	hasMissingDLXWarning := func(rec *recordingLogger) bool {
 		for _, w := range rec.warnings {
-			if strings.Contains(w, "no DeadLetter") {
+			if strings.Contains(w, "no dead-letter exchange") {
 				return true
 			}
 		}
@@ -56,6 +63,16 @@ func TestConsumer_missingDLX_warnsAtBuild(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, hasMissingDLXWarning(rec))
 		assert.True(t, c.knownHasDLX, "knownHasDLX must be true when a DeadLetter is wired")
+	})
+
+	t.Run("no warning with a manual x-dead-letter-exchange arg", func(t *testing.T) {
+		conn := newFakeConsumerConn(t)
+		rec := &recordingLogger{}
+		conn.opts.logger = rec
+		c, err := ConsumerFor[string](conn).Queue("orders").MaxRedeliveries(3).Topology(withManualDLX).Build()
+		require.NoError(t, err)
+		assert.False(t, hasMissingDLXWarning(rec), "a manual x-dead-letter-exchange arg is a real DLX; no warning")
+		assert.True(t, c.knownHasDLX, "knownHasDLX must be true when a manual x-dead-letter-exchange arg is set")
 	})
 
 	t.Run("AllowMissingDLX suppresses the warning", func(t *testing.T) {

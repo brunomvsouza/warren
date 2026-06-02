@@ -417,6 +417,13 @@ func warnQuorumDeliveryLimit(logger log.Logger, queues []Queue, brokerVersion st
 	}
 }
 
+// dlxStrategyAtLeastOnce is the one x-dead-letter-strategy value warren couples
+// with x-overflow=reject-publish (decision 52 / RMQ-05). Shared by expand(),
+// validate(), and quorumAtLeastOnce so the three reach the same client-side
+// verdict for every strategy value — including a non-string one (which the broker
+// rejects anyway, but must not yield divergent client-side behaviour).
+const dlxStrategyAtLeastOnce = "at-least-once"
+
 // quorumAtLeastOnce reports whether queue q will run the at-least-once
 // dead-letter strategy after expansion — i.e. it is a quorum queue, has a DLX
 // (via Queue.Args["x-dead-letter-exchange"] or a DeadLetter naming it as
@@ -452,9 +459,15 @@ func (t *Topology) quorumAtLeastOnce(q Queue) (atLeastOnce bool, overflow string
 	if !hasDLX {
 		return false, "", false
 	}
-	// A caller override that is not at-least-once opts out of the coupling.
-	if s, ok := q.Args["x-dead-letter-strategy"].(string); ok && s != "at-least-once" {
-		return false, overflow, overflowSet
+	// A caller override that is not the at-least-once string opts out of the
+	// coupling. This mirrors expand()'s effectiveALO exactly — a strategy that is
+	// present but not the at-least-once string (including a non-string value) is
+	// treated as opt-out, so validate/expand/warn never reach different
+	// client-side verdicts for the same input.
+	if v, present := q.Args["x-dead-letter-strategy"]; present {
+		if s, ok := v.(string); !ok || s != dlxStrategyAtLeastOnce {
+			return false, overflow, overflowSet
+		}
 	}
 	return true, overflow, overflowSet
 }
@@ -743,7 +756,7 @@ func (t *Topology) expand() *Topology {
 			if _, hasDLX := q.Args["x-dead-letter-exchange"]; hasDLX {
 				strategyVal, hasStrategy := q.Args["x-dead-letter-strategy"]
 				if !hasStrategy {
-					q.Args["x-dead-letter-strategy"] = "at-least-once"
+					q.Args["x-dead-letter-strategy"] = dlxStrategyAtLeastOnce
 				}
 				// at-least-once requires x-overflow=reject-publish (decision 52 /
 				// RMQ-05). The broker accepts any overflow silently (gate G4) but
@@ -753,7 +766,7 @@ func (t *Topology) expand() *Topology {
 				// at-least-once strategy — a caller override (e.g. at-most-once)
 				// opts out.
 				effectiveALO := !hasStrategy
-				if s, ok := strategyVal.(string); ok && s == "at-least-once" {
+				if s, ok := strategyVal.(string); ok && s == dlxStrategyAtLeastOnce {
 					effectiveALO = true
 				}
 				if effectiveALO {

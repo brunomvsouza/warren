@@ -176,10 +176,22 @@ func (b *ReplierBuilder[Req, Resp]) Build() (*Replier[Req, Resp], error) {
 	}, nil
 }
 
-// topologyHasDLX reports whether t declares a DeadLetter whose Source is queue.
+// topologyHasDLX reports whether t configures a dead-letter exchange for queue —
+// either a DeadLetter entry naming it as Source, or a DLX wired directly on the
+// queue via Args["x-dead-letter-exchange"] (the manual path expand() also honours,
+// see topology.go). Conservative: a true result proves a DLX is configured; a
+// false result only means warren cannot prove one statically.
 func topologyHasDLX(t *Topology, queue string) bool {
 	for _, dl := range t.DeadLetters {
 		if dl.Source == queue {
+			return true
+		}
+	}
+	for _, q := range t.Queues {
+		if q.Name != queue {
+			continue
+		}
+		if _, ok := q.Args["x-dead-letter-exchange"]; ok {
 			return true
 		}
 	}
