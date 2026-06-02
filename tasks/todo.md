@@ -1653,13 +1653,30 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
   - Added a scope **table** to SPEC §6.8 plus the explicit note that **scope is orthogonal to transient/permanent**: 504 is connection-level yet transient; 406 is channel-level yet permanent. Recovery path follows the *scope* column; whether a retry is *attempted* follows `IsTransient`/`IsPermanent`. Noted 312/313 (`basic.return`) are neither scope (no close).
   - Verify: `go build ./...` OK, `go test -race ./...` all green, `/usr/bin/make lint` 0 issues. README unchanged (no public-surface change — sentinel identities and behaviour unchanged, godoc-only).
 
-### [ ] T80 — Sizing/limits factual fixes (RMQ-12/13) [P2] · XS
+### [x] T80 — Sizing/limits factual fixes (RMQ-12/13) [P2] · XS
 - **Acceptance:**
-  - [ ] SPEC §6.1 states the per-version broker `max_message_size` defaults (128 MiB 3.13 / 16 MiB 4.0+, per G5) and that >default needs the broker raised; reconciled with the ≥100 MiB pointer-out guidance.
-  - [ ] SPEC §6.1 fixes "131072 is the AMQP-spec minimum" → "4096 is the minimum; 131072 the default".
+  - [x] SPEC §6.1 states the per-version broker `max_message_size` defaults (128 MiB 3.13 / 16 MiB 4.0+, per G5) and that >default needs the broker raised; reconciled with the ≥100 MiB pointer-out guidance.
+  - [x] SPEC §6.1 fixes "131072 is the AMQP-spec minimum" → "4096 is the minimum; 131072 the default".
 - **Verify:** Doc review against G5 results.
 - **Files:** SPEC §6.1.
 - **Deps:** T74 (G5). **(RMQ-12/13, P2)**
+- **Done:** Rewrote SPEC §6.1 "Frame size and message size limits". (1) Fixed the
+  stale "`WithFrameMax(131072)` is the AMQP-spec minimum" → "**4096 is the
+  AMQP-spec minimum; 131072 is the default**" (frame-max), with the `< 4096`
+  protocol-tune / `Dial` `ErrInvalidOptions` rejection inline. (2) Added a
+  **Broker message-size ceiling (`max_message_size`)** bullet documenting the
+  version-divergent default — **128 MiB on 3.13 / 16 MiB on 4.0+** (per gate G5:
+  17 MiB publish accepted on 3.13.7, rejected on 4.0.9) — and that publishing
+  above the default requires raising `max_message_size` broker-side, noting the
+  client-side `MaxMessageSizeBytes` guardrail (default 16 MiB, §6.2) is aligned
+  with the 4.0+ default to fail fast. (3) Separated `frame_max` (frame size) from
+  `max_message_size` (total body), flagging the ceiling "bites long before the
+  ~512 MiB protocol hard maximum". (4) Reconciled the ≥100 MiB pointer-out
+  guidance: reach for object-store pointers "well below ~100 MiB" because the
+  4.0+ 16 MiB default already rejects larger bodies unless reconfigured.
+  Doc-only, no behaviour change — no RED test. Verified: `go build ./...` OK,
+  `go test -race ./...` green, `make lint` 0 issues. README unchanged (no public
+  surface change).
 
 ### [ ] T81 — Version-divergence documentation (RMQ-17/19/21/23/30/31) [P2] · S
 - **Acceptance:**

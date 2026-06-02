@@ -793,28 +793,44 @@ before the socket errors) — see the `WithDialer` godoc for the recipe.
 
 #### Frame size and message size limits
 
-`WithFrameMax(131072)` is the AMQP-spec minimum (128 KiB) and the
-sensible default for typical messages. Messages larger than the
-frame max are split into multiple frames, so payloads up to RabbitMQ's
-**practical limit of ~512 MiB per message** work without further
-configuration — but with the overhead of N frames per message
-(N = ⌈body_size / frame_max⌉).
+`WithFrameMax(131072)` (128 KiB) is RabbitMQ's default frame size and
+the sensible default for typical messages — **4096 is the AMQP-spec
+minimum; 131072 is the default** (RabbitMQ rejects `frame-max < 4096` at
+the protocol-tune step, and this library refuses values < 4096 at `Dial`
+with `ErrInvalidOptions`). Messages larger than the frame max are split
+into multiple frames, so by frame size alone a large body works without
+further configuration — but with the overhead of N frames per message
+(N = ⌈body_size / frame_max⌉), and only up to the broker's
+**`max_message_size` ceiling** (below), which bites long before the
+~512 MiB protocol hard maximum.
 
 Sizing guidance:
 - **Small messages (< 4 KiB):** leave at default. The overhead is
   one frame either way.
 - **Streaming large messages (≥ 1 MiB):** raise to `1048576` (1 MiB).
   Reduces per-message frame count and CPU overhead on the broker.
-- **Hard maximum:** RabbitMQ rejects `frame-max < 4096` at the
-  protocol-tune step. The library refuses values < 4096 at
-  `Dial` with `ErrInvalidOptions`.
-- The negotiated value is `min(client, server)`; RabbitMQ default
-  is 131072. To use 1 MiB end-to-end, set
-  `frame_max = 1048576` on the broker side as well.
+- **Frame-max bounds:** the negotiated value is `min(client, server)`;
+  RabbitMQ's default is 131072 and its minimum is 4096 (the library
+  refuses values < 4096 at `Dial` with `ErrInvalidOptions`). To use
+  1 MiB frames end-to-end, set `frame_max = 1048576` on the broker side
+  as well.
+- **Broker message-size ceiling (`max_message_size`):** independent of
+  `frame_max`, the broker caps the *total* message body. The default is
+  **version-divergent** — **128 MiB on RabbitMQ 3.13** and **16 MiB on
+  4.0+** (verified by gate G5: a 17 MiB publish is accepted on 3.13.7,
+  rejected on 4.0.9). Publishing above the default requires raising
+  `max_message_size` in the broker configuration; otherwise the broker
+  rejects the publish. The client-side `MaxMessageSizeBytes` guardrail
+  (default 16 MiB; §6.2) is deliberately aligned with the 4.0+ default
+  so an oversized payload fails fast client-side before it ever reaches
+  the broker.
 
-For truly large payloads (≥ 100 MiB), AMQP is the wrong tool —
-treat the message body as a pointer (S3 URL, object-store key) and
-publish only the reference.
+For truly large payloads, AMQP is the wrong tool — treat the message
+body as a pointer (S3 URL, object-store key) and publish only the
+reference. Reach for that pattern well below the ~100 MiB range: on
+RabbitMQ 4.0+ the 16 MiB `max_message_size` default already rejects
+anything larger unless the broker is reconfigured, and large bodies
+pin broker memory and frame buffers regardless of version.
 
 #### Authentication
 
