@@ -1565,13 +1565,36 @@ pull T60/T61/T65/T66 forward (defined in Phase 11); async API stays
 LATER-34. **Differential 3.13-vs-4.x integration assertions required.**
 Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 
-### [ ] T74 — Verification gates G1–G6 (real broker, 3.13 + 4.x) [P0] · S
+### [x] T74 — Verification gates G1–G6 (real broker, 3.13 + 4.x) [P0] · S
 - **Acceptance:**
-  - [ ] Ground-truth captured on **both** broker versions for: G1 `x-death` delivery-limit reason atom (`delivery-limit` vs `delivery_limit`); G2 x-death `count` accumulation shape; G3 4.x *classic* queue `x-delivery-limit` honoring; G4 valid `{quorum, overflow, at-least-once}` declare permutations; G5 broker `max_message_size` defaults per version; G6 `prefetch_size!=0` reject-vs-ignore.
-  - [ ] Results table committed (under `docs/spec-validation/` or task notes); downstream tasks cite their gate.
+  - [x] Ground-truth captured on **both** broker versions for: G1 `x-death` delivery-limit reason atom (`delivery-limit` vs `delivery_limit`); G2 x-death `count` accumulation shape; G3 4.x *classic* queue `x-delivery-limit` honoring; G4 valid `{quorum, overflow, at-least-once}` declare permutations; G5 broker `max_message_size` defaults per version; G6 `prefetch_size!=0` reject-vs-ignore.
+  - [x] Results table committed (under `docs/spec-validation/` or task notes); downstream tasks cite their gate.
 - **Verify:** `make integration-up` + `AMQP_TEST_URL=… make test-integration` against the 3.13 and 4.x images.
 - **Files:** `*_integration_test.go`, `docs/spec-validation/` (results table).
 - **Deps:** T07d, T14, T15. **(Lens-01 gates, P0)**
+- **Done:** Captured live against **RabbitMQ 3.13.7 and 4.0.9** with a new
+  `integration`-tag instrument `gate_verification_integration_test.go`
+  (`TestGate_VerificationGates_integration`), which reads the broker version
+  from `/api/overview` and asserts version-differentially; every value lands on
+  a `GATE-RESULT` log line. The integration lane is now version-overridable —
+  `test/Dockerfile.rabbitmq-delayed` takes `RABBITMQ_IMAGE`/`PLUGIN_URL`/`PLUGIN_SHA`
+  build ARGs (defaulting to the 3.13 pair) and `test/docker-compose.integration.yml`
+  wires them to `WARREN_RMQ_IMAGE`/`WARREN_DELAYED_PLUGIN_URL`/`WARREN_DELAYED_PLUGIN_SHA`/`WARREN_INTEGRATION_IMAGE`
+  (the matching 4.0.7 delayed-plugin pin, sha `9f7469…d3fd`, is documented in
+  both files); the full CI 3.13+4.x integration *matrix* wiring stays T151. Gate
+  results + the gate→task index are committed at
+  `docs/spec-validation/01-rabbitmq-gate-results.md`; SPEC §10 gains a **Rev 11**
+  note recording the pass + the load-bearing observations. Headlines: **G1**
+  reason atom is `delivery_limit` (underscore) on **both** versions → T75 must
+  match/normalise it (today's hyphen literal never fires); **G3** classic +
+  `x-delivery-limit` is **406-rejected** on both (4.0.9 has not changed this);
+  **G4** the broker accepts every overflow/strategy permutation → T76 enforces
+  the `at-least-once⇒reject-publish` coupling client-side; **G5** the only
+  divergent gate — 17 MiB accepted on 3.13 (128 MiB default), rejected on 4.0
+  (16 MiB) → T80; **G6** non-zero `prefetch_size` is 540 `NOT_IMPLEMENTED` on
+  both → T78. Gate test green on both versions (`-count=1` required when
+  switching versions on one host — Go's test cache can't see the broker change);
+  default `make lint` + `make test` (`-race`) clean; `goleak.VerifyNone` clean.
 
 ### [ ] T75 — x-death delivery-limit reason token (RMQ-01) [P0] · S
 - **Acceptance:**
@@ -1647,7 +1670,7 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 - **Deps:** —. **(RMQ-11, P2)**
 
 ### Checkpoint — Phase 12 (Lens 01) closed
-- [ ] T74 gate results documented; downstream tasks cite their gate.
+- [x] T74 gate results documented (`docs/spec-validation/01-rabbitmq-gate-results.md` + SPEC §10 Rev 11); gate→task index records which task consumes each gate (T75→G1, T78→G2/G6, T58/T81→G3, T76→G4, T80→G5).
 - [ ] Poison path correct on **both** 3.13 and 4.x: T75 (real-broker x-death), T58 (version-aware warning), T64 (quorum validation).
 - [ ] DLX correct: T76 (at-least-once + reject-publish), T65 (durable bounded DLQ + Consumer missing-DLX).
 - [ ] §1 silent-failure defects closed: T60, T61, T65, T66.

@@ -15,10 +15,29 @@ services:
     # broker identical to the integration lane. The build context is this file's own
     # directory (test/), so `dockerfile:` names the sibling Dockerfile; it only FROMs
     # + ADDs a pinned remote .ez, never COPYing from the context.
+    #
+    # Version-overridable (T74): the Lens-01 protocol gates require running the same
+    # lane against BOTH 3.13 and 4.x. The base image + matching delayed-plugin pin are
+    # build ARGs defaulting to 3.13; to run the 4.x lane, export all four vars before
+    # `make integration-up` (the plugin minor MUST match the broker minor, and the 4.x
+    # asset filename carries a `v` prefix — see Dockerfile.rabbitmq-delayed):
+    #
+    #   WARREN_RMQ_IMAGE=rabbitmq:4.0-management \
+    #   WARREN_DELAYED_PLUGIN_URL=https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases/download/v4.0.7/rabbitmq_delayed_message_exchange-v4.0.7.ez \
+    #   WARREN_DELAYED_PLUGIN_SHA=9f746962d8f4e9ec2ce52fc86856859c30ed11abc67dd93cd80ebb3ef925d3fd \
+    #   WARREN_INTEGRATION_IMAGE=warren-rabbitmq-delayed:4.0 \
+    #   make integration-up
+    #
+    # A distinct WARREN_INTEGRATION_IMAGE tag per version keeps the 3.13 and 4.x builds
+    # from clobbering each other's local image cache.
     build:
       context: .
       dockerfile: Dockerfile.rabbitmq-delayed
-    image: warren-rabbitmq-delayed:3.13
+      args:
+        RABBITMQ_IMAGE: ${WARREN_RMQ_IMAGE:-rabbitmq:3.13-management}
+        PLUGIN_URL: ${WARREN_DELAYED_PLUGIN_URL:-https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases/download/v3.13.0/rabbitmq_delayed_message_exchange-3.13.0.ez}
+        PLUGIN_SHA: ${WARREN_DELAYED_PLUGIN_SHA:-3479180df03fa830fd59ccf638a60eee8f0e8261524a8616685522d7b8d9a9ee}
+    image: ${WARREN_INTEGRATION_IMAGE:-warren-rabbitmq-delayed:3.13}
     ports:
       - "5672:5672"
       - "15672:15672"

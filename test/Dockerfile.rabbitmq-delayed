@@ -10,20 +10,37 @@
 # the broker actually holds a message for its x-delay -- run green on every integration
 # lane (CI and local `make integration-up`), not only on a developer's hand-built broker.
 #
+# Version-parameterised (T74): the integration lane must run differential assertions
+# against BOTH RabbitMQ 3.13 and 4.x (the Lens-01 protocol gates). The base image and
+# the matching delayed-message-exchange plugin are therefore build ARGs, defaulting to
+# the 3.13 pair the lane has always used. To build the 4.x image, override all three
+# (the docker-compose.integration.yml wires them to WARREN_RMQ_IMAGE / *_PLUGIN_URL /
+# *_PLUGIN_SHA env vars):
+#
+#   3.13 (default): rabbitmq:3.13-management <-> delayed-message-exchange v3.13.0
+#   4.0           : rabbitmq:4.0-management   <-> delayed-message-exchange v4.0.7
+#
 # Pinned for reproducibility and plugin/broker ABI compatibility:
-#   - rabbitmq 3.13 (management) <-> delayed-message-exchange v3.13.0 (matching minor;
-#     the plugin is ABI-compatible across 3.13.x patch releases).
+#   - the plugin minor must match the broker minor (the .ez is ABI-compatible across
+#     that minor's patch releases). Note the asset filename gained a `v` prefix in 4.x
+#     (rabbitmq_delayed_message_exchange-v4.0.7.ez vs ...-3.13.0.ez); the build does not
+#     care about the filename, only that it lands in the plugins dir and is enabled by
+#     name below.
 #   - the .ez is fetched by exact release URL and verified by SHA-256, so a tampered
 #     or truncated download fails the build (supply-chain hardening; mirrors the
 #     concerns tracked for the CI image pins).
-FROM rabbitmq:3.13-management
+ARG RABBITMQ_IMAGE=rabbitmq:3.13-management
+FROM ${RABBITMQ_IMAGE}
+
+ARG PLUGIN_URL=https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases/download/v3.13.0/rabbitmq_delayed_message_exchange-3.13.0.ez
+ARG PLUGIN_SHA=3479180df03fa830fd59ccf638a60eee8f0e8261524a8616685522d7b8d9a9ee
 
 # Drop the plugin archive (a zip .ez) into the broker's plugin directory. --checksum
 # makes BuildKit verify the bytes before the layer is committed; --chmod keeps it
 # world-readable so the unprivileged rabbitmq user can load it.
 ADD --chmod=644 \
-    --checksum=sha256:3479180df03fa830fd59ccf638a60eee8f0e8261524a8616685522d7b8d9a9ee \
-    https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases/download/v3.13.0/rabbitmq_delayed_message_exchange-3.13.0.ez \
+    --checksum=sha256:${PLUGIN_SHA} \
+    ${PLUGIN_URL} \
     /opt/rabbitmq/plugins/
 
 # Merge the plugin into the enabled set offline (no running broker needed): --offline
