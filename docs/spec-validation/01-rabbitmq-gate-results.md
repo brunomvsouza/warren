@@ -112,7 +112,7 @@ version-aware delivery-limit warning (T58) only applies to quorum queues. The
 4.x poison-loop **bound** assertion (T81/TV-11) must therefore ride a **quorum**
 queue, not a classic one.
 
-### G4 — quorum/overflow/at-least-once permutations → **T76** (RMQ-05)
+### G4 — quorum/overflow/at-least-once permutations → **T76** (RMQ-05) — ✅ RESOLVED
 The broker is **permissive** on both versions: it accepts every combination,
 including the semantically invalid `at-least-once`+`drop-head` and
 `at-least-once` without a DLX. Therefore the `at-least-once` ⇒ `reject-publish`
@@ -122,6 +122,25 @@ broker — T76 must enforce them **client-side** (`ErrInvalidOptions` on
 acceptance criteria already prescribe. The canonical valid combo
 (`quorum`+`reject-publish`+`at-least-once`+DLX) is accepted everywhere; the gate
 asserts that invariant.
+
+**T76 follow-up probe (extends G4):** the gate tested `drop-head` permutations;
+T76 added a probe of the **full** overflow set and confirmed the broker also
+accepts `at-least-once`+**`reject-publish-dlx`** on both 3.13.7 and 4.0.9. Since
+RabbitMQ documents that at-least-once requires *exactly* `reject-publish`, T76's
+client-side rule rejects **any** non-`reject-publish` overflow (both `drop-head`
+and `reject-publish-dlx`) — not just `drop-head`.
+
+**T76 fix:** `Topology` couples the two client-side. `expand()` injects
+`x-dead-letter-strategy=at-least-once` (pre-existing) and now auto-sets
+`x-overflow=reject-publish` when a quorum-at-least-once queue leaves overflow
+unset; `validate()` returns `ErrInvalidOptions` for a conflicting explicit
+overflow; `Declare` emits a warning on the auto-set that names the source-queue
+memory cost. A shared `(*Topology).quorumAtLeastOnce` helper keeps validate /
+expand / warn in lockstep, and a caller override of `x-dead-letter-strategy`
+opts out. Verified by unit tests plus a real-broker integration test
+(`topology_at_least_once_overflow_integration_test.go`) that reads the coupled
+args back via the management API and drives a real dead-letter — **green on both
+3.13.7 and 4.0.9**.
 
 ### G5 — max_message_size default → **T80** (RMQ-12/13)
 The only **version-divergent** gate. A 17 MiB message is accepted on 3.13.7 and

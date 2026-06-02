@@ -1090,7 +1090,7 @@ assertions are required**, not just "suite passes". Gate task T74 runs first.
 **Checkpoint Phase 12:**
 - [x] T74 gate results documented (`docs/spec-validation/01-rabbitmq-gate-results.md` + SPEC §10 Rev 11; captured live on RabbitMQ 3.13.7 + 4.0.9); each downstream task cites its gate via the gate→task index.
 - [x] x-death delivery-limit `DeathCount()` verified on a **real** 4.x broker; fabricated unit test replaced (T75).
-- [ ] Quorum + DLX declares `at-least-once` with `reject-publish`; an invalid `drop-head` combo is rejected/auto-fixed (T76).
+- [x] Quorum + DLX declares `at-least-once` with `reject-publish`; an invalid `drop-head`/`reject-publish-dlx` combo is rejected/auto-fixed (T76; verified on 3.13.7 + 4.0.9).
 - [ ] Mandatory `PublishBatch` with duplicate `MessageID` returns `ErrInvalidMessage` (T77).
 - [ ] SPEC matches implementation: 311 permanent, `DeathCount` sums `count`, alarm → `ErrConnectionBlocked`, `prefetch_size` always 0 (T78).
 - [ ] Version-aware `DeliveryLimit==0` warning correct on **both** 3.13 and 4.x (T58); quorum structural validation + documented `Queue.MaxPriority` (T64).
