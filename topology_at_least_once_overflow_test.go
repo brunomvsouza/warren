@@ -148,6 +148,37 @@ func TestTopology_validate_allowsDropHeadWhenNotAtLeastOnce(t *testing.T) {
 	assert.NoError(t, topo.validate())
 }
 
+// A non-string x-dead-letter-strategy value is not the at-least-once string, so
+// the coupling must not apply — validate() must allow drop-head AND expand() must
+// not force reject-publish, in lockstep. Pre-fix the two diverged: quorumAtLeastOnce
+// (used by validate) treated a non-string strategy as at-least-once and rejected
+// drop-head, while expand treated it as opt-out and left overflow alone (RMQ-05).
+func TestTopology_quorumAtLeastOnce_nonStringStrategy_optsOutInLockstep(t *testing.T) {
+	mk := func() *Topology {
+		return &Topology{
+			Queues: []Queue{{
+				Name: "orders", Durable: true, Type: QueueTypeQuorum,
+				Args: map[string]any{
+					"x-dead-letter-strategy": 42, // not the at-least-once string
+					"x-overflow":             "drop-head",
+				},
+			}},
+			DeadLetters: []DeadLetter{{Source: "orders"}},
+		}
+	}
+	// validate side: drop-head is allowed (no at-least-once coupling).
+	assert.NoError(t, mk().validate(), "a non-string strategy is not at-least-once; drop-head must be allowed")
+	// expand side: reject-publish is NOT forced; the explicit drop-head stands.
+	expanded := mk().expand()
+	var src Queue
+	for _, q := range expanded.Queues {
+		if q.Name == "orders" {
+			src = q
+		}
+	}
+	assert.Equal(t, "drop-head", src.Args["x-overflow"], "expand must not override drop-head for a non-at-least-once strategy")
+}
+
 // A quorum queue without any DLX is unaffected — no at-least-once, no coupling.
 func TestTopology_validate_dropHeadAllowedWithoutDLX(t *testing.T) {
 	topo := &Topology{

@@ -108,3 +108,39 @@ func TestConsumer_redeliveredAndInFlight_metrics(t *testing.T) {
 	assert.GreaterOrEqual(t, cm.inFlightMax.Load(), int64(1), "consumer_in_flight must rise above zero while a handler runs")
 	assert.Equal(t, int64(0), cm.inFlightCur.Load(), "consumer_in_flight must return to zero after handlers finish")
 }
+
+// TestBatchConsumer_redelivered_metric proves consumer_redelivered_total
+// increments on a Redelivered delivery in the batch path too — parity with the
+// single-delivery Consumer (T71 / DS-14).
+func TestBatchConsumer_redelivered_metric(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	conn := newFakeConsumerConn(t)
+	cm := &redeliverInflightSpy{}
+	bc, err := BatchConsumerFor[string](conn).Queue("q").Size(2).Metrics(cm).Build()
+	require.NoError(t, err)
+	defer func() { _ = bc.Close(context.Background()) }()
+
+	deliveryCh := make(chan amqp091.Delivery, 2)
+	bc.deliveryCh = deliveryCh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = bc.Consume(ctx, func(_ context.Context, b *Batch[string]) error {
+			err := b.Ack()
+			cancel() // one batch is enough; stop the loop
+			return err
+		})
+	}()
+
+	// One fresh delivery and one redelivered → a size-2 batch flushes.
+	deliveryCh <- amqp091.Delivery{Body: []byte(`"a"`), ContentType: "application/json", Acknowledger: &fakeAcker{}}
+	deliveryCh <- amqp091.Delivery{Body: []byte(`"b"`), ContentType: "application/json", Redelivered: true, Acknowledger: &fakeAcker{}}
+
+	<-done
+	assert.Equal(t, int64(1), cm.redelivered.Load(), "only the redelivered delivery must increment consumer_redelivered_total")
+}

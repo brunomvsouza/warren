@@ -449,6 +449,13 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 				continue
 			}
 
+			// consumer_redelivered_total (T71 / DS-14): the dominant duplicate-budget
+			// signal, counted on receipt — parity with Consumer.runConsume so a
+			// batch-consuming service is not blind to its redelivery budget.
+			if d.Redelivered {
+				c.cm.RecordRedelivered(c.queue)
+			}
+
 			// Decode payload; nack invalid messages individually without batching.
 			var body M
 			if err := safeDecodeConsumer(c.codec, d.Body, d.Headers, d.ContentType, &body); err != nil {
