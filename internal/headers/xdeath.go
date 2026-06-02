@@ -2,9 +2,22 @@ package headers
 
 import (
 	"math"
+	"strings"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 )
+
+// normalizeReason canonicalises an x-death reason atom by folding separators to
+// a hyphen. RabbitMQ emits the delivery-limit reason with an UNDERSCORE
+// ("delivery_limit", confirmed identical on 3.13 and 4.x — RMQ-01 / gate G1),
+// while warren's public API documents the hyphenated "delivery-limit". Folding
+// here keeps the stored reason and any caller-supplied lookup key in agreement
+// regardless of which spelling the broker or the caller uses. strings.ReplaceAll
+// returns the input unchanged (no allocation) when there is no underscore, so
+// the common reasons (rejected/expired/maxlen) stay alloc-free.
+func normalizeReason(reason string) string {
+	return strings.ReplaceAll(reason, "_", "-")
+}
 
 // XDeathResult holds the parsed x-death header for a given delivery queue.
 type XDeathResult struct {
@@ -19,9 +32,11 @@ type XDeathResult struct {
 	byReason map[string]int
 }
 
-// CountByReason returns the total x-death count for a specific reason.
+// CountByReason returns the total x-death count for a specific reason. The
+// lookup key is normalised (RMQ-01), so "delivery-limit" and "delivery_limit"
+// resolve to the same entry regardless of which spelling the caller passes.
 func (r *XDeathResult) CountByReason(reason string) int {
-	return r.byReason[reason]
+	return r.byReason[normalizeReason(reason)]
 }
 
 // ParseXDeath parses the AMQP x-death header from tbl for the given queue name.
@@ -55,6 +70,7 @@ func ParseXDeath(tbl amqp091.Table, queue string) XDeathResult {
 			continue
 		}
 		reason, _ := entry["reason"].(string)
+		reason = normalizeReason(reason)
 		count, _ := entry["count"].(int64)
 		if count < 0 {
 			count = 0

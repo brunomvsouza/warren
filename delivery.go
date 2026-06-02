@@ -69,10 +69,19 @@ func (d *Delivery[M]) Timestamp() time.Time { return d.raw.Timestamp }
 
 // DeathCount returns the sum of x-death counts for reason ∈ {rejected, delivery-limit}
 // matching the delivery's current queue. Returns 0 if the header is absent or malformed.
+//
+// The count is scoped to the queue this consumer reads from. x-death entries are
+// keyed on the queue where each death occurred, so on a dead-letter queue (where
+// the entries are keyed on the source queue) this returns 0 — read the raw
+// x-death header via Headers() for cross-queue death inspection. It is non-zero
+// on a same-queue retry loop, where the message is dead-lettered from and routed
+// back to this queue.
 func (d *Delivery[M]) DeathCount() int { return d.death.Count }
 
 // DeathCountByReason returns the total x-death count for a specific reason string
 // (e.g. "rejected", "expired", "maxlen", "delivery-limit") for the current queue.
+// Reason separators are normalised, so the delivery-limit count resolves whether
+// you pass the documented "delivery-limit" or the broker's raw "delivery_limit".
 func (d *Delivery[M]) DeathCountByReason(reason string) int {
 	return d.death.CountByReason(reason)
 }

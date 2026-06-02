@@ -13,6 +13,7 @@ func FuzzXDeathParser(f *testing.F) {
 	f.Add("myqueue", "rejected", int64(3))
 	f.Add("myqueue", "expired", int64(0))
 	f.Add("", "delivery-limit", int64(1))
+	f.Add("myqueue", "delivery_limit", int64(2)) // RMQ-01: real broker spelling (underscore)
 	f.Add("myqueue", "", int64(-1))
 	f.Add("myqueue", "maxlen", int64(50))
 

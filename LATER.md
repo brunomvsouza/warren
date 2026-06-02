@@ -1320,3 +1320,15 @@ requeue coverage observable. -->
 
 **Prerequisites:** None (T67 already shipped, which is what made this reachable).
 
+### LATER-92 — `DeathCount()` keys on the consumer's own queue, so a DLQ consumer sees 0 for the source queue's deaths
+
+**Context:** `newDelivery` (`delivery.go:39-47`) scopes x-death parsing to `c.queue` — the queue the consumer is reading from (`consumer.go:1531`, `batch_consumer.go:459`). x-death entries are keyed on the queue where the death occurred (the *source* queue), so on a **DLQ** consumer — the primary place a dead-lettered message is inspected — `DeathCount()` / `DeathCountByReason()` / `DeathReasons()` all return empty: the entries are keyed on the source queue, not the DLQ. T75 (RMQ-01) confirmed empirically that a `delivery_limit` eviction can *only* be observed on a DLQ — the broker never redelivers such a message to its origin quorum queue (a same-queue return, even via an intermediate TTL hop, is silently dropped, and a quorum queue re-evicts a message that already exceeded its limit). So the one reason atom RMQ-01 is about (`delivery-limit`) is, in practice, never visible through the queue-scoped accessors on the queue that actually died — only the raw header (`d.Headers()["x-death"]`) carries it on the DLQ. The same-queue retry-loop case (reason `rejected`/`expired`) *does* re-arrive and is correctly scoped, so the current keying is right for that pattern but blind to the cross-queue DLQ-inspection pattern.
+
+**Impact:** Operators consuming a DLQ to triage poison messages cannot use the typed `Death*` accessors to learn *why* or *how many times* a message died — they must drop to the raw `x-death` header and parse it themselves, re-implementing what `internal/headers.ParseXDeath` already does. Surprising for a feature whose headline use case ("poison messages", README) is DLQ triage. No correctness impact; the data is present in the raw header. T75's integration test works around it by replaying the captured broker header through `NewDeliveryFixture` scoped to the source queue.
+
+**Evidence:** T75 (RMQ-01) implementation, 2026-06-01 — discovered while building the real-broker delivery-limit test; broker behaviour verified with raw `amqp091` probes on RabbitMQ 3.13.7.
+
+**Suggested solution:** Add a cross-queue accessor (or a variant scoped to the *most-recent* / *first* x-death entry regardless of queue) — e.g. `DeathReasonsAll()` / `DeathCountAll()` or a `DeathOrigin()` returning the source queue + reason + count — so a DLQ consumer can inspect the death without hand-parsing headers. Keep the existing queue-scoped methods (they are correct for the same-queue retry-loop pattern). Document on `DeathCount()` that it is scoped to the consumer's queue and returns 0 on a DLQ. Decide the API shape against SPEC §6.3.
+
+**Prerequisites:** T75 (this entry's origin); a SPEC §6.3 amendment for any new public accessor.
+
