@@ -1751,13 +1751,34 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
   new `ErrInvalidMessage` case is a tightening of an existing validation path, not a
   new public symbol.
 
-### [ ] T83 — §9 throughput-honesty wording (RMQ-11) [P2] · XS
+### [x] T83 — §9 throughput-honesty wording (RMQ-11) [P2] · XS
 - **Acceptance:**
-  - [ ] SPEC §9 qualifies the 30k/100k targets with the local-broker/sub-ms-RTT assumption, documents the `pool/RTT` ceiling + a remote projection, and cross-references LATER-34.
-  - [ ] **Lens-09 (PC-01):** bake the explicit RTT-collapse model table (rate @1/5/10 ms — brief §11) into §9 *beside* the 30k/100k numbers as the "remote projection", so the load-bearing local-only caveat is computable at the number rather than parked ~680 lines away in LATER-34 (the 30k/100k targets imply ~0.27–0.64 ms loopback RTT; they collapse to ~64k/~12.8k/~6.4k multi-conn at 1/5/10 ms). dep PG-5.
+  - [x] SPEC §9 qualifies the 30k/100k targets with the local-broker/sub-ms-RTT assumption, documents the `pool/RTT` ceiling + a remote projection, and cross-references LATER-34.
+  - [x] **Lens-09 (PC-01):** bake the explicit RTT-collapse model table (rate @1/5/10 ms — brief §11) into §9 *beside* the 30k/100k numbers as the "remote projection", so the load-bearing local-only caveat is computable at the number rather than parked ~680 lines away in LATER-34 (the 30k/100k targets imply ~0.27–0.64 ms loopback RTT; they collapse to ~64k/~12.8k/~6.4k multi-conn at 1/5/10 ms). dep PG-5.
 - **Verify:** Doc review.
 - **Files:** SPEC §9.
 - **Deps:** —. **(RMQ-11, P2)**
+- **Done:** Doc-only (no behaviour change, no RED test). Inserted a "Throughput
+  honesty (RMQ-11; R10-18/LATER-34)" block into SPEC §9 immediately after the
+  30k/100k throughput criteria: (1) qualifies both targets as local-broker /
+  sub-ms-RTT loopback figures; (2) states the `rate ≈ (connections ×
+  channels-per-connection) / confirm_RTT` = `pool / RTT` model with the default
+  16-channel and the 100k 64-channel configs spelled out; (3) inlines the
+  RTT-collapse table beside the numbers — 64-channel config sustains ~100k @
+  0.64 ms (the target), ~64k @ 1 ms, ~12.8k @ 5 ms, ~6.4k @ 10 ms — and notes
+  the targets imply ~0.27 ms (8 ch) / ~0.64 ms (64 ch) loopback RTT; (4) ties the
+  confirm-latency-spike → `ErrChannelPoolExhausted` cascade and names
+  `PublishBatch` as the RTT-independent path (why the `≥ 5×` criterion exists);
+  (5) adds a **measured reference** grounded in the provided AMD EPYC CI bench
+  (containerized broker, confirm RTT ≈ 0.78 ms): ~1.3k/3.1k confirmed
+  single/multi-conn, ~13k batch, ~11k consume msg/s — an order of magnitude under
+  the bare-metal targets, proving RTT + hardware + broker placement dominate; (6)
+  cross-references LATER-34 / §10 R10-18 and states the async-publish API stays
+  deferred (decision 31 not reopened). Recorded a T83 paragraph in §10 Rev 11.
+  Verified: `go build ./...` OK, `go test -race ./...` green (no code touched),
+  `make lint` 0 issues. README unchanged — no public-surface/contract change; the
+  §9 numbers were already aspirational targets, now annotated with their
+  measurement assumptions, not altered.
 
 ### Checkpoint — Phase 12 (Lens 01) closed
 - [x] T74 gate results documented (`docs/spec-validation/01-rabbitmq-gate-results.md` + SPEC §10 Rev 11); gate→task index records which task consumes each gate (T75→G1, T78→G2/G6, T58/T81→G3, T76→G4, T80→G5).

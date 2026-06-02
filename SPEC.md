@@ -3228,6 +3228,53 @@ Throughput:
 - [ ] `BenchmarkPublishBatch` ≥ 5× the `BenchmarkPublishConfirmed`
       single-publish rate.
 
+**Throughput honesty (RMQ-11; R10-18/LATER-34).** The 30k/100k targets
+above are **local-broker, sub-millisecond-RTT** numbers — they assume the
+benchmark and the broker share a host (loopback) and they bound the
+*aspirational* ceiling, not what a remote broker delivers. The mechanism
+is `Publish`'s synchronous confirm: it holds a pooled channel for one full
+confirm round-trip, so the sustained confirmed-publish rate is
+
+> `rate ≈ (connections × channels-per-connection) / confirm_RTT`
+
+i.e. `pool / RTT`. The default pool is `2 × 8 = 16` channels; the 100k
+config is `WithPublisherConnections(4) + WithChannelPoolSize(16) = 64`
+channels. Reading the targets through this model, the 30k single-conn
+number implies ~0.27 ms loopback RTT (8 channels) and the 100k multi-conn
+number implies ~0.64 ms (64 channels) — both confirm they are loopback
+figures. As RTT grows, the same fixed pool collapses linearly (64-channel
+config shown; scale the formula for any other pool):
+
+| Confirm RTT (per publish) | Sustained ceiling, 64-channel pool (4 conns × 16) |
+|---|---|
+| ~0.64 ms (loopback — the §9 100k target) | ~100k msg/s |
+| 1 ms                                      | ~64k msg/s  |
+| 5 ms                                      | ~12.8k msg/s |
+| 10 ms                                     | ~6.4k msg/s |
+
+A remote broker at single-digit-ms RTT therefore collapses single-`Publish`
+throughput by **one to two orders of magnitude**, and a confirm-latency
+spike (broker GC, disk sync, quorum Raft failover) shrinks the same pool's
+yield until the overflow surfaces as `ErrChannelPoolExhausted` —
+confirm latency converting directly into publish unavailability. The
+pipelined path (`PublishBatch`) does not pay per-message RTT and is the
+high-throughput escape hatch; this is why the `≥ 5×` batch criterion exists.
+
+*Measured reference (not a target — a reality check that RTT, hardware, and
+broker placement dominate):* on an AMD EPYC 7763 CI runner against a
+**containerized** RabbitMQ (confirm RTT ≈ 0.78 ms, classic and quorum
+within noise), `BenchmarkPublishConfirmed` sustains ~1.3k msg/s sequential,
+the multi-conn variant ~3.1k msg/s, `BenchmarkPublishBatch` ~13k msg/s, and
+`BenchmarkConsume` ~11k msg/s — an order of magnitude below the bare-metal
+loopback targets, because a containerized broker adds RTT and the benchmark
+does not saturate all 64 channels. Every throughput number must therefore
+carry its RTT + hardware + broker placement to be meaningful.
+
+Whether to decouple throughput from RTT with an async/streaming publish API
+(a bounded in-flight window, reversing Rev-6 decision 31) is an **owner
+architecture decision deferred in `LATER.md` as LATER-34** (§10 R10-18);
+this section makes the ceiling honest, it does not add the API.
+
 Security:
 - [ ] No log line, error message, span attribute, or metric label
       emitted by the library contains a clear-text password. Verified
@@ -4054,3 +4101,19 @@ before resuming — otherwise new calls hang routing to a vanished queue. **RMQ-
 explicit **throughput rule of thumb, not a broker-enforced floor** (the broker
 accepts any `prefetch_count`; a smaller value degrades batching rather than failing
 the consume).
+
+**Throughput-honesty wording (T83, RMQ-11; Lens-09 PC-01).** §9 now states
+**beside** the 30k/100k throughput criteria that they are local-broker,
+sub-millisecond-RTT figures, gives the `rate ≈ pool / confirm_RTT` model
+(`Publish` holds a pooled channel for one confirm round-trip), and inlines the
+explicit RTT-collapse table (64-channel multi-conn config: ~64k/12.8k/6.4k msg/s
+at 1/5/10 ms) so the load-bearing local-only caveat is computable *at the number*
+instead of parked ~680 lines away in §10 R10-18 / LATER-34. The targets imply
+~0.27 ms (8-channel single-conn) and ~0.64 ms (64-channel multi-conn) loopback
+RTT. A measured reference grounds it: on an AMD EPYC CI runner against a
+containerized broker (confirm RTT ≈ 0.78 ms) the suite sustains ~1.3k/3.1k
+(confirmed single/multi-conn), ~13k (batch), ~11k (consume) msg/s — an order of
+magnitude under the bare-metal targets, illustrating that RTT + hardware + broker
+placement dominate and `PublishBatch` is the RTT-independent throughput path. The
+async/streaming publish-API decision **stays deferred (LATER-34, R10-18)**; this
+is wording only, no code or public-surface change.
