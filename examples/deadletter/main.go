@@ -131,7 +131,13 @@ func run() error {
 				RoutingKey: "dead.#", // injected as x-dead-letter-routing-key on the source queue
 				TTL:        30 * time.Second,
 				MaxLength:  100,
-				Overflow:   warren.OverflowRejectPublishDLX,
+				// A quorum source queue with a DLX runs the at-least-once
+				// dead-letter strategy (auto-injected above), which RabbitMQ
+				// honours ONLY with x-overflow=reject-publish. Declare rejects
+				// the other overflow values (drop-head, reject-publish-dlx) for
+				// such a queue, since the broker would silently accept them but
+				// not honour at-least-once.
+				Overflow: warren.OverflowRejectPublish,
 			},
 		},
 	}
