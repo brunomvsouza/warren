@@ -1088,7 +1088,7 @@ assertions are required**, not just "suite passes". Gate task T74 runs first.
 **Sequencing:** T74 first → gates T75/T76/T58/T78/T80. T64 → T76 → T65 (shared `validate()`/DLX path). T60 → T61 (couples with T62/T63). Others independent.
 
 **Checkpoint Phase 12:**
-- [ ] T74 gate results documented; each downstream task cites its gate.
+- [x] T74 gate results documented (`docs/spec-validation/01-rabbitmq-gate-results.md` + SPEC §10 Rev 11; captured live on RabbitMQ 3.13.7 + 4.0.9); each downstream task cites its gate via the gate→task index.
 - [ ] x-death delivery-limit `DeathCount()` verified on a **real** 4.x broker; fabricated unit test replaced (T75).
 - [ ] Quorum + DLX declares `at-least-once` with `reject-publish`; an invalid `drop-head` combo is rejected/auto-fixed (T76).
 - [ ] Mandatory `PublishBatch` with duplicate `MessageID` returns `ErrInvalidMessage` (T77).

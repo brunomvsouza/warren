@@ -195,6 +195,12 @@ make integration-up && make test-integration && make integration-down
 make cluster-up   && make test-cluster        && make cluster-down
 ```
 
+The **integration lane** runs against a single broker and is version-overridable
+the same way: `WARREN_RMQ_IMAGE` (with the matching `WARREN_DELAYED_PLUGIN_URL`/
+`WARREN_DELAYED_PLUGIN_SHA`/`WARREN_INTEGRATION_IMAGE`) builds the broker on
+RabbitMQ 4.x instead of the default 3.13, so the protocol gates run differential
+assertions on both — see `test/docker-compose.integration.yml`.
+
 The **cluster lane** (`cluster` build tag) stands a 3-node quorum cluster +
 Toxiproxy and runs the reliability campaigns a single broker cannot prove —
 quorum-leader and SingleActiveConsumer failover, multi-node address rotation,

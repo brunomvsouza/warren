@@ -3743,3 +3743,41 @@ stands. Two genuinely-new doc notes were added from it: a connection-name
 length caveat on `WithConnectionName` (§6.1), and an explicit
 component-registration + idempotent double-close contract on
 `Connection.Close` (§6.1).
+
+### Rev 11 — Protocol-correctness re-review (Lens 01, RabbitMQ 3.13 + 4.x; 2026-06-01)
+
+A fresh "act as a RabbitMQ 3.13-LTS-and-4.x / AMQP-0-9-1 wire-protocol
+specialist" pass (`docs/spec-validation/01-rabbitmq-amqp-protocol.md`,
+findings `RMQ-01..RMQ-31`) is tracked as **Phase 12 tasks T74–T83** in
+`tasks/plan.md`; each amends the relevant section when it lands. A
+reconciliation against the in-progress implementation showed several *spec*
+findings are already correct in code (the SPEC drifted — these become doc-only
+fixes), while `at-least-once` dead-lettering is unimplemented and quorum queues
+have no structural validation. The four §1-violating defects (T60/T61/T65/T66,
+defined in Rev 10 / Phase 11) are pulled into this phase's priority sequence;
+the async-publish API stays deferred (LATER-34, §9 wording only).
+
+The gate task **T74** runs first and pins the version-differential ground truth
+the protocol claims depend on — results committed at
+`docs/spec-validation/01-rabbitmq-gate-results.md`, reproduced by the
+`integration`-tag `TestGate_VerificationGates_integration` against both 3.13.7
+and 4.0.9 (the lane image is overridable via `WARREN_RMQ_IMAGE`). Load-bearing
+observations downstream tasks cite:
+
+- **G1 (→T75):** the broker writes the x-death delivery-limit reason as
+  **`delivery_limit`** (underscore) on **both** versions — the hyphenated
+  literal `internal/headers/xdeath.go` matches today never fires, so a real
+  quorum delivery-limit eviction is currently uncounted by `DeathCount()`.
+- **G3 (→T58/T81):** `x-delivery-limit` is **quorum-only** on both 3.13.7 and
+  4.0.9 — a classic-queue declare carrying it is **rejected** with 406
+  `PRECONDITION_FAILED`, not ignored, and 4.0.9 has **not** started honouring it
+  on classic queues.
+- **G4 (→T76):** the broker accepts **every** `{quorum, x-overflow,
+  x-dead-letter-strategy}` permutation, including the invalid
+  `at-least-once`+`drop-head`, so the `at-least-once ⇒ reject-publish` coupling
+  must be enforced **client-side**.
+- **G5 (→T80):** the only version-divergent gate — `max_message_size` default
+  drops from **128 MiB (3.13)** to **16 MiB (4.0+)** (a 17 MiB publish is
+  accepted on 3.13.7, rejected on 4.0.9).
+- **G6 (→T78):** a non-zero per-consumer `prefetch_size` is **rejected** (540
+  `NOT_IMPLEMENTED`) on both versions, not silently ignored.
