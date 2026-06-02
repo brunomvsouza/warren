@@ -1068,9 +1068,9 @@ Semantics:
   confirm is therefore *not* a guarantee that the message survives a
   crash on **every** replica simultaneously, so users publishing to
   replicated queues should still treat their consumers as idempotent
-  (dedupe by `MessageID`). The exact per-queue-type confirm semantics
-  are tabulated in §6.2 (queue-type confirm-semantics, the single
-  source — do not restate the table here). **Use quorum queues for
+  (dedupe by `MessageID`). The per-queue-type confirm semantics are
+  summarised inline above; the full queue-type confirm-semantics table
+  lands in §6.2 with Phase 13 T88 (DS-07). **Use quorum queues for
   replication.** Classic **mirrored** queues (the `ha-mode` /
   `x-ha-policy` mechanism) are **deprecated in RabbitMQ 3.13 and
   removed in 4.0** — a `ha-*` policy is a no-op on 4.x — so a topology

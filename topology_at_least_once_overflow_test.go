@@ -179,6 +179,61 @@ func TestTopology_quorumAtLeastOnce_nonStringStrategy_optsOutInLockstep(t *testi
 	assert.Equal(t, "drop-head", src.Args["x-overflow"], "expand must not override drop-head for a non-at-least-once strategy")
 }
 
+// A present-but-non-string x-overflow on a quorum at-least-once queue is a
+// conflict, not a silent pass: overflowSet keys on presence, so validate() must
+// reject it (it is not reject-publish) AND warnQuorumAtLeastOnceOverflow must NOT
+// emit the false "warren is setting it automatically" warning. Pre-fix the three
+// sites diverged: quorumAtLeastOnce keyed overflowSet on coercibility, so a
+// non-string value left validate() passing, expand() keeping the bogus value, and
+// the warning falsely announcing an auto-set that never happened (RMQ-05).
+func TestTopology_quorumAtLeastOnce_nonStringOverflow_rejectedInLockstep(t *testing.T) {
+	mk := func() *Topology {
+		return &Topology{
+			Queues: []Queue{{
+				Name: "orders", Durable: true, Type: QueueTypeQuorum,
+				Args: map[string]any{
+					"x-dead-letter-exchange": "my.dlx",
+					"x-overflow":             42, // present but not a valid overflow string
+				},
+			}},
+		}
+	}
+	// validate side: a present-but-uncoercible overflow is rejected.
+	err := mk().validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+	assert.Contains(t, err.Error(), "reject-publish", "the error must name the required overflow")
+	// warn side: overflowSet=true ⇒ no false auto-set warning.
+	l := &recordingLogger{}
+	warnQuorumAtLeastOnceOverflow(l, mk())
+	assert.Empty(t, l.warnings, "a present (even uncoercible) overflow must not trigger the auto-set warning")
+}
+
+// A typed OverflowPolicy (not a plain string) value for x-overflow is coerced and
+// subject to the same coupling: drop-head as a typed OverflowPolicy must be
+// rejected, and expand() must not silently inject reject-publish over it. Covers
+// the overflowString(case OverflowPolicy) branch in the tracked tree.
+func TestTopology_validate_rejectsTypedOverflowPolicyDropHeadWithAtLeastOnce(t *testing.T) {
+	mk := func() *Topology {
+		return &Topology{
+			Queues: []Queue{{
+				Name: "orders", Durable: true, Type: QueueTypeQuorum,
+				Args: map[string]any{
+					"x-dead-letter-exchange": "my.dlx",
+					"x-overflow":             OverflowDropHead, // typed OverflowPolicy, not a string
+				},
+			}},
+		}
+	}
+	err := mk().validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+	// expand() keys on presence, so it leaves the typed value untouched (validate
+	// gates it; there is no silent reject-publish injection over an explicit value).
+	expanded := mk().expand()
+	assert.Equal(t, OverflowDropHead, expanded.Queues[0].Args["x-overflow"])
+}
+
 // A quorum queue without any DLX is unaffected — no at-least-once, no coupling.
 func TestTopology_validate_dropHeadAllowedWithoutDLX(t *testing.T) {
 	topo := &Topology{

@@ -1,6 +1,7 @@
 package headers_test
 
 import (
+	"math"
 	"testing"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
@@ -269,4 +270,23 @@ func TestParseXDeath_DuplicateReasonAccumulates(t *testing.T) {
 	assert.Equal(t, 5, result.Count)
 	assert.Equal(t, 5, result.CountByReason("rejected"))
 	assert.Equal(t, []string{"rejected"}, result.Reasons, "duplicate reason must appear only once")
+}
+
+// TestParseXDeath_AccumulationSaturatesAtMaxInt locks the load-bearing overflow
+// guard: a hostile/buggy broker sending two MaxInt64-count entries for the same
+// (queue, reason) must saturate at math.MaxInt, never wrap negative. A negative
+// DeathCount() would defeat the `DeathCount() >= MaxRedeliveries` poison-pill
+// check (it would read as "below the limit" forever → unbounded redelivery). This
+// guard is LIVE on 64-bit (int == int64), not dead code.
+func TestParseXDeath_AccumulationSaturatesAtMaxInt(t *testing.T) {
+	tbl := amqp091.Table{
+		"x-death": []any{
+			makeEntry("myqueue", "delivery-limit", math.MaxInt64),
+			makeEntry("myqueue", "delivery-limit", math.MaxInt64),
+		},
+	}
+	result := headers.ParseXDeath(tbl, "myqueue")
+	assert.Equal(t, math.MaxInt, result.Count, "accumulated count must saturate at MaxInt, not overflow negative")
+	assert.GreaterOrEqual(t, result.Count, 0, "DeathCount must never be negative")
+	assert.Equal(t, math.MaxInt, result.CountByReason("delivery-limit"))
 }

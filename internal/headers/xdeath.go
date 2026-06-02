@@ -93,24 +93,27 @@ func ParseXDeath(tbl amqp091.Table, queue string) XDeathResult {
 		if _, seen := result.byReason[reason]; !seen {
 			result.Reasons = append(result.Reasons, reason)
 		}
-		// Saturate the accumulated sum so that multiple entries for the same
-		// reason cannot overflow int on 32-bit platforms (math.MaxInt = 2^31-1
-		// there). Any value exceeding MaxInt still exceeds any practical
-		// MaxRedeliveries ceiling, so saturation is semantically correct.
-		// On 64-bit: int == int64; the sum of two int64 values each ≤ MaxInt64/2
-		// cannot wrap, so the < 0 guard below is dead code on 64-bit by design.
-		newByReason := result.byReason[reason] + int(count)
-		if newByReason < 0 { //nolint:staticcheck // 32-bit saturation guard; dead on 64-bit
-			newByReason = math.MaxInt
+		// Saturate the accumulated sum at math.MaxInt so that multiple entries for
+		// the same reason cannot overflow int. Each per-entry count is already
+		// capped at math.MaxInt above, so on 64-bit (int == int64 == MaxInt64) the
+		// sum of two near-MaxInt entries genuinely overflows — this guard is LIVE
+		// on every platform, not dead code: a hostile broker sending two
+		// MaxInt64-count entries for the same (queue, reason) would otherwise wrap
+		// DeathCount() negative and defeat the MaxRedeliveries poison-pill check.
+		// Compare before adding rather than relying on signed-overflow wraparound.
+		// result.byReason[reason] ∈ [0, MaxInt], so MaxInt-it never underflows.
+		if int(count) > math.MaxInt-result.byReason[reason] {
+			result.byReason[reason] = math.MaxInt
+		} else {
+			result.byReason[reason] += int(count)
 		}
-		result.byReason[reason] = newByReason
 
 		if reason == "rejected" || reason == "delivery-limit" {
-			newCount := result.Count + int(count)
-			if newCount < 0 { //nolint:staticcheck // 32-bit saturation guard; dead on 64-bit
-				newCount = math.MaxInt
+			if int(count) > math.MaxInt-result.Count {
+				result.Count = math.MaxInt
+			} else {
+				result.Count += int(count)
 			}
-			result.Count = newCount
 		}
 	}
 	return result
