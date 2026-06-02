@@ -639,11 +639,15 @@ func (p *Publisher[M]) encodeMsg(msg Message[M]) (Message[M], []byte, error) {
 	// Client-side Expiration validation: the AMQP shortstr Expiration is serialised
 	// as integer milliseconds (see buildPublishing), and the broker reads "0" as
 	// "expire immediately". A non-zero TTL shorter than 1ms rounds to 0, silently
-	// flipping the caller's intent ("expire after 500µs") into "discard on arrival".
-	// Reject it rather than emit a TTL that means the opposite. A zero Expiration
-	// means "no per-message TTL" and passes untouched.
-	if msg.Expiration != 0 && msg.Expiration.Milliseconds() == 0 {
-		return msg, nil, fmt.Errorf("%w: Expiration %s rounds to 0 ms (immediate expiry); the minimum non-zero TTL is 1ms",
+	// flipping the caller's intent ("expire after 500µs") into "discard on arrival";
+	// a negative Expiration would otherwise slip past buildPublishing's `Expiration
+	// > 0` gate and publish with no TTL at all — the opposite of the caller's intent,
+	// and silent. Reject both rather than emit (or omit) a TTL that means something
+	// else, mirroring the Delay guard above. A zero Expiration means "no per-message
+	// TTL" and passes untouched.
+	if msg.Expiration != 0 && msg.Expiration.Milliseconds() <= 0 {
+		return msg, nil, fmt.Errorf("%w: Expiration %s is not a valid TTL: it must be at least 1ms "+
+			"(a sub-millisecond duration rounds to 0 = immediate expiry; a negative duration is invalid)",
 			ErrInvalidMessage, msg.Expiration)
 	}
 

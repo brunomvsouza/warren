@@ -84,7 +84,9 @@ type Message[M any] struct {
 	// milliseconds in the AMQP shortstr wire format. The broker interprets "0" as
 	// "expire immediately", so a non-zero duration shorter than 1ms (which would
 	// round to "0") is rejected at publish time with ErrInvalidMessage; the minimum
-	// non-zero TTL is 1ms. A zero Expiration means "no per-message TTL".
+	// non-zero TTL is 1ms. A negative duration is likewise rejected with
+	// ErrInvalidMessage rather than silently published with no TTL. A zero
+	// Expiration means "no per-message TTL".
 	Expiration time.Duration
 
 	// DeliveryMode controls AMQP delivery persistence. The zero value is

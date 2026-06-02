@@ -360,6 +360,22 @@ func TestReplierBuilder_Build_DLXValidation(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("Topology with a manual x-dead-letter-exchange arg -> success", func(t *testing.T) {
+		// A DLX wired directly through Queue.Args (no DeadLetter entry) is a real
+		// DLX; topologyHasDLX must recognise it so the Replier does not reject a
+		// valid manual-DLX config — parity with the Consumer missing-DLX check.
+		topo := &Topology{
+			Queues: []Queue{{Name: "rpc.q", Args: map[string]any{
+				"x-dead-letter-exchange": "rpc.dlx",
+			}}},
+		}
+		_, err := ReplierFor[echoPayload, echoPayload](conn).
+			Queue("rpc.q").
+			Topology(topo).
+			Build()
+		require.NoError(t, err)
+	})
+
 	t.Run("nil conn / empty queue", func(t *testing.T) {
 		_, err := ReplierFor[echoPayload, echoPayload](nil).Queue("q").Build()
 		assert.ErrorIs(t, err, ErrInvalidOptions)

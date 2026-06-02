@@ -444,8 +444,18 @@ func (t *Topology) quorumAtLeastOnce(q Queue) (atLeastOnce bool, overflow string
 		return false, "", false
 	}
 	_, hasDLX := q.Args["x-dead-letter-exchange"]
-	if v, ok := overflowString(q.Args["x-overflow"]); ok {
-		overflow, overflowSet = v, true
+	if raw, present := q.Args["x-overflow"]; present {
+		// overflowSet keys on PRESENCE, not coercibility. A present-but-uncoercible
+		// value (e.g. a non-string) is still "set" — leaving it as overflowSet=true
+		// with a printable form makes validate() reject it (it is not reject-publish)
+		// and warnQuorumAtLeastOnceOverflow() skip the false "auto-setting" warning,
+		// instead of letting the bogus value slip to the broker while the three sites
+		// reach different verdicts. expand() keys on presence too, so all three agree.
+		if v, ok := overflowString(raw); ok {
+			overflow, overflowSet = v, true
+		} else {
+			overflow, overflowSet = fmt.Sprintf("%v", raw), true
+		}
 	}
 	for _, dl := range t.DeadLetters {
 		if dl.Source != q.Name {

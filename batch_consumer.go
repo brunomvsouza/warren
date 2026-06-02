@@ -310,6 +310,14 @@ func (c *BatchConsumer[M]) Consume(ctx context.Context, h BatchHandler[M]) error
 		spanCtx, span := c.startBatchSpan(ctx, toFlush)
 		defer span.End()
 
+		// consumer_in_flight gauge (T71 / DS-14): one batch handler is now
+		// executing. The batch path flushes serially in the consume loop, so this
+		// gauge is 0/1 per batch consumer — the batch analogue of Consumer's
+		// per-handler-goroutine gauge. The defer balances every return path
+		// (handler panic, timeout verdict, normal completion).
+		c.cm.ConsumerInFlightAdd(c.queue, 1)
+		defer c.cm.ConsumerInFlightAdd(c.queue, -1)
+
 		start := time.Now()
 
 		if c.handlerTimeout > 0 {

@@ -226,8 +226,22 @@ func TestGate_VerificationGates_integration(t *testing.T) {
 
 		entries := parseXDeathRaw(t, dead.Headers)
 		require.NotEmpty(t, entries, "dead-lettered message must carry an x-death header")
-		reason := entries[0].Reason
-		count := entries[0].Count
+		// Select the source-queue entry explicitly rather than trusting array
+		// order: parseXDeathRaw preserves broker order, so entries[0] is not
+		// guaranteed to be the delivery-limit eviction (a future broker or
+		// redeliver path could prepend another (queue, reason) entry). The
+		// delivery-limit eviction records its x-death against the source queue.
+		var srcEntry *xDeathEntry
+		for i := range entries {
+			if entries[i].Queue == src {
+				srcEntry = &entries[i]
+				break
+			}
+		}
+		require.NotNilf(t, srcEntry,
+			"x-death must carry an entry for the source queue %q (raw entries=%+v)", src, entries)
+		reason := srcEntry.Reason
+		count := srcEntry.Count
 		t.Logf("GATE-RESULT G1 xdeath-reason=%q (raw entries=%+v)", reason, entries)
 		t.Logf("GATE-RESULT G2 xdeath-count=%d entries=%d", count, len(entries))
 
@@ -474,10 +488,14 @@ func TestGate_VerificationGates_integration(t *testing.T) {
 		t.Logf("GATE-RESULT G6 prefetch_size-nonzero-rejected=%t err=%v", rejected, qerr)
 
 		var ae *amqp091.Error
-		if errors.As(qerr, &ae) {
-			t.Logf("GATE-RESULT G6 reply-code=%d reply-text=%q", ae.Code, ae.Reason)
-		}
-		assert.Truef(t, rejected,
-			"G6: the broker must reject a non-zero per-consumer prefetch_size (version=%s)", full)
+		require.ErrorAsf(t, qerr, &ae,
+			"G6: a non-zero per-consumer prefetch_size must be rejected with an AMQP error (version=%s, rejected=%t)", full, rejected)
+		t.Logf("GATE-RESULT G6 reply-code=%d reply-text=%q rejected=%t", ae.Code, ae.Reason, rejected)
+		// Ground truth (both versions): the rejection is 540 NOT_IMPLEMENTED, not
+		// merely "some error" — assert the documented reply code so a broker that
+		// rejected with a different code would not silently pass G6.
+		assert.Equalf(t, 540, ae.Code,
+			"G6: prefetch_size!=0 must be rejected with 540 NOT_IMPLEMENTED (version=%s, got %d %q)",
+			full, ae.Code, ae.Reason)
 	})
 }

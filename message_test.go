@@ -315,3 +315,19 @@ func TestPublisher_encodeMsg_AllowsZeroExpiration(t *testing.T) {
 
 	require.NoError(t, err)
 }
+
+// TestPublisher_encodeMsg_RejectsNegativeExpiration asserts a negative Expiration
+// of ≥1ms magnitude is rejected with ErrInvalidMessage rather than silently
+// published with no TTL at all. The sub-ms guard alone misses it (a -2ms duration
+// has .Milliseconds() == -2, not 0, so it would slip past buildPublishing's
+// `Expiration > 0` gate), so the guard rejects any non-zero, non-positive
+// Expiration — symmetric with the Delay guard.
+func TestPublisher_encodeMsg_RejectsNegativeExpiration(t *testing.T) {
+	p := &Publisher[int]{codec: codec.NewJSON()}
+	body := 7
+
+	_, _, err := p.encodeMsg(Message[int]{Body: &body, Expiration: -2 * time.Millisecond})
+
+	require.ErrorIs(t, err, ErrInvalidMessage)
+	assert.Contains(t, err.Error(), "Expiration", "the error must name the offending field")
+}

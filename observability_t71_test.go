@@ -143,4 +143,6 @@ func TestBatchConsumer_redelivered_metric(t *testing.T) {
 
 	<-done
 	assert.Equal(t, int64(1), cm.redelivered.Load(), "only the redelivered delivery must increment consumer_redelivered_total")
+	assert.GreaterOrEqual(t, cm.inFlightMax.Load(), int64(1), "consumer_in_flight must rise above zero while the batch handler runs")
+	assert.Equal(t, int64(0), cm.inFlightCur.Load(), "consumer_in_flight must return to zero after the batch handler finishes")
 }
