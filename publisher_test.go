@@ -155,11 +155,32 @@ func (f *fakePubChannel) PublishWithContext(_ context.Context, _, _ string, mand
 }
 
 func (f *fakePubChannel) sendNack(tag uint64) {
-	f.mu.Lock()
-	ch := f.confirmCh
-	f.mu.Unlock()
-	if ch != nil {
-		ch <- amqp091.Confirmation{DeliveryTag: tag, Ack: false}
+	// Wait until the publisher has wired its confirm listener (NotifyPublish set
+	// confirmCh) AND recorded the publish for `tag` — which, since publisher.go
+	// calls tracker.Register(tag) BEFORE PublishWithContext, guarantees the confirm
+	// demux already has a pending entry to correlate this nack against. Sending
+	// earlier dropped the nack on the floor (confirmCh nil / tag not yet registered),
+	// so under load Publish waited out its 2s confirmTimeout and returned
+	// ErrConfirmTimeout instead of ErrPublishNacked — the timing flake the previous
+	// fixed-5ms-sleep callers intermittently hit on CI. Bounded so a genuinely
+	// publish-less test fails via the normal test timeout rather than spinning here.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f.mu.Lock()
+		ch := f.confirmCh
+		ready := ch != nil && uint64(len(f.publishes)) >= tag
+		f.mu.Unlock()
+		if ready {
+			ch <- amqp091.Confirmation{DeliveryTag: tag, Ack: false}
+			return
+		}
+		if time.Now().After(deadline) {
+			if ch != nil {
+				ch <- amqp091.Confirmation{DeliveryTag: tag, Ack: false}
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
