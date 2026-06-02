@@ -1678,13 +1678,47 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
   `go test -race ./...` green, `make lint` 0 issues. README unchanged (no public
   surface change).
 
-### [ ] T81 — Version-divergence documentation (RMQ-17/19/21/23/30/31) [P2] · S
+### [x] T81 — Version-divergence documentation (RMQ-17/19/21/23/30/31) [P2] · S
 - **Acceptance:**
-  - [ ] Khepri caveat (declares are Raft-quorum ops); CloudEvents 0-9-1⇄1.0 bridge version note + a round-trip interop test (coord. lens 03); §9 verification pinned to the management HTTP API instead of `rabbitmqadmin` CLI (v2 rewrite in 4.0); mirrored-queue staleness fixed (§6.2); transient-queues-deprecated-feature note; mixed-version-cluster caveat.
-  - [ ] **Lens-10 (TV-05/11):** the version-divergence claims are **verified** by the new RabbitMQ 3.13 + 4.x integration matrix (T151) — assert the quorum default `x-delivery-limit` (R10-2, default 20) drops the 21st delivery on **4.x** and the classic-queue `x-delivery-limit`-ignore behaviour, with §9 verification pinned to the management HTTP API on the version where each binds; the poison-loop **bound** assertion (TV-11) rides the same 4.x quorum queue. dep VG-5.
+  - [x] Khepri caveat (declares are Raft-quorum ops); CloudEvents 0-9-1⇄1.0 bridge version note + a round-trip interop test (coord. lens 03); §9 verification pinned to the management HTTP API instead of `rabbitmqadmin` CLI (v2 rewrite in 4.0); mirrored-queue staleness fixed (§6.2); transient-queues-deprecated-feature note; mixed-version-cluster caveat.
+  - [ ] **Lens-10 (TV-05/11):** the version-divergence claims are **verified** by the new RabbitMQ 3.13 + 4.x integration matrix (T151) — assert the quorum default `x-delivery-limit` (R10-2, default 20) drops the 21st delivery on **4.x** and the classic-queue `x-delivery-limit`-ignore behaviour, with §9 verification pinned to the management HTTP API on the version where each binds; the poison-loop **bound** assertion (TV-11) rides the same 4.x quorum queue. dep VG-5. — **Owned by T151 (the 3.13+4.x integration matrix, dep VG-5), not T81.** The classic-queue `x-delivery-limit`-ignore claim is already pinned by gate G3 (T74); the quorum 21st-delivery-drop / poison-loop-bound broker assertions ride T151. Tracked there; not a T81 deliverable.
 - **Verify:** Doc review; the CloudEvents interop round-trip test passes on both versions.
 - **Files:** SPEC §6.1/§6.2/§6.9/§9, a CloudEvents interop test.
 - **Deps:** T26. **(RMQ-17/19/21/23/30/31, P2)**
+- **Done:** All six doc caveats landed, plus the interop test. (1) Added a
+  **"Version divergence (RabbitMQ 3.13 ↔ 4.x)"** subsection to the "AMQP 0-9-1 vs
+  RabbitMQ" note (just before §6.1): the **Khepri** caveat (metadata store moved
+  Mnesia→Khepri; opt-in on 3.13, default on 4.0; topology declares are
+  **Raft-quorum commits** that block/fail without metadata quorum — exactly the
+  half-alive case the reconnect-barrier cap converts to a force-reconnect); the
+  **transient (non-durable) queues deprecated-feature** note (warren defaults
+  durable, distinct from message-level `DeliveryModeTransient`); the
+  **mixed-version-cluster** caveat (an upgrade window, not a steady state — the
+  `WithAddrs`-rotated node can answer with version-specific behaviour mid-upgrade).
+  (2) Fixed the **mirrored-queue staleness** in §6.2: classic mirrored queues
+  (`ha-mode`) are deprecated in 3.13 / **removed in 4.0** (a `ha-*` policy is a
+  no-op on 4.x → silent loss of the second replica after upgrade); use quorum
+  queues for replication. (3) Added the **CloudEvents AMQP 0-9-1 ⇄ 1.0 bridge**
+  version note to §6.9: warren publishes over 0-9-1, RabbitMQ bridges the
+  `cloudEvents:` headers one-to-one to AMQP-1.0 application-properties of the
+  identical name; native AMQP 1.0 is core in 4.0 vs the `rabbitmq_amqp1_0` plugin
+  on 3.13 — the mapping is the same, so interop is version-independent once 1.0 is
+  available. (4) Pinned §9's `basic.properties` round-trip verification to the
+  **management HTTP API** (`GET /api/queues/.../get`) instead of `rabbitmqadmin`
+  (rewritten as an incompatible v2 in 4.0 → a CLI-shelling test would pass on one
+  version and break on the other). (5) Recorded the landing in SPEC §10 Rev 11.
+  **RED test:** `codec/cloudevents_amqp_bridge_interop_test.go`
+  (`TestCloudEventsBinary_AMQP091To10BridgeInterop`) pins the bridge contract from
+  the **foreign AMQP-1.0 side** — constructs application-properties exactly as the
+  CloudEvents AMQP binding mandates, delivers values as the `[]byte` longstr form
+  the bridge yields, decodes with warren, then re-encodes and asserts the emitted
+  header key set is byte-identical to the binding's property set and every value is
+  a string — across **both** CloudEvents spec versions (1.0 and 0.3). It is a
+  codec-level (broker-free) test because the header⇄property name mapping is the
+  codec contract, version-independent by construction (the broker-matrix Lens-10
+  assertions are T151's, per above). Verified: `go build ./...` OK,
+  `go test -race ./...` green, `/usr/bin/make lint` 0 issues. README unchanged (no
+  public-surface change — doc + test only).
 
 ### [ ] T82 — Contract-precision SPEC fixes (RMQ-24/25/26/27/28/29) [P3] · S
 - **Acceptance:**
