@@ -1069,3 +1069,94 @@ func TestPublisher_ConcurrentPublish_And_PublishBatch(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestPublishBatch_Mandatory_DuplicateExplicitMessageID_Rejected verifies the
+// T77/RMQ-15 guard: a Mandatory() batch carrying two messages with the same
+// explicit MessageID is rejected with ErrInvalidMessage before any broker work,
+// because basic.return correlation is by MessageID (decision 14) and a duplicate
+// would mis-attribute ErrUnroutable. The whole call fails (results nil) rather
+// than publishing with undefined return semantics.
+func TestPublishBatch_Mandatory_DuplicateExplicitMessageID_Rejected(t *testing.T) {
+	fake := newFakePubCh(true /* autoAck */)
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	pub.mandatory = true
+
+	msgs := []Message[testPayload]{
+		{MessageID: "dup-id", Body: &testPayload{Value: "a"}},
+		{MessageID: "unique-id", Body: &testPayload{Value: "b"}},
+		{MessageID: "dup-id", Body: &testPayload{Value: "c"}},
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrInvalidMessage), "expected ErrInvalidMessage, got %v", err)
+	assert.Nil(t, results, "a rejected mandatory batch returns nil results (no broker work)")
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Empty(t, fake.publishes, "no message must reach the broker when the batch is rejected")
+}
+
+// TestPublishBatch_Mandatory_AutoStampedIDs_Pass verifies that the T77 guard does
+// NOT trip on auto-stamped MessageIDs: a mandatory batch whose messages all leave
+// MessageID empty publishes normally, because applyDefaults stamps a unique
+// UUIDv7 per message — only explicit (caller-supplied) IDs can collide.
+func TestPublishBatch_Mandatory_AutoStampedIDs_Pass(t *testing.T) {
+	fake := newFakePubCh(true /* autoAck */)
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	pub.mandatory = true
+
+	const n = 5
+	msgs := make([]Message[testPayload], n) // all MessageID empty → auto-stamped
+	for i := range msgs {
+		msgs[i] = Message[testPayload]{Body: &testPayload{Value: "hello"}}
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.NoError(t, err)
+	require.Len(t, results, n)
+	for i, r := range results {
+		assert.NoError(t, r.Err, "result[%d].Err must be nil", i)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Len(t, fake.publishes, n, "all auto-stamped messages must reach the broker")
+}
+
+// TestPublishBatch_NonMandatory_DuplicateExplicitMessageID_Allowed verifies the
+// guard is scoped to Mandatory() publishers: a non-mandatory batch never receives
+// basic.return frames, so there is no correlation map to corrupt and duplicate
+// explicit MessageIDs publish normally.
+func TestPublishBatch_NonMandatory_DuplicateExplicitMessageID_Allowed(t *testing.T) {
+	fake := newFakePubCh(true /* autoAck */)
+	pub, stopPool := newTestPubBatch[testPayload](fake, metrics.NoOpPublisherMetrics{}, 1024)
+	defer goleak.VerifyNone(t)
+	defer stopPool()
+	defer func() { _ = pub.Close(context.Background()) }()
+
+	// pub.mandatory stays false.
+	msgs := []Message[testPayload]{
+		{MessageID: "dup-id", Body: &testPayload{Value: "a"}},
+		{MessageID: "dup-id", Body: &testPayload{Value: "b"}},
+	}
+
+	results, err := pub.PublishBatch(context.Background(), msgs)
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	for i, r := range results {
+		assert.NoError(t, r.Err, "result[%d].Err must be nil", i)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Len(t, fake.publishes, 2, "non-mandatory duplicate-ID batch must publish all messages")
+}

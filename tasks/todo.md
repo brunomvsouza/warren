@@ -1615,12 +1615,13 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 - **Deps:** T14, T15, T47, T74 (G4). **(RMQ-05, P0)** — coordinate with T64/T65.
 - **Done:** `at-least-once` injection was already present (T14/T15); T76 added the **overflow coupling**. A shared `(*Topology).quorumAtLeastOnce` helper computes "is this a quorum at-least-once queue + effective overflow" so `validate()`, `expand()`, and the warning stay in lockstep, mirroring expand's `DeadLetter.Overflow`-over-raw-`Args` precedence. A `reject-publish-dlx` probe (3.13 + 4.x) extended G4 and showed the broker accepts it too → rejected client-side. A caller override of `x-dead-letter-strategy` opts out of the coupling.
 
-### [ ] T77 — PublishBatch+Mandatory duplicate-MessageID validation (RMQ-15) [P1] · S
+### [x] T77 — PublishBatch+Mandatory duplicate-MessageID validation (RMQ-15) [P1] · S
 - **Acceptance:**
-  - [ ] A `Mandatory()` `PublishBatch` containing duplicate explicit `MessageID`s returns `ErrInvalidMessage` before publishing (the documented-trap comment at `publisher.go:689-694` is replaced by enforcement).
+  - [x] A `Mandatory()` `PublishBatch` containing duplicate explicit `MessageID`s returns `ErrInvalidMessage` before publishing (the documented-trap comment in `PublishBatch`'s godoc is replaced by enforcement; the guard runs after the size-cap check, before any broker work).
 - **Verify:** Unit test: duplicate explicit IDs in a mandatory batch → `errors.Is(err, ErrInvalidMessage)`; auto-stamped IDs still pass.
 - **Files:** `publisher.go`, `publisher_test.go`, SPEC §6.2 + decision 14.
 - **Deps:** T13. **(RMQ-15, P1)**
+- **Done:** Added a `p.mandatory`-scoped duplicate-explicit-`MessageID` check in `PublishBatch` (after the `ErrBatchTooLarge` cap, before broker work): a collision returns `fmt.Errorf("%w: ...", ErrInvalidMessage)` with `results == nil`. Empty IDs skip the check (auto-stamped UUIDv7 is unique); non-mandatory batches are exempt (no `basic.return` correlation map to corrupt). Replaced the documented-trap paragraph in `PublishBatch`'s godoc with the enforcement contract. Tests in `publisher_batch_test.go`: `TestPublishBatch_Mandatory_DuplicateExplicitMessageID_Rejected` (nil results, no broker publishes), `_Mandatory_AutoStampedIDs_Pass`, `_NonMandatory_DuplicateExplicitMessageID_Allowed`. SPEC §6.2 mandatory-batch bullet + decision 14 updated. Unit-only change (client-side validation, no broker probe needed); `go build`, `go test -race ./...`, `make lint` (0 issues) all green.
 
 ### [ ] T78 — SPEC↔implementation reconciliation (no behaviour change) (RMQ-02/03/04/14) [P1] · S
 - **Acceptance:**

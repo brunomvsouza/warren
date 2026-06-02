@@ -805,12 +805,16 @@ func (p *Publisher[M]) publishOnce(ctx context.Context, msg Message[M], body []b
 // Correlation is performed by MessageID: applyDefaults stamps a UUIDv7 when
 // Message.MessageID is empty, so every message always has a unique key.
 //
-// Note: each message in the batch must have a unique MessageID. When two messages
-// share an explicit MessageID the second Store silently overwrites the first in the
-// return-correlation map, causing undefined ErrUnroutable attribution for mandatory
-// publishers. The library does not enforce uniqueness at call time; callers are
-// responsible for assigning distinct MessageIDs (or leaving them empty for
-// auto-stamping).
+// Each message in a mandatory batch must have a unique MessageID, because the
+// return correlation keys on it: two messages sharing an explicit MessageID would
+// make the second returnTagMap.Store overwrite the first, mis-attributing
+// ErrUnroutable. PublishBatch enforces this for Mandatory() publishers — a batch
+// containing duplicate explicit MessageIDs is rejected with ErrInvalidMessage
+// before any broker work (no message is published). Empty MessageIDs are
+// auto-stamped with a unique UUIDv7 by applyDefaults, so only caller-supplied IDs
+// can collide; leaving MessageID empty always passes. The check is scoped to
+// mandatory publishers: a non-mandatory batch never receives basic.return frames,
+// so there is no correlation map to corrupt and duplicate IDs are allowed.
 //
 // # PublishTimeout
 //
@@ -844,6 +848,28 @@ func (p *Publisher[M]) PublishBatch(ctx context.Context, msgs []Message[M]) ([]P
 	}
 	if len(msgs) > maxSize {
 		return nil, ErrBatchTooLarge
+	}
+
+	// Reject a mandatory batch with duplicate explicit MessageIDs before any
+	// broker work: basic.return correlation keys on MessageID (decision 14), so a
+	// duplicate would make the second returnTagMap.Store overwrite the first and
+	// mis-attribute ErrUnroutable. Empty IDs are auto-stamped with a unique UUIDv7
+	// by applyDefaults, so only caller-supplied IDs can collide. Non-mandatory
+	// publishers never receive basic.return frames, so the guard does not apply.
+	if p.mandatory {
+		seen := make(map[string]struct{}, len(msgs))
+		for _, msg := range msgs {
+			if msg.MessageID == "" {
+				continue
+			}
+			if _, dup := seen[msg.MessageID]; dup {
+				return nil, fmt.Errorf("%w: PublishBatch with Mandatory() contains a duplicate explicit "+
+					"MessageID %q; explicit MessageIDs must be unique within a mandatory batch so basic.return "+
+					"frames can be correlated (SPEC §6.2, decision 14) — assign distinct IDs or leave MessageID "+
+					"empty for auto-stamping", ErrInvalidMessage, msg.MessageID)
+			}
+			seen[msg.MessageID] = struct{}{}
+		}
 	}
 
 	p.mu.Lock()
