@@ -118,41 +118,55 @@ var (
 	// Broker-originated errors from publish, consume, or declare operations are translated by
 	// internal/amqperror into wraps of these sentinels so callers can use errors.Is for precise
 	// branching or IsTransient/IsPermanent for coarse classification.
+	//
+	// Each sentinel is annotated with its AMQP 0-9-1 scope:
+	//
+	//   - channel-level (soft error): the broker closes only the offending channel; the TCP
+	//     connection survives. Recovery is local — the next operation acquires/reopens a fresh
+	//     channel from the pool (channel self-heal, T61); topology stays declared and no full
+	//     reconnect runs. Codes: 311, 403, 404, 405, 406.
+	//   - connection-level (hard error): the broker closes the whole TCP connection. Recovery
+	//     runs the reconnect supervisor barrier (re-dial → re-open channel → redeclare topology
+	//     → re-issue basic.consume; see §6.1), and Publish blocks on ErrReconnecting until it
+	//     clears. Codes: 320, 402, 501, 502, 503, 504, 505, 506, 530, 540, 541.
+	//
+	// Scope is orthogonal to the transient/permanent classification: e.g. 504 is connection-level
+	// yet transient, while 406 is channel-level yet permanent.
 
-	// ErrContentTooLarge wraps AMQP reply code 311 (content-too-large).
+	// ErrContentTooLarge wraps AMQP reply code 311 (content-too-large). Channel-level.
 	ErrContentTooLarge = errors.New("warren: content too large (311)")
-	// ErrConnectionForced wraps AMQP reply code 320 (connection-forced).
+	// ErrConnectionForced wraps AMQP reply code 320 (connection-forced). Connection-level.
 	ErrConnectionForced = errors.New("warren: connection forced (320)")
-	// ErrInvalidPath wraps AMQP reply code 402 (invalid-path). Permanent.
+	// ErrInvalidPath wraps AMQP reply code 402 (invalid-path). Connection-level. Permanent.
 	ErrInvalidPath = errors.New("warren: invalid path (402)")
-	// ErrAccessRefused wraps AMQP reply code 403 (access-refused). Permanent.
+	// ErrAccessRefused wraps AMQP reply code 403 (access-refused). Channel-level. Permanent.
 	ErrAccessRefused = errors.New("warren: access refused (403)")
-	// ErrNotFound wraps AMQP reply code 404 (not-found). Permanent.
+	// ErrNotFound wraps AMQP reply code 404 (not-found). Channel-level. Permanent.
 	ErrNotFound = errors.New("warren: not found (404)")
-	// ErrResourceLocked wraps AMQP reply code 405 (resource-locked). Permanent.
+	// ErrResourceLocked wraps AMQP reply code 405 (resource-locked). Channel-level. Permanent.
 	ErrResourceLocked = errors.New("warren: resource locked (405)")
-	// ErrPreconditionFailed wraps AMQP reply code 406 (precondition-failed). Permanent.
+	// ErrPreconditionFailed wraps AMQP reply code 406 (precondition-failed). Channel-level. Permanent.
 	ErrPreconditionFailed = errors.New("warren: precondition failed (406)")
-	// ErrFrameError wraps AMQP reply code 501 (frame-error). Permanent.
+	// ErrFrameError wraps AMQP reply code 501 (frame-error). Connection-level. Permanent.
 	ErrFrameError = errors.New("warren: frame error (501)")
-	// ErrSyntaxError wraps AMQP reply code 502 (syntax-error). Permanent.
+	// ErrSyntaxError wraps AMQP reply code 502 (syntax-error). Connection-level. Permanent.
 	ErrSyntaxError = errors.New("warren: syntax error (502)")
-	// ErrCommandInvalid wraps AMQP reply code 503 (command-invalid). Permanent.
+	// ErrCommandInvalid wraps AMQP reply code 503 (command-invalid). Connection-level. Permanent.
 	ErrCommandInvalid = errors.New("warren: command invalid (503)")
-	// ErrChannelError wraps AMQP reply code 504 (channel-error). Transient.
+	// ErrChannelError wraps AMQP reply code 504 (channel-error). Connection-level. Transient.
 	ErrChannelError = errors.New("warren: channel error (504)")
-	// ErrUnexpectedFrame wraps AMQP reply code 505 (unexpected-frame). Permanent.
+	// ErrUnexpectedFrame wraps AMQP reply code 505 (unexpected-frame). Connection-level. Permanent.
 	ErrUnexpectedFrame = errors.New("warren: unexpected frame (505)")
-	// ErrResourceError wraps AMQP reply code 506 (resource-error). Permanent by default.
+	// ErrResourceError wraps AMQP reply code 506 (resource-error). Connection-level. Permanent by default.
 	// Resource errors cover both transient (disk pressure) and permanent (FD exhaustion)
 	// conditions; retrying blindly amplifies pressure. Callers that know their workload
 	// can re-classify by wrapping with ErrTransient explicitly.
 	ErrResourceError = errors.New("warren: resource error (506)")
-	// ErrNotAllowed wraps AMQP reply code 530 (not-allowed). Permanent.
+	// ErrNotAllowed wraps AMQP reply code 530 (not-allowed). Connection-level. Permanent.
 	ErrNotAllowed = errors.New("warren: not allowed (530)")
-	// ErrNotImplemented wraps AMQP reply code 540 (not-implemented). Permanent.
+	// ErrNotImplemented wraps AMQP reply code 540 (not-implemented). Connection-level. Permanent.
 	ErrNotImplemented = errors.New("warren: not implemented (540)")
-	// ErrInternalError wraps AMQP reply code 541 (internal-error). Transient.
+	// ErrInternalError wraps AMQP reply code 541 (internal-error). Connection-level. Transient.
 	ErrInternalError = errors.New("warren: internal error (541)")
 
 	// Retry classifiers.

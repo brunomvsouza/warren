@@ -2313,23 +2313,27 @@ var (
     // AMQP 0-9-1 reply codes — broker-originated errors. Any error from
     // a publish/consume/declare operation that traces back to a broker
     // channel/connection close wraps one of these so users can branch
-    // on `errors.Is`.
-    ErrContentTooLarge    = errors.New("warren: content too large (311)")
-    ErrConnectionForced   = errors.New("warren: connection forced (320)")
-    ErrInvalidPath        = errors.New("warren: invalid path (402)")
-    ErrAccessRefused      = errors.New("warren: access refused (403)")
-    ErrNotFound           = errors.New("warren: not found (404)")
-    ErrResourceLocked     = errors.New("warren: resource locked (405)")
-    ErrPreconditionFailed = errors.New("warren: precondition failed (406)")
-    ErrFrameError         = errors.New("warren: frame error (501)")
-    ErrSyntaxError        = errors.New("warren: syntax error (502)")
-    ErrCommandInvalid     = errors.New("warren: command invalid (503)")
-    ErrChannelError       = errors.New("warren: channel error (504)")
-    ErrUnexpectedFrame    = errors.New("warren: unexpected frame (505)")
-    ErrResourceError      = errors.New("warren: resource error (506)")
-    ErrNotAllowed         = errors.New("warren: not allowed (530)")
-    ErrNotImplemented     = errors.New("warren: not implemented (540)")
-    ErrInternalError      = errors.New("warren: internal error (541)")
+    // on `errors.Is`. The // comment on each line records its AMQP scope:
+    // channel-level (soft error — only the channel closes; recover by
+    // reopening a channel from the pool, T61) vs connection-level (hard
+    // error — the whole TCP connection closes; recover via the reconnect
+    // supervisor barrier, §6.1). See the scope table below.
+    ErrContentTooLarge    = errors.New("warren: content too large (311)")     // channel-level
+    ErrConnectionForced   = errors.New("warren: connection forced (320)")     // connection-level
+    ErrInvalidPath        = errors.New("warren: invalid path (402)")          // connection-level
+    ErrAccessRefused      = errors.New("warren: access refused (403)")        // channel-level
+    ErrNotFound           = errors.New("warren: not found (404)")             // channel-level
+    ErrResourceLocked     = errors.New("warren: resource locked (405)")      // channel-level
+    ErrPreconditionFailed = errors.New("warren: precondition failed (406)")  // channel-level
+    ErrFrameError         = errors.New("warren: frame error (501)")          // connection-level
+    ErrSyntaxError        = errors.New("warren: syntax error (502)")          // connection-level
+    ErrCommandInvalid     = errors.New("warren: command invalid (503)")       // connection-level
+    ErrChannelError       = errors.New("warren: channel error (504)")         // connection-level
+    ErrUnexpectedFrame    = errors.New("warren: unexpected frame (505)")      // connection-level
+    ErrResourceError      = errors.New("warren: resource error (506)")        // connection-level
+    ErrNotAllowed         = errors.New("warren: not allowed (530)")           // connection-level
+    ErrNotImplemented     = errors.New("warren: not implemented (540)")       // connection-level
+    ErrInternalError      = errors.New("warren: internal error (541)")        // connection-level
 
     // Retry classifiers (errors are wrapped with one of these for callers
     // that don't want to switch over the specific reply codes).
@@ -2396,6 +2400,28 @@ Users may classify either coarsely
 (`errors.Is(err, warren.ErrPermanent)`) or precisely
 (`errors.Is(err, warren.ErrNotFound)`) — both work on the same error
 value.
+
+#### Channel-level vs connection-level scope
+
+AMQP 0-9-1 splits reply codes into two scopes, and the scope decides how
+the library recovers. This is **orthogonal** to the transient/permanent
+classification: scope is about *what the broker tears down*, while
+transient/permanent is about *whether a retry can succeed*.
+
+| Scope | Reply codes | Broker action | Recovery |
+|-------|-------------|---------------|----------|
+| **Channel-level** (soft error) | 311, 403, 404, 405, 406 | Closes only the offending channel; the TCP connection survives. | Local: the next operation acquires/reopens a fresh channel from the pool (channel self-heal, T61). Topology stays declared; no reconnect barrier runs. |
+| **Connection-level** (hard error) | 320, 402, 501, 502, 503, 504, 505, 506, 530, 540, 541 | Closes the entire TCP connection. | The reconnect supervisor barrier runs (re-dial → re-open channel → redeclare topology → re-issue `basic.consume`; see §6.1). `Publish` blocks on `ErrReconnecting` until the barrier clears. |
+
+Because the two axes are independent, a code can be connection-level yet
+transient (504 `ErrChannelError` — the dropped connection is re-dialed and
+the publish can be retried) or channel-level yet permanent (406
+`ErrPreconditionFailed` — reopening a channel does not change the
+topology mismatch that triggered the close, so a retry fails identically).
+The recovery path follows the **scope** column; whether a retry is
+*attempted* afterwards follows `IsTransient`/`IsPermanent`. Note 312/313
+(`basic.return`) are neither — they ride a `basic.return` frame and close
+nothing (see `AMQPCode`).
 
 ### 6.9 Subpackages
 

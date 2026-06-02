@@ -1639,12 +1639,19 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
   - **PrefetchBytes dropped client-side / broker rejects non-zero `prefetch_size`:** §6.3 said RabbitMQ "ignores" a non-zero `prefetch_size`; gate G6 shows it is **rejected** (`540 NOT_IMPLEMENTED`) on both 3.13 and 4.x. Corrected the §6.3 feature note, the `PrefetchBytes` signature comment, and the decision note to state the library drops it client-side and always sends `prefetch_size=0`. New guard `TestCaller_Qos_PrefetchSizeAlwaysZero` + extended `TestCaller_Call_ExclusiveReplyQueue_DeclaresQueueAndAppliesQos` assert the production `ch.Qos(..., 0, ...)` size arg is 0 (the RPC caller path is the available unit seam; the consumer/batch paths cast directly to `*amqp091.Channel` and are covered by integration gate G6).
   - Verified: `go build ./...` OK; `go test -race ./...` all green; `make lint` 0 issues. README unchanged (public surface unchanged — no new option/error/codec).
 
-### [ ] T79 — Reply-code channel/connection scope annotation (RMQ-18) [P2] · XS
+### [x] T79 — Reply-code channel/connection scope annotation (RMQ-18) [P2] · XS
 - **Acceptance:**
-  - [ ] SPEC §6.8 annotates each reply-code sentinel as channel-level (311/403/404/405/406) or connection-level (320/402/501–505/506/530/540/541), with the recovery implication noted (ties to T61).
+  - [x] SPEC §6.8 annotates each reply-code sentinel as channel-level (311/403/404/405/406) or connection-level (320/402/501–505/506/530/540/541), with the recovery implication noted (ties to T61).
 - **Verify:** Doc review; cross-reference check against T61.
 - **Files:** SPEC §6.8 (`errors.go` godoc).
 - **Deps:** —. **(RMQ-18, P2)**
+- **Done:**
+  - Doc-only task (no behaviour change). Annotated each AMQP reply-code sentinel with its AMQP 0-9-1 scope in **both** `errors.go` godoc and `SPEC.md §6.8`:
+    - **Channel-level** (soft error — only the channel closes, TCP connection survives): 311, 403, 404, 405, 406.
+    - **Connection-level** (hard error — whole TCP connection closes): 320, 402, 501, 502, 503, 504, 505, 506, 530, 540, 541.
+  - Recovery implication documented and tied to **T61**: channel-level → reopen a fresh channel from the pool (channel self-heal, T61), topology stays declared, no reconnect barrier; connection-level → reconnect supervisor barrier (re-dial → re-open channel → redeclare topology → re-issue `basic.consume`, §6.1), `Publish` blocks on `ErrReconnecting` until cleared.
+  - Added a scope **table** to SPEC §6.8 plus the explicit note that **scope is orthogonal to transient/permanent**: 504 is connection-level yet transient; 406 is channel-level yet permanent. Recovery path follows the *scope* column; whether a retry is *attempted* follows `IsTransient`/`IsPermanent`. Noted 312/313 (`basic.return`) are neither scope (no close).
+  - Verify: `go build ./...` OK, `go test -race ./...` all green, `/usr/bin/make lint` 0 issues. README unchanged (no public-surface change — sentinel identities and behaviour unchanged, godoc-only).
 
 ### [ ] T80 — Sizing/limits factual fixes (RMQ-12/13) [P2] · XS
 - **Acceptance:**
