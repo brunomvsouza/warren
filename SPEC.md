@@ -1056,11 +1056,21 @@ Semantics:
   is empty). Per-message `ErrUnroutable` results are independent: a
   batch can have some slots succeed and others fail routing.
 - **No double-acknowledgement guarantee.** AMQP `basic.ack` from
-  broker → publisher means "the broker took responsibility" (queued
-  for routing). It does *not* guarantee the message is persisted to
-  disk on every queue's replica before a broker crash; users
-  publishing to replicated queues should still treat their consumers
-  as idempotent (dedupe by `MessageID`). **Use quorum queues for
+  broker → publisher (a publisher *confirm*) means "the broker took
+  responsibility" — but *what* responsibility is **queue-type- and
+  persistence-dependent**, and is stronger than "merely queued for
+  routing": for a **durable queue + persistent message** the confirm
+  follows the message being written (fsync'd, possibly batched) to the
+  queue's storage; for a **quorum queue** it follows a **Raft
+  majority-commit** across the queue's replicas; for a
+  **transient/non-durable** queue (or a transient message) it is sent
+  as soon as the broker has routed the message, with no durability. A
+  confirm is therefore *not* a guarantee that the message survives a
+  crash on **every** replica simultaneously, so users publishing to
+  replicated queues should still treat their consumers as idempotent
+  (dedupe by `MessageID`). The exact per-queue-type confirm semantics
+  are tabulated in §6.2 (queue-type confirm-semantics, the single
+  source — do not restate the table here). **Use quorum queues for
   replication.** Classic **mirrored** queues (the `ha-mode` /
   `x-ha-policy` mechanism) are **deprecated in RabbitMQ 3.13 and
   removed in 4.0** — a `ha-*` policy is a no-op on 4.x — so a topology
@@ -1468,7 +1478,7 @@ even though they have capacity. The builder logs a warning at
 
 **Queue Type Nuance:**
 - For **Classic Queues**, the rules above apply directly.
-- For **Quorum Queues**, RabbitMQ reads from disk and delivers in batches to the channel. A prefetch that is too small prevents the broker from batching efficiently. The absolute minimum for a quorum queue should be `16`, regardless of `Concurrency`, to allow the broker-side read-ahead to engage. The default `Prefetch=64` is well-suited for quorum queues under typical workloads.
+- For **Quorum Queues**, RabbitMQ reads from disk and delivers in batches to the channel. A prefetch that is too small prevents the broker from batching efficiently. As a **rule of thumb** (not a broker-enforced floor), keep `Prefetch` at roughly `16` or higher for a quorum queue, regardless of `Concurrency`, so the broker-side read-ahead engages; this is a throughput heuristic, not a protocol constant — the broker accepts any `prefetch_count`, and a value below it degrades batching rather than failing the consume. The default `Prefetch=64` is well-suited for quorum queues under typical workloads.
 
 The default `Prefetch=64, Concurrency=1` is conservative and fits
 development workloads. For sustained > 1k msg/s/consumer against a
@@ -1853,16 +1863,26 @@ type Headers map[string]any  // AMQP field-table; see typing note below
   etc.).
 
 - **`Priority`.** AMQP `basic.properties.priority` is an `octet`
-  (0–255). RabbitMQ priority queues only use 0–9 by convention;
-  values above the queue's `x-max-priority` are silently clamped by
-  the broker. Setting `Priority` on a non-priority queue has no
-  effect.
+  (0–255). A priority queue's effective range is its `x-max-priority`:
+  the queue declares a maximum (1–255; RabbitMQ **recommends ≤ 10**, as
+  each level costs an internal sub-queue and Erlang resources), and a
+  message `Priority` above that maximum is silently clamped down to it.
+  Values 0–9 are the common convention but are not a protocol limit.
+  Setting `Priority` on a non-priority queue (one declared without
+  `x-max-priority`) has no effect. **Quorum queues do not support
+  priorities at all** — `x-max-priority` is rejected on a quorum-queue
+  declare (see §6.6 / `Queue.MaxPriority`), so a `Priority` set on a
+  message routed to a quorum queue is ignored.
 
 - **`Expiration`.** Per-message TTL. AMQP `basic.properties.expiration`
   is a `shortstr` containing milliseconds as ASCII digits (e.g.
   `"60000"`). The publisher truncates `time.Duration` to milliseconds
-  and serialises it. Sub-millisecond durations round to 0 (the broker
-  interprets `"0"` as "expire immediately").
+  and serialises it. The broker interprets `"0"` as "expire
+  immediately", so a **non-zero** duration shorter than 1ms — which
+  would round to `"0"` and silently flip "expire after 500µs" into
+  "discard on arrival" — is **rejected at publish time** with
+  `ErrInvalidMessage` (the minimum non-zero TTL is 1ms). A zero
+  `Expiration` means "no per-message TTL" and is left untouched.
 
 - **`UserID`.** AMQP `basic.properties.user-id`. RabbitMQ validates
   this against the user that authenticated the connection at the
@@ -2273,6 +2293,19 @@ user.
 - The fallback `UseExclusiveReplyQueue()` declares a real exclusive
   auto-delete queue per `Caller` instance, with regular ack semantics.
   Slightly higher latency, but survives more failure modes.
+  **Redeclare-on-reconnect (load-bearing).** An exclusive
+  auto-delete queue is bound to the connection that declared it: the
+  broker **deletes it** the moment that connection/channel drops
+  (exclusive ⇒ owner-scoped; auto-delete ⇒ removed when the last
+  consumer leaves). So a reconnect does **not** merely reopen the
+  channel — the reply queue itself is gone. The `Caller`'s reconnect
+  barrier therefore **re-declares the exclusive reply queue and
+  re-issues `basic.consume`** on the new channel before it resumes
+  publishing requests; otherwise replies would route to a queue that no
+  longer exists and every subsequent `Call` would hang until timeout.
+  In-flight calls at the moment of the drop still resolve with
+  `ErrChannelClosed` (their reply queue vanished with the connection);
+  only new calls use the freshly redeclared queue.
 
 **`Replier` ordering** (at-least-once for replies):
 - For a successful handler: the replier **publishes the reply
@@ -3465,8 +3498,10 @@ the next reader so the rationale survives the conversation:
 
 17. **Connection abstraction fans out across multiple TCP
     connections, split by role.** `*Connection` wraps a pool with
-    `WithPublisherConnections(n)` (default 1) and
-    `WithConsumerConnections(n)` (default 1). The reason is
+    `WithPublisherConnections(n)` (default **2**) and
+    `WithConsumerConnections(n)` (default **2**) — see decision 36,
+    which sets these defaults and is the authoritative source for them.
+    The reason is
     `amqp091-go` serializes I/O per `warren.Connection`: one TCP
     socket bounds confirm throughput to whatever a single goroutine
     can drive. A single socket is fine for tens of thousands of
@@ -3990,3 +4025,32 @@ versions); and pinned §9's `basic.properties` round-trip verification to the
 incompatible v2 in 4.0). The Lens-10 (TV-05/11) broker-matrix verification of the
 quorum default `x-delivery-limit` and classic-queue ignore behaviour rides the
 RabbitMQ 3.13+4.x integration matrix (T151) and is tracked there, not in T81.
+
+**Contract-precision fixes (T82, RMQ-24/25/26/27/28/29).** Tightened six
+low-severity contract statements that were stale, understated, or imprecise.
+**RMQ-24:** decision 17 said `WithPublisherConnections`/`WithConsumerConnections`
+default to "1"; corrected to **2** with a pointer to decision 36 as the
+authoritative source (§6.1 and decision 36 already said 2). **RMQ-25:** the §6.2
+"No double-acknowledgement guarantee" bullet said a confirm means "merely queued
+for routing" — reworded to state the confirm's meaning is **queue-type- and
+persistence-dependent and stronger** than that (durable+persistent ⇒ written to
+storage; quorum ⇒ Raft majority-commit; transient ⇒ immediate, no durability),
+while keeping the no-cross-replica-durability caveat and the dedupe advice. The
+full per-queue-type table is **owned by Phase 13 T88 (DS-07)** — §6.2 is the single
+source; T82 adds the precision without duplicating the table. **RMQ-26:** the §6.5
+`Expiration` footgun (a non-zero sub-millisecond TTL serialises to `"0"` =
+"expire immediately") is now **rejected at publish time** with `ErrInvalidMessage`
+(minimum non-zero TTL 1ms), mirroring the symmetric `Delay` guard; `message.go`
+godoc and a unit test (`TestPublisher_encodeMsg_RejectsSubMillisecondExpiration`
+plus the 1ms / zero boundary cases) pin it. **RMQ-27:** §6.5 `Priority` clarified —
+the effective range is the queue's `x-max-priority` (1–255; RabbitMQ recommends
+≤10; 0–9 is convention, not a protocol limit), values above the max are clamped
+down, and **quorum queues have no priority support** (`x-max-priority` rejected on
+a quorum declare). **RMQ-28:** §6.7 documents that an exclusive auto-delete reply
+queue (`UseExclusiveReplyQueue()`) is **deleted by the broker on disconnect**, so
+the `Caller`'s reconnect barrier must **re-declare it and re-issue `basic.consume`**
+before resuming — otherwise new calls hang routing to a vanished queue. **RMQ-29:**
+§6.3 reworded the quorum "prefetch floor 16" from an "absolute minimum" into an
+explicit **throughput rule of thumb, not a broker-enforced floor** (the broker
+accepts any `prefetch_count`; a smaller value degrades batching rather than failing
+the consume).

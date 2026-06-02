@@ -274,3 +274,44 @@ func TestMessageID_UUIDv7_NoPerCallEntropyAlloc(t *testing.T) {
 		"uuid.NewV7 must not allocate a per-call entropy buffer; "+
 			"package init must call uuid.EnableRandPool() (Lens-09 PC-09)")
 }
+
+// TestPublisher_encodeMsg_RejectsSubMillisecondExpiration asserts a non-zero
+// Expiration shorter than 1ms is rejected client-side with ErrInvalidMessage
+// (RMQ-26). The AMQP shortstr Expiration is serialised as integer milliseconds, so
+// a sub-millisecond TTL rounds to "0", which the broker interprets as "expire
+// immediately" — a silent footgun that would discard the message on arrival. Reject
+// it at publish time rather than emit a TTL that means the opposite of the caller's
+// intent. Mirrors the symmetric Delay guard.
+func TestPublisher_encodeMsg_RejectsSubMillisecondExpiration(t *testing.T) {
+	p := &Publisher[int]{codec: codec.NewJSON()}
+	body := 7
+
+	_, _, err := p.encodeMsg(Message[int]{Body: &body, Expiration: 500 * time.Microsecond})
+
+	require.ErrorIs(t, err, ErrInvalidMessage)
+	assert.Contains(t, err.Error(), "Expiration", "the error must name the offending field")
+}
+
+// TestPublisher_encodeMsg_AllowsOneMillisecondExpiration asserts the smallest TTL
+// that survives the millisecond rounding (exactly 1ms) is accepted — the boundary
+// is inclusive, so a 1ms expiry round-trips without tripping the sub-ms guard.
+func TestPublisher_encodeMsg_AllowsOneMillisecondExpiration(t *testing.T) {
+	p := &Publisher[int]{codec: codec.NewJSON()}
+	body := 7
+
+	_, _, err := p.encodeMsg(Message[int]{Body: &body, Expiration: time.Millisecond})
+
+	require.NoError(t, err)
+}
+
+// TestPublisher_encodeMsg_AllowsZeroExpiration asserts a zero Expiration (no TTL)
+// passes — only a non-zero duration that rounds to "0" is the footgun the guard
+// targets; the explicit zero value means "no per-message TTL" and is left alone.
+func TestPublisher_encodeMsg_AllowsZeroExpiration(t *testing.T) {
+	p := &Publisher[int]{codec: codec.NewJSON()}
+	body := 7
+
+	_, _, err := p.encodeMsg(Message[int]{Body: &body, Expiration: 0})
+
+	require.NoError(t, err)
+}
