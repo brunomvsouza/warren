@@ -1332,3 +1332,15 @@ requeue coverage observable. -->
 
 **Prerequisites:** T75 (this entry's origin); a SPEC §6.3 amendment for any new public accessor.
 
+### LATER-93 — x-death `count` parsed with an `int64`-only assertion; a narrower numeric type silently coerces to 0
+
+**Context:** `ParseXDeath` (`internal/headers/xdeath.go:74`) reads the per-entry death count via `count, _ := entry["count"].(int64)`. amqp091-go decodes AMQP field-table integers into distinct Go types per wire byte (`'l'`→int64, `'I'`→int32, `'i'`→uint32, `'s'`→int16, `'u'`→uint16, `'b'`→int8, `'B'`/`'t'`→byte). Any `count` that arrives as anything other than `int64` fails the assertion and yields `0`. Gate ground truth (`docs/spec-validation/01-rabbitmq-gate-results.md`, G2) confirms RabbitMQ 3.13.7 and 4.0.9 both encode the x-death `count` as a `long` (int64), so on every supported broker the assertion matches and there is no active bug. The only exposure is an intermediary that re-encodes the field (federation/shovel/proxy) to a narrower type. Prior art: LATER-02 (resolved, commit `48ee170`) added int/uint→int64 coercion during topology *validation*; the x-death parser does not share that coercion.
+
+**Impact:** A re-encoded narrower `count` silently under-counts `DeathCount()`, letting a poison message loop *longer* than `MaxRedeliveries` intends before it is dropped. Fail-safe in direction (under-count → extra redeliveries, never a negative wrap that would defeat the `DeathCount() >= MaxRedeliveries` poison-pill check into "below limit forever"), so it is a robustness gap rather than a correctness defect on supported brokers. Choosing `0` for a genuinely-unparseable value is itself defensible; the gap is silently dropping a numeric the broker plausibly *could* send.
+
+**Evidence:** Phase 12 `/ship` fan-out (2026-06-02) — code-reviewer deep-dive flagged Important, security-auditor flagged Info; both gate it non-blocking against G2 ground truth.
+
+**Suggested solution:** Widen the coercion to a small numeric type-switch (int64/int32/int16/int8/int/uint32/uint16/uint8/byte; reject or zero float64), clamping to `[0, math.MaxInt]`, mirroring the LATER-02 validation coercion. Add a parser test driving each amqp091 numeric wire type. Optionally factor the int/uint→int64 coercion into a shared internal helper used by both the validation path and `ParseXDeath`.
+
+**Prerequisites:** T75 (this entry's origin); none hard — the change is internal to `internal/headers`.
+
