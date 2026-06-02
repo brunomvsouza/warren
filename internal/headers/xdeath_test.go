@@ -56,17 +56,21 @@ func TestParseXDeath_FilterExpired(t *testing.T) {
 }
 
 func TestParseXDeath_MultipleReasons(t *testing.T) {
+	// RMQ-01 / gate G1: the broker emits the delivery-limit reason with an
+	// UNDERSCORE ("delivery_limit", confirmed on RabbitMQ 3.13 and 4.x). The
+	// parser must normalise it to the canonical hyphenated form so it both sums
+	// into DeathCount and surfaces under the documented "delivery-limit" spelling.
 	tbl := amqp091.Table{
 		"x-death": []any{
 			makeEntry("myqueue", "expired", 100),
 			makeEntry("myqueue", "rejected", 2),
-			makeEntry("myqueue", "delivery-limit", 5),
+			makeEntry("myqueue", "delivery_limit", 5),
 		},
 	}
 	result := headers.ParseXDeath(tbl, "myqueue")
 	// DeathCount only sums rejected + delivery-limit
 	assert.Equal(t, 7, result.Count)
-	// DeathReasons returns unique reasons in declaration order
+	// DeathReasons returns unique reasons in declaration order, canonicalised.
 	assert.Equal(t, []string{"expired", "rejected", "delivery-limit"}, result.Reasons)
 }
 
@@ -105,14 +109,19 @@ func TestParseXDeath_WrongShape(t *testing.T) {
 }
 
 func TestParseXDeath_DeliveryLimit(t *testing.T) {
+	// RMQ-01 / gate G1: drive the real broker atom ("delivery_limit", underscore).
+	// It must count toward DeathCount and be reported as the canonical
+	// "delivery-limit", and a lookup by EITHER spelling must resolve.
 	tbl := amqp091.Table{
 		"x-death": []any{
-			makeEntry("myqueue", "delivery-limit", 4),
+			makeEntry("myqueue", "delivery_limit", 4),
 		},
 	}
 	result := headers.ParseXDeath(tbl, "myqueue")
 	assert.Equal(t, 4, result.Count)
 	assert.Equal(t, []string{"delivery-limit"}, result.Reasons)
+	assert.Equal(t, 4, result.CountByReason("delivery-limit"), "canonical hyphen lookup must resolve")
+	assert.Equal(t, 4, result.CountByReason("delivery_limit"), "raw broker underscore lookup must resolve")
 }
 
 func TestParseXDeath_FilterMaxlen(t *testing.T) {

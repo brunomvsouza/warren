@@ -67,15 +67,34 @@ make integration-down
 
 ## Per-gate detail and the task each gates
 
-### G1 — delivery-limit reason atom → **T75** (RMQ-01)
+### G1 — delivery-limit reason atom → **T75** (RMQ-01) — ✅ RESOLVED
 The broker writes the x-death `reason` as **`delivery_limit`** (underscore) on
-**both** 3.13.7 and 4.0.9. `internal/headers/xdeath.go` currently matches the
-hyphenated literal `"delivery-limit"`, so a real quorum delivery-limit eviction
-is **not** counted by `DeathCount()` today. T75 must (a) match the broker's
-`delivery_limit` token and (b) normalise `-`↔`_` defensively, and replace the
-fabricated unit test with a real-broker test. The gate's own assertion
-normalises separators, so it stays green on either spelling while recording the
-observed atom.
+**both** 3.13.7 and 4.0.9. `internal/headers/xdeath.go` previously matched only
+the hyphenated literal `"delivery-limit"`, so a real quorum delivery-limit
+eviction went **uncounted** by `DeathCount()`.
+
+**T75 fix:** `ParseXDeath` now normalises reason separators (`_`→`-`) on both the
+stored reason and the `CountByReason` lookup key, so the broker's `delivery_limit`
+counts toward `DeathCount()` and surfaces under the documented `"delivery-limit"`
+spelling (and a caller may query either spelling). The fabricated `makeEntry(…,
+"delivery-limit", …)` unit cases were rewritten to feed the real underscore atom,
+and a real-broker test (`xdeath_delivery_limit_integration_test.go`) drives a
+genuine quorum eviction and asserts the public `Death*` accessors against the
+broker-authored header.
+
+**Broker constraint discovered while building the test:** a `delivery_limit`
+eviction is keyed on the **source** quorum queue, and the broker **never
+redelivers** such a message back to that queue — a same-queue return (even via an
+intermediate TTL hop with a differing `expired` reason) is silently dropped, and
+a quorum queue re-evicts a message that already exceeded its limit. So the only
+place the `delivery_limit` x-death entry is observable is the **DLQ**, where
+warren's queue-scoped `DeathCount()` keys on the DLQ name (not the source) and
+returns 0. The integration test captures the real DLQ header and replays it
+scoped to the source queue via `NewDeliveryFixture`. This queue-scoping gap for
+DLQ consumers is tracked as **LATER-92** (not a T75 blocker — RMQ-01 is the
+reason-atom fix; cross-queue inspection is a separate API question). Contrast:
+the same-queue **retry-loop** pattern (reason `rejected`/`expired`) *does*
+re-arrive and is correctly counted.
 
 ### G2 — x-death count shape → **T78** (RMQ-03)
 A single dead-letter event produces **one** x-death entry for the
