@@ -1965,7 +1965,8 @@ type Binding struct {
 // DeadLetter expands to x-dead-letter-exchange, x-dead-letter-routing-key,
 // x-message-ttl, x-max-length, x-max-length-bytes, x-overflow args on the
 // source queue, declaring the target exchange and queue as well.
-// For quorum queues, it also implicitly sets x-dead-letter-strategy: at-least-once.
+// For quorum queues, it also implicitly sets x-dead-letter-strategy: at-least-once
+// AND couples x-overflow=reject-publish (see "at-least-once coupling" below).
 type DeadLetter struct {
     Source         string          // source queue name
     Exchange       string          // DLX name (declared if absent in Exchanges)
@@ -1973,7 +1974,7 @@ type DeadLetter struct {
     TTL            time.Duration   // x-message-ttl on source
     MaxLength      int             // x-max-length on source (message count)
     MaxLengthBytes int             // x-max-length-bytes on source (byte cap)
-    Overflow       OverflowPolicy  // x-overflow on source; empty = broker default (drop-head)
+    Overflow       OverflowPolicy  // x-overflow on source; empty = reject-publish on quorum at-least-once, else broker default (drop-head)
 
     // Auto-declared <Source>.dlq bounds (T65). The auto-DLQ is Durable AND
     // bounded BY DEFAULT — an unbounded DLQ fills disk and trips a broker-wide
@@ -2023,6 +2024,23 @@ Behaviour:
      - For every queue with `SingleActiveConsumer == true`:
        `x-single-active-consumer = true`.
      - For every queue with `Type != ""`: `x-queue-type`.
+     - **at-least-once coupling (decision 52, RMQ-05).** For every
+       **quorum** queue that has a DLX (a matching `DeadLetter` or a
+       caller-set `Args["x-dead-letter-exchange"]`), the library injects
+       `x-dead-letter-strategy=at-least-once` (unless the caller set a
+       different strategy) **and** couples `x-overflow=reject-publish`:
+       an empty `Overflow` is auto-set to `reject-publish` (with a
+       declare-time warning) and a conflicting explicit value is
+       rejected by `validate()` (see below). The broker silently
+       **accepts any overflow with at-least-once** on both 3.13 and 4.x
+       (gate G4 + the T76 probe — even `reject-publish-dlx`), but only
+       **honours** at-least-once when overflow is `reject-publish`, so
+       the coupling is enforced client-side. **Memory cost:** at-least-once
+       retains each dead-lettered message in the **source queue's memory**
+       until the DLX consumer acks it, and `reject-publish` blocks
+       publishers (`ErrPublishNacked` / `ErrConnectionBlocked`) when the
+       source queue is full — keep a consumer on the DLX and bound the
+       source queue (`DeliveryLimit`, `TTL`, `MaxLength`).
   2. **Broker-side declare** on a temporary channel, in fixed order:
      **exchanges → queues → bindings**. This guarantees the source
      queue is declared *once*, already carrying its full arg set —
@@ -2059,6 +2077,14 @@ Behaviour:
     the broker closes the channel with `PRECONDITION_FAILED` at
     declare). `x-max-priority` on a quorum queue is rejected via the two
     checks below (the `MaxPriority` field and the raw arg).
+  - A **quorum** queue running the **at-least-once** dead-letter
+    strategy (quorum + DLX, strategy not overridden) with an explicit
+    `x-overflow` other than `reject-publish` — i.e. `drop-head` or
+    `reject-publish-dlx`, set via `DeadLetter.Overflow` or a raw
+    `Args["x-overflow"]`. RabbitMQ accepts the mismatch but does not
+    honour at-least-once (decision 52 / RMQ-05); set
+    `Overflow=OverflowRejectPublish`, or override
+    `x-dead-letter-strategy` to opt out of the coupling.
   - `MaxPriority > 0` (the `Queue.MaxPriority` struct field — it **does**
     exist) on any non-classic queue type, and a raw
     `Args["x-max-priority"]` on any queue (callers must use the
@@ -3175,10 +3201,23 @@ the next reader so the rationale survives the conversation:
    library (GA-09). No mock package is shipped: interface doubles a
    consumer can build itself are the consumer's to generate.
 
-52. **Quorum Queue `x-dead-letter-strategy: at-least-once` (Rev 9)** —
+52. **Quorum Queue `x-dead-letter-strategy: at-least-once` (Rev 9; coupling Rev 11, T76)** —
     Implicitly injected by `Topology.Declare` for Quorum queues with DLXs
     to guarantee message preservation during dead-lettering, removing the
-    need for the user to specify it manually.
+    need for the user to specify it manually. **at-least-once is coupled
+    to `x-overflow=reject-publish` (T76 / RMQ-05):** RabbitMQ only honours
+    at-least-once with `reject-publish`, yet the broker silently **accepts
+    every overflow** with at-least-once on both 3.13.7 and 4.0.9 (gate G4
+    + the T76 probe confirmed `drop-head` *and* `reject-publish-dlx` are
+    accepted), so the coupling cannot be delegated to the broker.
+    `Topology` enforces it client-side: an empty `Overflow` is auto-set to
+    `reject-publish` with a declare-time warning, and a conflicting
+    explicit `drop-head`/`reject-publish-dlx` is rejected with
+    `ErrInvalidOptions`. A caller that overrides `x-dead-letter-strategy`
+    to a non-`at-least-once` value opts out of the coupling. Cost: the
+    strategy retains dead-lettered messages in **source-queue memory**
+    until the DLX consumer acks, and `reject-publish` blocks publishers
+    when the source queue is full (§6.6).
 
 53. **Strict Shutdown Cascade (Rev 9)** — `Close(ctx)` cancels consumers
     *before* draining publishes, and drains publishes *before* closing

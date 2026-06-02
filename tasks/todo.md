@@ -1605,14 +1605,15 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 - **Deps:** T17, T74 (G1). **(RMQ-01, P0)**
 - **Done:** Normalisation choke-point added in `ParseXDeath`; canonical form is hyphen (matches the documented public spelling). **Broker constraint discovered:** a `delivery_limit` eviction is never redelivered to its origin quorum queue (same-queue return is cycle-dropped / re-evicted), so it is only observable on a DLQ — where warren's queue-scoped `DeathCount()` returns 0 because x-death keys on the source queue. The test captures the real DLQ header and replays it scoped to the source via `NewDeliveryFixture`. The DLQ-consumer queue-scoping gap is filed as **LATER-92** (separate API question; out of RMQ-01 scope).
 
-### [ ] T76 — at-least-once DLX strategy implemented (RMQ-05) [P0] · M
+### [x] T76 — at-least-once DLX strategy implemented (RMQ-05) [P0] · M
 - **Acceptance:**
-  - [ ] For a quorum queue with a DLX, `Declare` injects `x-dead-letter-strategy: at-least-once`.
-  - [ ] `x-overflow=reject-publish` is forced/validated for that queue (auto-set with a warning, or `ErrInvalidOptions` if the user set `drop-head`) — at-least-once is invalid with drop-head.
-  - [ ] The source-queue memory cost of at-least-once is documented.
-- **Verify:** Unit: injection + overflow rule. Integration: quorum + DLX declares successfully and dead-letters at-least-once.
-- **Files:** `topology.go`, `topology_test.go`, a new integration test, SPEC §6.6 + decision 52.
+  - [x] For a quorum queue with a DLX, `Declare` injects `x-dead-letter-strategy: at-least-once`. (Pre-existing from T14/T15; covered by `TestTopology_expand_injectsAtLeastOnceStrategy*`.)
+  - [x] `x-overflow=reject-publish` is forced/validated for that queue: `expand()` auto-sets `reject-publish` when overflow is unset (with a declare-time warning via `warnQuorumAtLeastOnceOverflow`), and `validate()` returns `ErrInvalidOptions` on a conflicting explicit overflow. Per the T76 probe (extends G4) the broker also accepts `at-least-once`+`reject-publish-dlx`, and RabbitMQ honours at-least-once *only* with `reject-publish`, so **both** `drop-head` and `reject-publish-dlx` are rejected.
+  - [x] The source-queue memory cost of at-least-once is documented (DeadLetter godoc, SPEC §6.6 expansion behaviour + validation rule, decision 52).
+- **Verify:** Unit: injection + overflow rule (`topology_at_least_once_overflow_test.go`). Integration: quorum + DLX declares successfully, the coupled args read back via the management API, and a nacked message dead-letters into the DLQ — green on **3.13.7 and 4.0.9** (`topology_at_least_once_overflow_integration_test.go`).
+- **Files:** `topology.go`, `topology_at_least_once_overflow_test.go`, `topology_at_least_once_overflow_integration_test.go`, SPEC §6.6 + decision 52, `docs/spec-validation/01-rabbitmq-gate-results.md` (G4 RESOLVED).
 - **Deps:** T14, T15, T47, T74 (G4). **(RMQ-05, P0)** — coordinate with T64/T65.
+- **Done:** `at-least-once` injection was already present (T14/T15); T76 added the **overflow coupling**. A shared `(*Topology).quorumAtLeastOnce` helper computes "is this a quorum at-least-once queue + effective overflow" so `validate()`, `expand()`, and the warning stay in lockstep, mirroring expand's `DeadLetter.Overflow`-over-raw-`Args` precedence. A `reject-publish-dlx` probe (3.13 + 4.x) extended G4 and showed the broker accepts it too → rejected client-side. A caller override of `x-dead-letter-strategy` opts out of the coupling.
 
 ### [ ] T77 — PublishBatch+Mandatory duplicate-MessageID validation (RMQ-15) [P1] · S
 - **Acceptance:**
@@ -1673,7 +1674,7 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 ### Checkpoint — Phase 12 (Lens 01) closed
 - [x] T74 gate results documented (`docs/spec-validation/01-rabbitmq-gate-results.md` + SPEC §10 Rev 11); gate→task index records which task consumes each gate (T75→G1, T78→G2/G6, T58/T81→G3, T76→G4, T80→G5).
 - [ ] Poison path correct on **both** 3.13 and 4.x: [x] T75 (real-broker x-death), T58 (version-aware warning), T64 (quorum validation).
-- [ ] DLX correct: T76 (at-least-once + reject-publish), T65 (durable bounded DLQ + Consumer missing-DLX).
+- [ ] DLX correct: [x] T76 (at-least-once + reject-publish), T65 (durable bounded DLQ + Consumer missing-DLX).
 - [ ] §1 silent-failure defects closed: T60, T61, T65, T66.
 - [ ] SPEC matches implementation (T78); version caveats + honest §9 numbers (T79/T80/T81/T82/T83).
 - [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 **and** 4.x) green; `goleak.VerifyNone` clean; README synced.

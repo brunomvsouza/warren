@@ -133,6 +133,17 @@ type Binding struct {
 // x-dead-letter-strategy=at-least-once so messages are preserved during
 // dead-lettering (SPEC §10 decision 52). Set x-dead-letter-strategy in the
 // source Queue.Args to override this default.
+//
+// at-least-once requires x-overflow=reject-publish; the broker silently accepts
+// any overflow but does not honour at-least-once otherwise, so Declare couples
+// the two client-side: Overflow left empty is auto-set to reject-publish (with a
+// warning), and an Overflow of drop-head or reject-publish-dlx is rejected with
+// ErrInvalidOptions. Note the cost: reject-publish blocks publishers
+// (ErrPublishNacked / ErrConnectionBlocked) when the source queue is full, and
+// at-least-once retains each dead-lettered message in SOURCE-QUEUE memory until
+// the DLX consumer acknowledges it — an unconsumed DLX can therefore grow the
+// source queue's memory footprint. Size the source queue (DeliveryLimit, TTL,
+// MaxLength) and the DLQ, and keep a consumer attached to the DLX.
 type DeadLetter struct {
 	// Source is the name of the source queue that routes dead letters.
 	Source string
@@ -332,6 +343,7 @@ func (t *Topology) Declare(ctx context.Context, conn *Connection) error {
 
 	warnDelayedExchanges(conn.opts.logger, expanded.Exchanges)
 	warnQuorumDeliveryLimit(conn.opts.logger, expanded.Queues, conn.brokerVersion())
+	warnQuorumAtLeastOnceOverflow(conn.opts.logger, t)
 
 	ch, err := conn.openDeclareChannel(ctx)
 	if err != nil {
@@ -402,6 +414,87 @@ func warnQuorumDeliveryLimit(logger log.Logger, queues []Queue, brokerVersion st
 				"(infinite poison loop) — set DeliveryLimit explicitly",
 				q.Name)
 		}
+	}
+}
+
+// quorumAtLeastOnce reports whether queue q will run the at-least-once
+// dead-letter strategy after expansion — i.e. it is a quorum queue, has a DLX
+// (via Queue.Args["x-dead-letter-exchange"] or a DeadLetter naming it as
+// Source), and its effective x-dead-letter-strategy is at-least-once (the
+// injected default unless the caller overrode it). It also returns the
+// effective x-overflow that will be set on the source queue: a raw
+// Queue.Args["x-overflow"] is overridden by a non-empty DeadLetter.Overflow,
+// mirroring expand()'s precedence.
+//
+// at-least-once REQUIRES x-overflow=reject-publish. The broker accepts any
+// overflow (gate G4, and the T76 probe confirmed even reject-publish-dlx is
+// accepted on 3.13 and 4.x) but does not honour at-least-once unless overflow
+// is reject-publish, so warren couples them client-side: validate() rejects a
+// conflicting explicit value and expand() fills reject-publish when unset.
+// Both consult this helper so the two stay in lockstep.
+func (t *Topology) quorumAtLeastOnce(q Queue) (atLeastOnce bool, overflow string, overflowSet bool) {
+	if q.Type != QueueTypeQuorum {
+		return false, "", false
+	}
+	_, hasDLX := q.Args["x-dead-letter-exchange"]
+	if v, ok := overflowString(q.Args["x-overflow"]); ok {
+		overflow, overflowSet = v, true
+	}
+	for _, dl := range t.DeadLetters {
+		if dl.Source != q.Name {
+			continue
+		}
+		hasDLX = true
+		if dl.Overflow != "" {
+			overflow, overflowSet = string(dl.Overflow), true
+		}
+	}
+	if !hasDLX {
+		return false, "", false
+	}
+	// A caller override that is not at-least-once opts out of the coupling.
+	if s, ok := q.Args["x-dead-letter-strategy"].(string); ok && s != "at-least-once" {
+		return false, overflow, overflowSet
+	}
+	return true, overflow, overflowSet
+}
+
+// overflowString coerces an x-overflow Args value to its string form, accepting
+// both a plain string and the typed OverflowPolicy.
+func overflowString(v any) (string, bool) {
+	switch s := v.(type) {
+	case string:
+		return s, true
+	case OverflowPolicy:
+		return string(s), true
+	default:
+		return "", false
+	}
+}
+
+// warnQuorumAtLeastOnceOverflow emits one warning per quorum queue where warren
+// auto-sets x-overflow=reject-publish to satisfy the at-least-once dead-letter
+// strategy (T76 / RMQ-05 / decision 52) — i.e. at-least-once applies and the
+// caller left overflow unset. The warning surfaces the auto-set and the
+// source-queue memory cost: reject-publish blocks publishers when the queue is
+// full, and at-least-once retains dead-lettered messages in source-queue memory
+// until the DLX consumer acks. A conflicting explicit overflow is rejected by
+// validate(), not warned here. A nil logger is a no-op.
+func warnQuorumAtLeastOnceOverflow(logger log.Logger, t *Topology) {
+	if logger == nil {
+		return
+	}
+	for _, q := range t.Queues {
+		atLeastOnce, _, overflowSet := t.quorumAtLeastOnce(q)
+		if !atLeastOnce || overflowSet {
+			continue
+		}
+		logger.Warningf("warren: quorum queue %q uses the at-least-once dead-letter strategy, "+
+			"which requires x-overflow=reject-publish; warren is setting it automatically. "+
+			"reject-publish blocks publishers (ErrPublishNacked) when the queue is full, and "+
+			"at-least-once retains dead-lettered messages in source-queue memory until the DLX "+
+			"consumer acknowledges them — size the source queue and DLQ accordingly (SPEC §6.6)",
+			q.Name)
 	}
 }
 
@@ -648,8 +741,25 @@ func (t *Topology) expand() *Topology {
 		// by the caller in Args. An explicit caller value is respected.
 		if q.Type == QueueTypeQuorum {
 			if _, hasDLX := q.Args["x-dead-letter-exchange"]; hasDLX {
-				if _, hasStrategy := q.Args["x-dead-letter-strategy"]; !hasStrategy {
+				strategyVal, hasStrategy := q.Args["x-dead-letter-strategy"]
+				if !hasStrategy {
 					q.Args["x-dead-letter-strategy"] = "at-least-once"
+				}
+				// at-least-once requires x-overflow=reject-publish (decision 52 /
+				// RMQ-05). The broker accepts any overflow silently (gate G4) but
+				// does not honour at-least-once otherwise, so fill the default when
+				// the caller left it unset. A conflicting explicit value was already
+				// rejected by validate(). The coupling applies only to the
+				// at-least-once strategy — a caller override (e.g. at-most-once)
+				// opts out.
+				effectiveALO := !hasStrategy
+				if s, ok := strategyVal.(string); ok && s == "at-least-once" {
+					effectiveALO = true
+				}
+				if effectiveALO {
+					if _, hasOverflow := q.Args["x-overflow"]; !hasOverflow {
+						q.Args["x-overflow"] = string(OverflowRejectPublish)
+					}
 				}
 			}
 		}
@@ -843,6 +953,18 @@ func (t *Topology) validate() error {
 			if q.AutoDelete {
 				return fmt.Errorf("%w: Queue %q: AutoDelete is not supported on stream queues", ErrInvalidOptions, q.Name)
 			}
+		}
+
+		// at-least-once ⇒ reject-publish coupling (T76 / RMQ-05 / decision 52).
+		// A quorum queue running the at-least-once dead-letter strategy must pair
+		// with x-overflow=reject-publish. The broker silently accepts any overflow
+		// (gate G4 + T76 probe), so reject a conflicting explicit value here;
+		// expand() fills reject-publish when overflow is left unset.
+		if atLeastOnce, overflow, overflowSet := t.quorumAtLeastOnce(q); atLeastOnce && overflowSet && overflow != string(OverflowRejectPublish) {
+			return fmt.Errorf("%w: Queue %q: the at-least-once dead-letter strategy requires x-overflow=%q, "+
+				"but x-overflow=%q is set — RabbitMQ accepts the mismatch but does not honour at-least-once "+
+				"(set Overflow=OverflowRejectPublish, or override x-dead-letter-strategy to opt out)",
+				ErrInvalidOptions, q.Name, OverflowRejectPublish, overflow)
 		}
 	}
 
