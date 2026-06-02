@@ -466,6 +466,48 @@ ships in v0.2. The "Reliability bar" applies to the v0.1 surface
 (classic + quorum); stream v0.2 will publish updated success
 criteria.
 
+**Version divergence (RabbitMQ 3.13 ↔ 4.x).** The library targets both,
+and most behaviour is identical, but a few load-bearing differences are
+documented at their point of use (frame/message-size defaults, §6.1;
+classic mirrored queues removed, §6.2; `rabbitmqadmin` v2 rewrite, §9).
+Three more cluster/metadata caveats:
+
+- **Khepri metadata store — declares are Raft-quorum operations
+  (RMQ-17).** RabbitMQ's metadata store moved from Mnesia to **Khepri**:
+  Khepri is opt-in (a feature flag) on **3.13** and the **default on
+  4.0+** (Mnesia is being phased out). Under Khepri, topology operations
+  — `queue.declare`, `exchange.declare`, bindings, and deletes — are
+  **Raft-quorum commits across the cluster's metadata Raft group**, not
+  local transactions. So a declare can **block or fail when the cluster
+  has no metadata quorum** (a minority-partition node, or a rolling
+  restart that has lost quorum), surfacing as a stalled `queue.declare`
+  rather than an instant success. This is exactly the half-alive-broker
+  case the reconnect barrier caps via `WithReconnectBarrierTimeout`
+  (§6.1): the redeclare step is where a Khepri quorum stall bites, and
+  the cap converts it to a force-reconnect instead of an unbounded hang.
+  On a single node both stores behave the same; the divergence only
+  appears under partition/cluster conditions.
+
+- **Transient (non-durable) queues are a deprecated feature (RMQ-21).**
+  Non-durable classic queues are on RabbitMQ's **deprecated-features**
+  list (announced for 3.13, discouraged on 4.x) — durable queues are the
+  recommended default, and a transient queue is dropped on broker
+  restart, which violates the §1 reliability bar. warren declares queues
+  **durable by default** (§6.6), so the default path is unaffected; this
+  note is a caveat for callers who explicitly set a queue non-durable.
+  (Distinct from message-level `DeliveryModeTransient` in §6.5, which is
+  about per-message persistence, not queue durability.)
+
+- **Mixed-version clusters are an upgrade window, not a steady state
+  (RMQ-23).** A cluster running both 3.13 and 4.x nodes is supported
+  **only transiently during a rolling upgrade**. Feature-flag and
+  Mnesia→Khepri metadata migration require all nodes on a compatible
+  version, and mid-upgrade the node a connection lands on (via `WithAddrs`
+  rotation) can answer with version-specific behaviour — e.g. a 16 MiB
+  vs 128 MiB `max_message_size` default (§6.1), or Khepri-quorum vs
+  Mnesia-local declares (above). Complete the rolling upgrade promptly
+  and do not rely on uniform broker behaviour while it is in progress.
+
 ### 6.1 Connection
 
 ```go
@@ -1017,8 +1059,16 @@ Semantics:
   broker → publisher means "the broker took responsibility" (queued
   for routing). It does *not* guarantee the message is persisted to
   disk on every queue's replica before a broker crash; users
-  publishing to mirrored / quorum queues should still treat their
-  consumers as idempotent (dedupe by `MessageID`).
+  publishing to replicated queues should still treat their consumers
+  as idempotent (dedupe by `MessageID`). **Use quorum queues for
+  replication.** Classic **mirrored** queues (the `ha-mode` /
+  `x-ha-policy` mechanism) are **deprecated in RabbitMQ 3.13 and
+  removed in 4.0** — a `ha-*` policy is a no-op on 4.x — so a topology
+  that relied on mirroring for durability silently loses its second
+  replica after a 3.13→4.x upgrade. Quorum queues (Raft-replicated;
+  §6.6) are the supported replication primitive on both versions, and
+  the confirm-after-majority-commit semantics there are exactly why
+  the dedupe advice above still holds.
 - `PublishBatch` pipelines all N publishes on a **single channel**
   (preserving input order per RabbitMQ's per-channel ordering
   guarantee), waits up to `ConfirmTimeout` for the batch's confirms
@@ -2488,10 +2538,27 @@ nothing (see `AMQPCode`).
     AMQP body, `datacontenttype` maps to the AMQP **content-type
     property**, and every other context attribute (and extension) maps
     to an AMQP header prefixed **`cloudEvents:`** (the official Go SDK
-    default; RabbitMQ bridges 0-9-1 headers ⇄ AMQP 1.0
-    application-properties, so a non-Go AMQP-1.0 CloudEvents client
-    interoperates). `ContentType()` returns `""` because the per-event
+    default). `ContentType()` returns `""` because the per-event
     content type is supplied dynamically by `EncodeWithHeaders`.
+
+    **AMQP 0-9-1 ⇄ 1.0 bridge (version note).** warren publishes over
+    AMQP **0-9-1** (`amqp091-go`), so the `cloudEvents:` attributes
+    travel as 0-9-1 message headers. RabbitMQ bridges those headers
+    one-to-one to AMQP **1.0** application-properties of the **identical
+    name**, so a consumer on native AMQP 1.0 reads warren's attributes
+    unchanged — and vice versa. The version caveat is *how* the broker
+    speaks AMQP 1.0, not whether the mapping holds: native AMQP 1.0 is a
+    **core protocol in RabbitMQ 4.0**, whereas on **3.13** it is the
+    opt-in `rabbitmq_amqp1_0` plugin. The header ⇄ application-property
+    name mapping is the same on both, so binary-mode CloudEvents interop
+    is version-independent once AMQP 1.0 is available. The contract is
+    pinned from the foreign (AMQP-1.0) side — property names, the
+    `[]byte` longstr form the bridge delivers, and both CloudEvents spec
+    versions (1.0 and 0.3) — by a round-trip interop test
+    (`codec/cloudevents_amqp_bridge_interop_test.go`). For
+    type-preserving cross-language interop where attributes are not
+    flattened to strings, prefer `NewCloudEventsStructured()` (the full
+    JSON envelope travels in the body, independent of any header bridge).
 
   **Header-aware codecs (`HeaderCodec`).** A codec whose wire format
   spans the body, AMQP headers, and the content-type property
@@ -3156,8 +3223,16 @@ Coverage and tooling:
       `ErrPreconditionFailed`, etc.) and parseable via `AMQPCode(err)`.
 - [ ] `Message[M].ContentType` and `ContentEncoding` populate the
       correct AMQP `basic.properties` fields (not swapped); verified by
-      a round-trip test asserting the broker-side values via
-      `rabbitmqadmin get`.
+      a round-trip test asserting the broker-side values via the
+      **management HTTP API** (`GET /api/queues/<vhost>/<queue>/get`),
+      not the `rabbitmqadmin` CLI. `rabbitmqadmin` was rewritten for
+      RabbitMQ 4.0 (v2): the binary, its subcommand grammar, and its
+      output format all changed and are **not** compatible with the
+      3.13 v1 CLI, so a test shelling out to `rabbitmqadmin` would pass
+      on one broker version and break on the other. The management HTTP
+      API (the same endpoints `AMQP_TEST_MANAGEMENT_URL` already drives)
+      is the version-stable interface across 3.13 and 4.x and is what
+      every broker-side assertion in the test suite uses.
 
 Operational invariants (Rev 6):
 - [ ] **`ConfirmTimeout` default is 30s**; `Publisher` with
@@ -3898,3 +3973,20 @@ observations downstream tasks cite:
   accepted on 3.13.7, rejected on 4.0.9).
 - **G6 (→T78):** a non-zero per-consumer `prefetch_size` is **rejected** (540
   `NOT_IMPLEMENTED`) on both versions, not silently ignored.
+
+**Version-divergence documentation (T81, RMQ-17/19/21/23/30/31).** Added the
+broker-version caveats that span sections: a **"Version divergence (3.13 ↔ 4.x)"**
+subsection in the "AMQP 0-9-1 vs RabbitMQ" note (Khepri metadata store — declares
+are Raft-quorum commits that can stall/fail without metadata quorum, capped by the
+reconnect barrier; transient non-durable queues are a deprecated feature, warren
+defaults durable; mixed-version clusters are an upgrade window, not a steady
+state); the **classic mirrored-queue** removal in 4.0 in §6.2 (use quorum queues
+for replication); the **CloudEvents AMQP 0-9-1 ⇄ 1.0 bridge** version note in §6.9
+(native AMQP 1.0 is core in 4.0, the `rabbitmq_amqp1_0` plugin on 3.13; the header
+⇄ application-property name mapping is identical, pinned by a round-trip interop
+test `codec/cloudevents_amqp_bridge_interop_test.go` across both CloudEvents spec
+versions); and pinned §9's `basic.properties` round-trip verification to the
+**management HTTP API** rather than the `rabbitmqadmin` CLI (rewritten as an
+incompatible v2 in 4.0). The Lens-10 (TV-05/11) broker-matrix verification of the
+quorum default `x-delivery-limit` and classic-queue ignore behaviour rides the
+RabbitMQ 3.13+4.x integration matrix (T151) and is tracked there, not in T81.
