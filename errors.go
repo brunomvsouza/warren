@@ -46,7 +46,9 @@ var (
 	ErrConfirmTimeout = errors.New("warren: publisher confirm timeout")
 	// ErrUnroutable is returned when a mandatory publish has no matching binding (basic.return received).
 	ErrUnroutable = errors.New("warren: mandatory publish was returned")
-	// ErrPublishNacked is returned when the broker sends basic.nack (e.g. overflow=reject-publish, disk alarm).
+	// ErrPublishNacked is returned when the broker sends basic.nack (e.g. overflow=reject-publish or
+	// reject-publish-dlx). A disk/memory alarm does NOT nack — it raises connection.blocked, surfaced as
+	// ErrConnectionBlocked, not ErrPublishNacked.
 	ErrPublishNacked = errors.New("warren: broker nacked publish")
 	// ErrPartialBatch is returned when one or more messages in a PublishBatch fail.
 	ErrPartialBatch = errors.New("warren: batch publish partially failed")

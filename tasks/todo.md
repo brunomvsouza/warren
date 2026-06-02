@@ -1623,15 +1623,21 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 - **Deps:** T13. **(RMQ-15, P1)**
 - **Done:** Added a `p.mandatory`-scoped duplicate-explicit-`MessageID` check in `PublishBatch` (after the `ErrBatchTooLarge` cap, before broker work): a collision returns `fmt.Errorf("%w: ...", ErrInvalidMessage)` with `results == nil`. Empty IDs skip the check (auto-stamped UUIDv7 is unique); non-mandatory batches are exempt (no `basic.return` correlation map to corrupt). Replaced the documented-trap paragraph in `PublishBatch`'s godoc with the enforcement contract. Tests in `publisher_batch_test.go`: `TestPublishBatch_Mandatory_DuplicateExplicitMessageID_Rejected` (nil results, no broker publishes), `_Mandatory_AutoStampedIDs_Pass`, `_NonMandatory_DuplicateExplicitMessageID_Allowed`. SPEC §6.2 mandatory-batch bullet + decision 14 updated. Unit-only change (client-side validation, no broker probe needed); `go build`, `go test -race ./...`, `make lint` (0 issues) all green.
 
-### [ ] T78 — SPEC↔implementation reconciliation (no behaviour change) (RMQ-02/03/04/14) [P1] · S
+### [x] T78 — SPEC↔implementation reconciliation (no behaviour change) (RMQ-02/03/04/14) [P1] · S
 - **Acceptance:**
-  - [ ] SPEC §6.8 IsTransient godoc + PublishRetry trigger list mark **311 permanent** (matches `errors.go:248`).
-  - [ ] SPEC §6.3 says `DeathCount` is the **sum of the `count` sub-field** (matches `xdeath.go:77-88`).
-  - [ ] SPEC §6.2 + decision 20 + the `errors.go:38` comment say a disk/memory alarm surfaces `ErrConnectionBlocked`, **not** `ErrPublishNacked`.
-  - [ ] SPEC §6/§6.3 state `PrefetchBytes` is dropped client-side and the broker **rejects** non-zero `prefetch_size` (the code already sends 0 at `consumer.go:367`).
+  - [x] SPEC §6.8 IsTransient godoc + PublishRetry trigger list mark **311 permanent** (matches `errors.go` `IsPermanent`).
+  - [x] SPEC §6.3 says `DeathCount` is the **sum of the `count` sub-field** (matches `internal/headers/xdeath.go:109-113`).
+  - [x] SPEC §6.2 + decision 20 + the `errors.go` `ErrPublishNacked` comment say a disk/memory alarm surfaces `ErrConnectionBlocked`, **not** `ErrPublishNacked`.
+  - [x] SPEC §6/§6.3 state `PrefetchBytes` is dropped client-side and the broker **rejects** non-zero `prefetch_size` (the code already sends 0 at `consumer.go:1378`, `batch_consumer.go:682`, `rpc.go:237`).
 - **Verify:** Guard unit tests: 311 `IsPermanent` (confirm existing); a test asserting the `Qos` size arg is 0.
-- **Files:** SPEC §6.2/§6.3/§6.8, `errors.go` (comment), `consumer_test.go`.
+- **Files:** SPEC §6.2/§6.3/§6.8, `errors.go` (comment), `rpc_caller_test.go`.
 - **Deps:** —. **(RMQ-02/03/04/14, P1)**
+- **Done:** No behaviour change — code was already correct on all four points; this task aligned SPEC + comments to the code and added guards.
+  - **311 permanent:** SPEC's PublishRetry trigger list (§6.2) and `IsTransient` godoc (§6.8) listed `311` as transient; both corrected to `320/504/541`, and the §6.8 godoc now carries the "311 NOT transient → permanent" note matching `errors.go`. Guard tests already exist: `errors_test.go` asserts `ErrContentTooLarge` (311) is `IsPermanent==true` and `IsTransient==false`.
+  - **DeathCount sums the `count` sub-field:** clarified the §6.3 signature comment, the Counter-A prose, and decision 34 — it sums each x-death entry's `count` sub-field (not the number of entries), matching `internal/headers/xdeath.go:109-113` (`result.Count += int(count)`).
+  - **Disk/memory alarm → `ErrConnectionBlocked`:** removed the incorrect "disk/memory alarm → `basic.nack`" attribution from §6.2, decision 20, the SPEC `ErrPublishNacked` godoc, and the `errors.go` comment. An alarm raises `connection.blocked` (→ `ErrConnectionBlocked`); only overflow policies nack. `errors.go` `ErrConnectionBlocked` was already correct. (Aligned docs to already-correct code; the `connection.blocked`-on-resource-alarm behaviour is canonical RabbitMQ — no destructive broker-wide alarm probe run on the shared dev broker.)
+  - **PrefetchBytes dropped client-side / broker rejects non-zero `prefetch_size`:** §6.3 said RabbitMQ "ignores" a non-zero `prefetch_size`; gate G6 shows it is **rejected** (`540 NOT_IMPLEMENTED`) on both 3.13 and 4.x. Corrected the §6.3 feature note, the `PrefetchBytes` signature comment, and the decision note to state the library drops it client-side and always sends `prefetch_size=0`. New guard `TestCaller_Qos_PrefetchSizeAlwaysZero` + extended `TestCaller_Call_ExclusiveReplyQueue_DeclaresQueueAndAppliesQos` assert the production `ch.Qos(..., 0, ...)` size arg is 0 (the RPC caller path is the available unit seam; the consumer/batch paths cast directly to `*amqp091.Channel` and are covered by integration gate G6).
+  - Verified: `go build ./...` OK; `go test -race ./...` all green; `make lint` 0 issues. README unchanged (public surface unchanged — no new option/error/codec).
 
 ### [ ] T79 — Reply-code channel/connection scope annotation (RMQ-18) [P2] · XS
 - **Acceptance:**

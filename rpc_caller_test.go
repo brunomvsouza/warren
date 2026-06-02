@@ -34,6 +34,7 @@ type fakeCallerChannel struct {
 	echo          bool          // when true, every publish produces a matching reply
 	publishSignal chan struct{} // non-blocking notification per publish (nil = ignored)
 	qosPrefetch   int           // records the last basic.qos prefetch count
+	qosSize       int           // records the last basic.qos prefetch_size (bytes); must stay 0 (T78/G6)
 	qosCalled     bool          // records whether Qos was invoked at all
 }
 
@@ -88,18 +89,19 @@ func (f *fakeCallerChannel) QueueDeclare(_ string, _, _, _, _ bool, _ amqp091.Ta
 	return amqp091.Queue{Name: "reply-q-fake"}, nil
 }
 
-func (f *fakeCallerChannel) Qos(prefetch, _ int, _ bool) error {
+func (f *fakeCallerChannel) Qos(prefetch, size int, _ bool) error {
 	f.mu.Lock()
 	f.qosPrefetch = prefetch
+	f.qosSize = size
 	f.qosCalled = true
 	f.mu.Unlock()
 	return nil
 }
 
-func (f *fakeCallerChannel) snapshotQos() (prefetch int, called bool) {
+func (f *fakeCallerChannel) snapshotQos() (prefetch, size int, called bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.qosPrefetch, f.qosCalled
+	return f.qosPrefetch, f.qosSize, f.qosCalled
 }
 
 func (f *fakeCallerChannel) NotifyClose(c chan *amqp091.Error) chan *amqp091.Error { return c }
@@ -376,13 +378,41 @@ func TestCaller_Call_ExclusiveReplyQueue_DeclaresQueueAndAppliesQos(t *testing.T
 	assert.Equal(t, "reply-q-fake", cons[0].queue, "exclusive mode consumes the declared queue")
 	assert.False(t, cons[0].autoAck, "an exclusive reply queue uses regular acks")
 
-	prefetch, called := fake.snapshotQos()
+	prefetch, size, called := fake.snapshotQos()
 	assert.True(t, called, "basic.qos must be applied in exclusive mode")
 	assert.Equal(t, 10, prefetch, "the configured Prefetch must be passed to basic.qos")
+	assert.Equal(t, 0, size, "basic.qos prefetch_size (bytes) must always be 0 (RabbitMQ rejects non-zero with 540, G6/T78)")
 
 	pubs := fake.snapshotPublished()
 	require.Len(t, pubs, 1)
 	assert.Equal(t, "reply-q-fake", pubs[0].ReplyTo, "ReplyTo must be the declared queue, not amq.rabbitmq.reply-to")
+}
+
+// TestCaller_Qos_PrefetchSizeAlwaysZero is the T78/RMQ-04 guard: warren never
+// sends a non-zero AMQP basic.qos prefetch_size (bytes). RabbitMQ rejects a
+// non-zero per-consumer prefetch_size with 540 NOT_IMPLEMENTED on both 3.13 and
+// 4.x (gate G6), so PrefetchBytes is dropped client-side and every Qos call must
+// pass size=0. This locks the behaviour regardless of the configured Prefetch.
+func TestCaller_Qos_PrefetchSizeAlwaysZero(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	fake := newFakeCallerChannel(true /* echo */)
+	c := &Caller[echoPayload, echoPayload]{
+		codec:             codec.NewJSON(),
+		routingKey:        "rpc.requests",
+		useExclusiveQueue: true,
+		prefetch:          250,
+		newChannel:        func() (callerChannel, error) { return fake, nil },
+	}
+	defer c.Close(context.Background()) //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := c.Call(ctx, echoPayload{N: 1})
+	require.NoError(t, err)
+
+	_, size, called := fake.snapshotQos()
+	require.True(t, called, "basic.qos must be applied in exclusive mode")
+	assert.Equal(t, 0, size, "prefetch_size must be 0; a non-zero value is rejected by RabbitMQ (540, G6)")
 }
 
 // TestCallerBuilder_OptionsAreLastWins asserts the last-wins option policy that

@@ -444,8 +444,12 @@ implement them:
 - `basic.consume` `no-local` flag — silently ignored by RabbitMQ.
 
 **Spec features exposed with a RabbitMQ-specific note:**
-- `basic.qos` `prefetch-size` (bytes) — RabbitMQ ignores this; we
-  expose `PrefetchBytes` for protocol parity, marked as no-op.
+- `basic.qos` `prefetch-size` (bytes) — RabbitMQ does not merely
+  ignore a non-zero value: it **rejects** a non-zero per-consumer
+  `prefetch_size` with `540 NOT_IMPLEMENTED` on both 3.13 and 4.x
+  (gate G6). The library therefore drops `PrefetchBytes` client-side
+  and always sends `prefetch_size=0` on `basic.qos`; the option is
+  kept for protocol parity as a no-op.
 - `basic.qos` `global` flag — RabbitMQ applies it per-channel rather
   than per-connection as the AMQP 0-9-1 spec says. Exposed as
   `ChannelQoS` to reflect the actual semantics.
@@ -938,13 +942,16 @@ Semantics:
 - `Publish` with `Mandatory()` + unroutable → `ErrUnroutable` (the
   `OnReturn` handler also fires, if set).
 - **`basic.nack` from broker → `ErrPublishNacked`.** When a queue's
-  overflow policy is `reject-publish` or `reject-publish-dlx`, or
-  the broker raises a disk/memory alarm mid-publish, RabbitMQ sends
-  `basic.nack` on the publisher channel. The confirm tracker
+  overflow policy is `reject-publish` or `reject-publish-dlx`, RabbitMQ
+  sends `basic.nack` on the publisher channel. The confirm tracker
   resolves the matching `delivery-tag` with `ErrPublishNacked`
   (classified `ErrTransient`). For `reject-publish-dlx`, the broker
   also dead-letters the message; the publisher caller still sees
   `ErrPublishNacked` so the application can re-publish or back off.
+  A disk/memory alarm does **not** nack — RabbitMQ raises
+  `connection.blocked` and stops reading from the publishing socket,
+  which the library surfaces as `ErrConnectionBlocked` (see below and
+  decision 20), not `ErrPublishNacked`.
 - **`multiple=true` resolution.** Batching against RabbitMQ is efficient at the
   wire level: the broker coalesces many confirms into one `basic.ack`/`basic.nack`
   frame with `multiple=true`. **In the current wiring the confirm tracker never
@@ -1093,9 +1100,10 @@ Semantics:
   publishes that fail with an `errors.Is(err, ErrTransient)` error
   (`ErrPublishNacked`, `ErrChannelPoolExhausted`,
   `ErrConnectionBlocked`, `ErrConfirmTimeout`, `ErrChannelClosed`,
-  network errors during reconnect window, AMQP codes 311/320/504/541).
-  Permanent errors (`ErrUnroutable`, `ErrInvalidMessage`, AMQP 4xx/5xx
-  permanent codes) are never retried — the policy is for transient
+  network errors during reconnect window, AMQP codes 320/504/541).
+  Permanent errors (`ErrUnroutable`, `ErrInvalidMessage`, AMQP code 311
+  `CONTENT_TOO_LARGE`, other AMQP 4xx/5xx permanent codes) are never
+  retried — the policy is for transient
   broker conditions, not for re-routing decisions. Default: no retry
   (zero value of `RetryPolicy` short-circuits). When retry is active,
   each attempt honours `PublishTimeout` independently, and the caller
@@ -1272,7 +1280,7 @@ func (d *Delivery[M]) Body() *M
 func (d *Delivery[M]) Headers() Headers
 func (d *Delivery[M]) Redelivered() bool
 func (d *Delivery[M]) DeliveryTag() uint64
-func (d *Delivery[M]) DeathCount() int                  // sum of x-death entries with reason ∈ {rejected, delivery-limit}
+func (d *Delivery[M]) DeathCount() int                  // sum of the `count` sub-field of x-death entries with reason ∈ {rejected, delivery-limit}
 func (d *Delivery[M]) DeathCountByReason(r string) int  // count for a specific reason ("rejected", "expired", "maxlen", "delivery-limit")
 func (d *Delivery[M]) DeathReasons() []string           // unique reasons present in x-death (in declaration order)
 func (d *Delivery[M]) MessageID() string
@@ -1349,7 +1357,7 @@ func (b *ConsumerBuilder[M]) Queue(name string) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) Tag(consumerTag string) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) Concurrency(n uint) *ConsumerBuilder[M]
 func (b *ConsumerBuilder[M]) Prefetch(count uint16) *ConsumerBuilder[M]
-func (b *ConsumerBuilder[M]) PrefetchBytes(bytes uint) *ConsumerBuilder[M] // no-op on RabbitMQ; preserved for protocol parity
+func (b *ConsumerBuilder[M]) PrefetchBytes(bytes uint) *ConsumerBuilder[M] // no-op: RabbitMQ rejects a non-zero prefetch_size (540); dropped client-side, always sends 0
 func (b *ConsumerBuilder[M]) MaxInFlightBytes(n int64) *ConsumerBuilder[M] // local memory guardrail; caps sum of in-flight body sizes; n<=0 disables
 func (b *ConsumerBuilder[M]) WithQueueDepthSampler(interval time.Duration) *ConsumerBuilder[M] // poll queue + "<queue>.dlq" depth via declare-passive; exports queue_depth{queue} and dlq_depth{dlq}; interval<=0 disables; interval<100ms clamped to 100ms; backs off (cap 30s) while a whole sample fails; series removed when the consumer stops
 func (b *ConsumerBuilder[M]) ChannelQoS() *ConsumerBuilder[M]              // RabbitMQ: apply QoS per channel, not per consumer
@@ -1507,8 +1515,10 @@ on dead-letter events (TTL expiry, length limit,
 `Nack(requeue=true)`. The consumer:
 
 1. **Counter A — cross-process, via `x-death`.** Reads
-   `DeathCount()` (which sums `x-death` entries with
-   `reason ∈ {rejected, delivery-limit}` for the current queue —
+   `DeathCount()` (which sums the `count` sub-field of `x-death`
+   entries with `reason ∈ {rejected, delivery-limit}` for the
+   current queue — each entry carries its own accumulated `count`,
+   not one-per-entry —
    `expired` and `maxlen` reasons are NOT counted as redelivery
    evidence, because they reflect broker-side TTL/length policies
    rather than handler-driven rejection) and short-circuits to
@@ -2272,7 +2282,7 @@ var (
     // Publisher
     ErrConfirmTimeout = errors.New("warren: publisher confirm timeout")
     ErrUnroutable    = errors.New("warren: mandatory publish was returned")
-    ErrPublishNacked = errors.New("warren: broker nacked publish")         // basic.nack from broker (e.g. overflow=reject-publish, disk alarm mid-publish)
+    ErrPublishNacked = errors.New("warren: broker nacked publish")         // basic.nack from broker (e.g. overflow=reject-publish / reject-publish-dlx); NOT disk/memory alarms — those raise connection.blocked → ErrConnectionBlocked
     ErrPartialBatch  = errors.New("warren: batch publish partially failed")
     ErrBatchTooLarge   = errors.New("warren: PublishBatch exceeds max in-flight budget")
     ErrMessageTooLarge = errors.New("warren: message body exceeds MaxMessageSizeBytes") // local guard; permanent
@@ -2346,7 +2356,11 @@ func AMQPCode(err error) (code uint16, ok bool)
 // True for: ErrTransient wraps; network errors during reconnect window;
 // ErrChannelPoolExhausted; ErrPublishNacked (the broker may stop nacking
 // once the alarm clears); ErrConnectionBlocked; ErrConfirmTimeout;
-// ErrChannelClosed; ErrReconnecting; ErrRateLimited; AMQP codes 311, 320, 504, 541.
+// ErrChannelClosed; ErrReconnecting; ErrRateLimited; AMQP codes 320, 504, 541.
+//
+// Note on ErrContentTooLarge (311): NOT transient. A payload that exceeds
+// frame-max will fail on every retry unchanged — retrying it burns connections
+// without any chance of success. 311 is classified permanent (IsPermanent).
 //
 // Note on 506 (ErrResourceError): NOT classified as transient by
 // default. "Resource error" covers both transient conditions (disk
@@ -3245,7 +3259,9 @@ the next reader so the rationale survives the conversation:
     - **Renamed:** `GlobalQoS()` → `ChannelQoS()` to reflect
       RabbitMQ's per-channel semantics.
     - **Kept with explicit no-op note:** `PrefetchBytes()` (RabbitMQ
-      honours only `prefetch-count`).
+      honours only `prefetch-count`; a non-zero `prefetch_size` is
+      rejected with `540 NOT_IMPLEMENTED`, so it is dropped client-side
+      and `basic.qos` always carries `prefetch_size=0` — G6/T78).
     - **Added:** `Message[M].ContentType` separated from
       `ContentEncoding`; `Exchange/Queue/Binding.NoWait`;
       `Queue.Type` (`x-queue-type`); `DeadLetter.MaxLengthBytes` +
@@ -3362,11 +3378,14 @@ the next reader so the rationale survives the conversation:
 
 20. **`basic.nack` from the broker is a distinct sentinel,
     `ErrPublishNacked`.** Overflow policies (`reject-publish`,
-    `reject-publish-dlx`) and mid-publish disk/memory alarms cause
-    the broker to nack the publisher channel. Earlier wording
-    folded this into `ErrConfirmTimeout` or success; it is now an
-    explicit, classifiable transient error. `IsTransient(err) ==
-    true` for `ErrPublishNacked`.
+    `reject-publish-dlx`) cause the broker to nack the publisher
+    channel. Earlier wording folded this into `ErrConfirmTimeout`
+    or success; it is now an explicit, classifiable transient error.
+    `IsTransient(err) == true` for `ErrPublishNacked`. A disk/memory
+    alarm does **not** produce a nack — RabbitMQ raises
+    `connection.blocked` and the library surfaces it as the separate
+    `ErrConnectionBlocked` sentinel (also transient); do not conflate
+    the two.
 
 21. **Consumers automatically re-subscribe after reconnect.**
     `Topology.AttachTo` redeclares topology; the consumer connection
@@ -3485,8 +3504,10 @@ the Rev 5 surface still left invisible to a non-specialist user.
     whose queue has no DLX, so drops are observable even when
     `OnError` is not wired.
 
-34. **`x-death` parser filters by reason.** `DeathCount()` sums
-    entries with `reason ∈ {rejected, delivery-limit}` only;
+34. **`x-death` parser filters by reason.** `DeathCount()` sums the
+    `count` sub-field of entries with `reason ∈ {rejected, delivery-limit}`
+    only (each x-death entry accumulates its own `count`, so the total
+    is the sum of those sub-fields, not the number of entries);
     `expired` and `maxlen` reasons reflect broker policy rather
     than handler-driven rejection and would falsely trigger
     `MaxRedeliveries` on innocently-aged messages. New methods
