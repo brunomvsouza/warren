@@ -1012,7 +1012,16 @@ Semantics:
   `ErrUnroutable` in their result slot (via the `MessageID`-based
   return correlation described above); routable messages succeed
   independently. `OnReturn` fires for each returned message, before
-  the corresponding slot is resolved.
+  the corresponding slot is resolved. Because the correlation keys on
+  `MessageID`, a mandatory batch carrying **duplicate explicit
+  `MessageID`s** is rejected with `ErrInvalidMessage` **before any
+  broker work** (no message is published): two messages sharing an ID
+  would make the second overwrite the first in the return-correlation
+  map and mis-attribute `ErrUnroutable`. Empty `MessageID`s are
+  auto-stamped with a unique UUIDv7, so only caller-supplied IDs can
+  collide; the check is scoped to `Mandatory()` publishers (a
+  non-mandatory batch receives no `basic.return` frames, so duplicate
+  IDs are allowed).
 - **Channel-close mid-batch recovery contract.** If the channel
   dies between `basic.publish` and confirm receipt for some
   subset of the batch, each affected `PublishResult.Err` is
@@ -3299,7 +3308,13 @@ the next reader so the rationale survives the conversation:
     each batch publish; the return goroutine looks up and removes the
     entry on each `basic.return`. `Message.MessageID` is
     auto-populated (UUIDv7) when left empty, so every message always
-    has a unique key without caller effort.
+    has a unique key without caller effort. A caller who supplies
+    explicit `MessageID`s, however, can collide them; since a
+    duplicate would corrupt this map, a `Mandatory()` `PublishBatch`
+    with duplicate explicit `MessageID`s is rejected up front with
+    `ErrInvalidMessage` before any publish (T77/RMQ-15). Auto-stamped
+    (empty) IDs are always unique and pass; the check does not apply
+    to non-mandatory batches.
 
 15. **`NoWait=true` on topology declares disables synchronous
     mismatch detection.** A mismatch with `NoWait=true` surfaces only
