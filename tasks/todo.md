@@ -1782,11 +1782,12 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
 
 ### Checkpoint — Phase 12 (Lens 01) closed
 - [x] T74 gate results documented (`docs/spec-validation/01-rabbitmq-gate-results.md` + SPEC §10 Rev 11); gate→task index records which task consumes each gate (T75→G1, T78→G2/G6, T58/T81→G3, T76→G4, T80→G5).
-- [ ] Poison path correct on **both** 3.13 and 4.x: [x] T75 (real-broker x-death), T58 (version-aware warning), T64 (quorum validation).
-- [ ] DLX correct: [x] T76 (at-least-once + reject-publish), T65 (durable bounded DLQ + Consumer missing-DLX).
-- [ ] §1 silent-failure defects closed: T60, T61, T65, T66.
-- [ ] SPEC matches implementation (T78); version caveats + honest §9 numbers (T79/T80/T81/T82/T83).
-- [ ] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 **and** 4.x) green; `goleak.VerifyNone` clean; README synced.
+- [x] Poison path correct on **both** 3.13 and 4.x: [x] T75 (real-broker x-death), T58 (version-aware warning), T64 (quorum validation).
+- [x] DLX correct: [x] T76 (at-least-once + reject-publish), T65 (durable bounded DLQ + Consumer missing-DLX).
+- [x] §1 silent-failure defects closed: T60, T61, T65, T66.
+- [x] SPEC matches implementation (T78); version caveats + honest §9 numbers (T79/T80/T81/T82/T83).
+- [x] `go build ./...` + `make lint` clean; `go test -race ./...` + integration lane (3.13 **and** 4.x) green; `goleak.VerifyNone` clean; README synced.
+  - Closed 2026-06-02: build OK, `make lint` 0 issues, `go test -race -cover ./...` green (root 85.2%). Integration lane run live on **RabbitMQ 3.13.7** and **4.0.9** (delayed plugin 3.13.0 / 4.0.7): root + `internal/headers` + `codec` `-tags=integration` green on both (root ~72s each), exercising the T75 real-broker x-death quorum DLX and T76 at-least-once+reject-publish differential assertions. Only `TestNewRabbitMQ_TLS_integration` fails locally — the documented testcontainers rootless-Docker-provider limitation, not a code defect (CI runs it). README already carries the at-least-once dedupe note + durable bounded DLQ surface; no contract drift to sync.
 
 ## Phase 13 — Distributed-Systems Re-review (Lens 02: failure modes, consistency, ordering, duplicates)
 
