@@ -100,10 +100,22 @@ func TestDeliveryDoubleVerdict_lateAckAfterTimeout_channelSurvives_integration(t
 		t.Fatal("timed out waiting for the late ack on the first message")
 	}
 
-	// The late ack must be the no-op sentinel — not a successful second frame.
+	// The resolved-once CAS guarantees exactly one wire frame, but the WINNER is
+	// an acknowledged race (SPEC §6.3 "Double-verdict guard"): the handler observes
+	// only that hCtx fired (the deadline), not that nackOnTimeout has emitted yet, so
+	// the late d.Ack() and the timeout verdict race on the same CAS. Either outcome
+	// is correct and produces a single frame:
+	//   - timeout won the CAS  → late Ack loses → ErrAlreadyResolved
+	//   - late Ack won the CAS → it emitted the one frame → nil
+	// What must NEVER happen is a second frame (which channel-closes with 406); that
+	// invariant is proven below by consuming the second message. Asserting a specific
+	// winner here over-specifies beyond the SPEC and flakes under load (the handler
+	// won the CAS ~1/3 of CI runs).
 	le := unboxErr(lateAckErr.Load())
-	assert.True(t, errors.Is(le, warren.ErrAlreadyResolved),
-		"late Ack after HandlerTimeout must return ErrAlreadyResolved, got %v", le)
+	if le != nil {
+		assert.True(t, errors.Is(le, warren.ErrAlreadyResolved),
+			"late Ack after HandlerTimeout must be nil (won the CAS) or ErrAlreadyResolved (lost it), got %v", le)
+	}
 
 	// Publish a second message: if the channel had closed with PRECONDITION_FAILED,
 	// the consumer would not receive it (until a resubscribe). Receiving it proves
