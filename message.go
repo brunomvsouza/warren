@@ -73,14 +73,18 @@ type Message[M any] struct {
 	// Any other Go type returns ErrInvalidMessage at publish time.
 	Headers Headers
 	// Priority is the AMQP basic.properties.priority octet (wire range 0–255).
-	// RabbitMQ priority queues use 0–9 by convention; values above the queue's
-	// x-max-priority are silently clamped by the broker. Priority on a
-	// non-priority queue has no effect.
+	// A priority queue's effective range is its x-max-priority (1–255; RabbitMQ
+	// recommends <=10); a Priority above that maximum is silently clamped down to
+	// it. Values 0–9 are the common convention, not a protocol limit. Priority on a
+	// non-priority queue has no effect, and quorum queues do not support priorities
+	// at all (x-max-priority is rejected on a quorum declare).
 	Priority  uint8
 	Timestamp time.Time
 	// Expiration is the per-message TTL. The publisher serialises it as ASCII
-	// milliseconds in the AMQP shortstr wire format. Sub-millisecond durations
-	// round to 0; the broker interprets "0" as "expire immediately".
+	// milliseconds in the AMQP shortstr wire format. The broker interprets "0" as
+	// "expire immediately", so a non-zero duration shorter than 1ms (which would
+	// round to "0") is rejected at publish time with ErrInvalidMessage; the minimum
+	// non-zero TTL is 1ms. A zero Expiration means "no per-message TTL".
 	Expiration time.Duration
 
 	// DeliveryMode controls AMQP delivery persistence. The zero value is

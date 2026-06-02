@@ -1720,13 +1720,36 @@ Gate T74 runs first. Per-task SPEC amendment lands in the same PR.
   `go test -race ./...` green, `/usr/bin/make lint` 0 issues. README unchanged (no
   public-surface change — doc + test only).
 
-### [ ] T82 — Contract-precision SPEC fixes (RMQ-24/25/26/27/28/29) [P3] · S
+### [x] T82 — Contract-precision SPEC fixes (RMQ-24/25/26/27/28/29) [P3] · S
 - **Acceptance:**
-  - [ ] decision-17 default-"1" staleness fixed; ack-vs-confirm wording (§6.2); sub-ms `Expiration`→`"0"` footgun documented (optionally reject `<1ms` non-zero, §6.5); Priority range + "quorum has no priority" (§6.5); exclusive-reply-queue redeclare-on-reconnect (§6.7); prefetch-16 reworded as guidance not a broker constant (§6.3).
-  - [ ] **Lens-02 (DS-07):** the §6.2 ack-vs-confirm wording is the **single source** for Phase 13 T88's queue-type confirm-semantics table — coordinate, do not duplicate or contradict.
+  - [x] decision-17 default-"1" staleness fixed; ack-vs-confirm wording (§6.2); sub-ms `Expiration`→`"0"` footgun documented (optionally reject `<1ms` non-zero, §6.5); Priority range + "quorum has no priority" (§6.5); exclusive-reply-queue redeclare-on-reconnect (§6.7); prefetch-16 reworded as guidance not a broker constant (§6.3).
+  - [x] **Lens-02 (DS-07):** the §6.2 ack-vs-confirm wording is the **single source** for Phase 13 T88's queue-type confirm-semantics table — coordinate, do not duplicate or contradict.
 - **Verify:** Doc review; if `<1ms` reject is implemented, a unit test asserts `ErrInvalidMessage`.
 - **Files:** SPEC §6.2/§6.3/§6.5/§6.7/§10, optionally `message.go` + `message_test.go`.
 - **Deps:** —. **(RMQ-24/25/26/27/28/29, P3)** — *coordinate with Phase 13 T88.*
+- **Done:** All six contract-precision fixes landed (SPEC §10 Rev 11 records them).
+  **Behaviour change (RMQ-26):** chose to **implement** the optional `<1ms`
+  `Expiration` reject rather than only document it — a non-zero TTL that serialises
+  to `"0"` (immediate expiry) silently means the opposite of the caller's intent, so
+  `encodeMsg` now returns `ErrInvalidMessage` for `0 < Expiration < 1ms` (mirrors the
+  symmetric `Delay` guard). **RED→GREEN test:** `message_test.go`
+  `TestPublisher_encodeMsg_RejectsSubMillisecondExpiration` + the `AllowsOneMillisecond`
+  / `AllowsZero` boundary cases. `message.go` Expiration/Priority godoc updated to
+  match. **Doc-only fixes:** RMQ-24 decision-17 default `1`→`2` (+ pointer to
+  decision 36 as authoritative); RMQ-25 §6.2 confirm meaning reworded to
+  queue-type-/persistence-dependent (durable+persistent ⇒ storage write, quorum ⇒
+  Raft majority-commit, transient ⇒ immediate) with an explicit hand-off of the full
+  table to **T88 (DS-07)** as single source — no duplication; RMQ-27 §6.5 Priority
+  range (`x-max-priority` 1–255, ≤10 recommended, 0–9 convention, clamp-down) +
+  "quorum has no priority"; RMQ-28 §6.7 exclusive reply queue is broker-deleted on
+  disconnect → `Caller` redeclares + re-`basic.consume` on reconnect; RMQ-29 §6.3
+  quorum prefetch-16 reworded as a throughput rule of thumb, not a broker-enforced
+  floor. Verified: `go build ./...` OK, `go test -race ./...` green,
+  `/usr/bin/make lint` 0 issues. README unchanged — `Expiration`/`Priority` and the
+  RPC reply-queue behaviour are not described in README's contract surface (no
+  "Available now/roadmap", options, errors, codecs, or examples row changed); the
+  new `ErrInvalidMessage` case is a tightening of an existing validation path, not a
+  new public symbol.
 
 ### [ ] T83 — §9 throughput-honesty wording (RMQ-11) [P2] · XS
 - **Acceptance:**
